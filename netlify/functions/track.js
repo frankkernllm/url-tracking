@@ -126,6 +126,20 @@ const handler = async (event, context) => {
     
     console.log('📊 Final tracking data:', JSON.stringify(trackingData, null, 2));
     
+    // Store conversion data for analytics (if it's a purchase)
+    if (isSpiffyWebhook) {
+      try {
+        await fetch('https://trackingojoy.netlify.app/.netlify/functions/analytics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(trackingData)
+        });
+        console.log('📊 Conversion stored for analytics');
+      } catch (analyticsError) {
+        console.log('⚠️ Analytics storage failed:', analyticsError.message);
+      }
+    }
+    
     return {
       statusCode: 200,
       headers: { 'Access-Control-Allow-Origin': '*' },
