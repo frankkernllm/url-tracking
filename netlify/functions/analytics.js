@@ -1,9 +1,9 @@
 // File: netlify/functions/analytics.js
-// Analytics API endpoint for dashboard
+// Enhanced Analytics API endpoint for dashboard (includes page views + conversions)
 
-// This would normally connect to a database
-// For now, we'll use the same in-memory store as attribution
+// In-memory storage for demo (use database in production)
 let conversionStore = new Map();
+let pageViewStore = new Map();
 
 const handler = async (event, context) => {
   // Handle CORS preflight
@@ -19,113 +19,167 @@ const handler = async (event, context) => {
   }
 
   if (event.httpMethod === 'GET') {
-    // Return analytics data
+    // Return analytics data including page views
     try {
-      const { start_date, end_date, source, campaign } = event.queryStringParameters || {};
+      const { start_date, end_date, source, campaign, type } = event.queryStringParameters || {};
       
-      // Get all stored conversions (in production, this would be from a database)
+      // Get all stored conversions
       const allConversions = Array.from(conversionStore.values())
         .filter(item => item.event_type === 'purchase')
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       
-      // Apply filters
-      let filteredConversions = allConversions;
+      // Get all stored page views
+      const allPageViews = Array.from(pageViewStore.values())
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       
-      if (start_date) {
-        const startDate = new Date(start_date);
-        filteredConversions = filteredConversions.filter(item => 
-          new Date(item.timestamp) >= startDate
-        );
-      }
+      // Apply filters to both datasets
+      let filteredConversions = applyFilters(allConversions, { start_date, end_date, source, campaign });
+      let filteredPageViews = applyFilters(allPageViews, { start_date, end_date, source, campaign });
       
-      if (end_date) {
-        const endDate = new Date(end_date);
-        endDate.setHours(23, 59, 59, 999);
-        filteredConversions = filteredConversions.filter(item => 
-          new Date(item.timestamp) <= endDate
-        );
-      }
-      
-      if (source) {
-        filteredConversions = filteredConversions.filter(item => 
-          item.source === source
-        );
-      }
-      
-      if (campaign) {
-        filteredConversions = filteredConversions.filter(item => 
-          item.campaign === campaign
-        );
-      }
-      
-      // Calculate analytics
+      // Calculate comprehensive analytics
       const totalConversions = filteredConversions.length;
+      const totalPageViews = filteredPageViews.length;
       const totalRevenue = filteredConversions.reduce((sum, item) => 
         sum + (parseFloat(item.order_total) || 0), 0
       );
       const avgOrderValue = totalConversions > 0 ? totalRevenue / totalConversions : 0;
+      const conversionRate = totalPageViews > 0 ? (totalConversions / totalPageViews * 100) : 0;
       
-      // Top sources
-      const sourceCounts = {};
-      const campaignCounts = {};
-      const landingPageCounts = {};
+      // Unique visitors (deduplicated by IP address)
+      const uniqueVisitors = new Set(filteredPageViews.map(item => item.ip_address)).size;
       
+      // Traffic source analysis (page views)
+      const trafficSources = {};
+      const campaignPerformance = {};
+      const landingPageStats = {};
+      
+      filteredPageViews.forEach(item => {
+        const source = item.source || 'direct';
+        const campaign = item.campaign || 'none';
+        const landingPage = item.landing_page || item.page_url || 'unknown';
+        
+        // Traffic sources
+        if (!trafficSources[source]) {
+          trafficSources[source] = { pageViews: 0, conversions: 0, revenue: 0 };
+        }
+        trafficSources[source].pageViews++;
+        
+        // Campaigns
+        if (!campaignPerformance[campaign]) {
+          campaignPerformance[campaign] = { pageViews: 0, conversions: 0, revenue: 0 };
+        }
+        campaignPerformance[campaign].pageViews++;
+        
+        // Landing pages
+        if (!landingPageStats[landingPage]) {
+          landingPageStats[landingPage] = { pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() };
+        }
+        landingPageStats[landingPage].pageViews++;
+        landingPageStats[landingPage].uniqueVisitors.add(item.ip_address);
+      });
+      
+      // Add conversion data to sources/campaigns/pages
       filteredConversions.forEach(item => {
-        sourceCounts[item.source] = (sourceCounts[item.source] || 0) + 1;
-        campaignCounts[item.campaign] = (campaignCounts[item.campaign] || 0) + 1;
-        if (item.landing_page) {
-          landingPageCounts[item.landing_page] = (landingPageCounts[item.landing_page] || 0) + 1;
+        const source = item.source || 'direct';
+        const campaign = item.campaign || 'none';
+        const landingPage = item.landing_page || item.page_url || 'unknown';
+        const revenue = parseFloat(item.order_total) || 0;
+        
+        if (trafficSources[source]) {
+          trafficSources[source].conversions++;
+          trafficSources[source].revenue += revenue;
+        }
+        
+        if (campaignPerformance[campaign]) {
+          campaignPerformance[campaign].conversions++;
+          campaignPerformance[campaign].revenue += revenue;
+        }
+        
+        if (landingPageStats[landingPage]) {
+          landingPageStats[landingPage].conversions++;
+          landingPageStats[landingPage].revenue += revenue;
         }
       });
       
-      // Sort by count (descending)
-      const topSources = Object.entries(sourceCounts)
-        .sort(([,a], [,b]) => b - a)
+      // Calculate conversion rates and format data
+      const topSources = Object.entries(trafficSources)
+        .map(([source, data]) => ({
+          source,
+          pageViews: data.pageViews,
+          conversions: data.conversions,
+          revenue: data.revenue,
+          conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
+        }))
+        .sort((a, b) => b.pageViews - a.pageViews)
         .slice(0, 10);
       
-      const topCampaigns = Object.entries(campaignCounts)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 10);
-        
-      const topLandingPages = Object.entries(landingPageCounts)
-        .sort(([,a], [,b]) => b - a)
+      const topCampaigns = Object.entries(campaignPerformance)
+        .map(([campaign, data]) => ({
+          campaign,
+          pageViews: data.pageViews,
+          conversions: data.conversions,
+          revenue: data.revenue,
+          conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
+        }))
+        .sort((a, b) => b.pageViews - a.pageViews)
         .slice(0, 10);
       
-      // Daily conversion trends
-      const dailyCounts = {};
+      const topLandingPages = Object.entries(landingPageStats)
+        .map(([page, data]) => ({
+          landing_page: page,
+          pageViews: data.pageViews,
+          uniqueVisitors: data.uniqueVisitors.size,
+          conversions: data.conversions,
+          revenue: data.revenue,
+          conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
+        }))
+        .sort((a, b) => b.pageViews - a.pageViews)
+        .slice(0, 10);
+      
+      // Daily trends for both page views and conversions
+      const dailyStats = {};
+      
+      filteredPageViews.forEach(item => {
+        const date = new Date(item.timestamp).toISOString().split('T')[0];
+        if (!dailyStats[date]) {
+          dailyStats[date] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set() };
+        }
+        dailyStats[date].pageViews++;
+        dailyStats[date].uniqueVisitors.add(item.ip_address);
+      });
+      
       filteredConversions.forEach(item => {
         const date = new Date(item.timestamp).toISOString().split('T')[0];
-        dailyCounts[date] = (dailyCounts[date] || 0) + 1;
+        if (!dailyStats[date]) {
+          dailyStats[date] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set() };
+        }
+        dailyStats[date].conversions++;
       });
+      
+      const dailyTrends = Object.entries(dailyStats)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, data]) => ({
+          date,
+          pageViews: data.pageViews,
+          conversions: data.conversions,
+          uniqueVisitors: data.uniqueVisitors.size,
+          conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
+        }));
       
       const analytics = {
         summary: {
+          total_page_views: totalPageViews,
+          unique_visitors: uniqueVisitors,
           total_conversions: totalConversions,
           total_revenue: totalRevenue,
           avg_order_value: avgOrderValue,
-          date_range: {
-            start: start_date,
-            end: end_date
-          }
+          conversion_rate: conversionRate.toFixed(1),
+          date_range: { start: start_date, end: end_date }
         },
-        top_sources: topSources.map(([source, count]) => ({
-          source,
-          conversions: count,
-          percentage: ((count / totalConversions) * 100).toFixed(1)
-        })),
-        top_campaigns: topCampaigns.map(([campaign, count]) => ({
-          campaign,
-          conversions: count,
-          percentage: ((count / totalConversions) * 100).toFixed(1)
-        })),
-        top_landing_pages: topLandingPages.map(([page, count]) => ({
-          landing_page: page,
-          conversions: count,
-          percentage: ((count / totalConversions) * 100).toFixed(1)
-        })),
-        daily_trends: Object.entries(dailyCounts)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([date, count]) => ({ date, conversions: count })),
+        traffic_sources: topSources,
+        campaign_performance: topCampaigns,
+        landing_page_performance: topLandingPages,
+        daily_trends: dailyTrends,
         conversions: filteredConversions.map(item => ({
           timestamp: item.timestamp,
           source: item.source,
@@ -137,12 +191,20 @@ const handler = async (event, context) => {
           order_total: item.order_total,
           offer_name: item.offer_name,
           order_id: item.order_id,
-          payment_gateway: item.payment_gateway,
           attribution_found: item.attribution_found
+        })),
+        page_views: filteredPageViews.map(item => ({
+          timestamp: item.timestamp,
+          source: item.source,
+          campaign: item.campaign,
+          landing_page: item.landing_page || item.page_url,
+          ip_address: item.ip_address,
+          user_agent: item.user_agent,
+          referrer_url: item.referrer_url
         }))
       };
       
-      console.log(`📊 Analytics query returned ${totalConversions} conversions`);
+      console.log(`📊 Analytics query: ${totalPageViews} page views, ${totalConversions} conversions`);
       
       return {
         statusCode: 200,
@@ -161,24 +223,37 @@ const handler = async (event, context) => {
   }
   
   if (event.httpMethod === 'POST') {
-    // Store conversion data (called from your track function)
+    // Store both conversion and page view data
     try {
-      const conversionData = JSON.parse(event.body);
+      const data = JSON.parse(event.body);
       
-      // Store with timestamp as key for easy retrieval
-      const key = `conversion:${conversionData.timestamp}:${Math.random()}`;
-      conversionStore.set(key, conversionData);
+      if (data.event_type === 'purchase' || data.order_total !== undefined) {
+        // Store conversion data
+        const key = `conversion:${data.timestamp}:${Math.random()}`;
+        conversionStore.set(key, data);
+        console.log(`📊 Stored conversion: ${data.email}`);
+      } else {
+        // Store page view data
+        const key = `pageview:${data.timestamp}:${Math.random()}`;
+        pageViewStore.set(key, {
+          ...data,
+          event_type: 'page_view'
+        });
+        console.log(`📊 Stored page view: ${data.source} → ${data.landing_page}`);
+      }
       
-      // Keep only last 1000 conversions to manage memory
+      // Memory management
       if (conversionStore.size > 1000) {
-        const entries = Array.from(conversionStore.entries())
-          .sort(([,a], [,b]) => new Date(b.timestamp) - new Date(a.timestamp))
-          .slice(0, 800);
+        const entries = Array.from(conversionStore.entries()).slice(-800);
         conversionStore.clear();
         entries.forEach(([key, value]) => conversionStore.set(key, value));
       }
       
-      console.log(`📊 Stored conversion for analytics: ${conversionData.email}`);
+      if (pageViewStore.size > 2000) {
+        const entries = Array.from(pageViewStore.entries()).slice(-1500);
+        pageViewStore.clear();
+        entries.forEach(([key, value]) => pageViewStore.set(key, value));
+      }
       
       return {
         statusCode: 200,
@@ -201,5 +276,31 @@ const handler = async (event, context) => {
     body: 'Method not allowed'
   };
 };
+
+// Helper function to apply filters
+function applyFilters(data, filters) {
+  let filtered = data;
+  
+  if (filters.start_date) {
+    const startDate = new Date(filters.start_date);
+    filtered = filtered.filter(item => new Date(item.timestamp) >= startDate);
+  }
+  
+  if (filters.end_date) {
+    const endDate = new Date(filters.end_date);
+    endDate.setHours(23, 59, 59, 999);
+    filtered = filtered.filter(item => new Date(item.timestamp) <= endDate);
+  }
+  
+  if (filters.source) {
+    filtered = filtered.filter(item => item.source === filters.source);
+  }
+  
+  if (filters.campaign) {
+    filtered = filtered.filter(item => item.campaign === filters.campaign);
+  }
+  
+  return filtered;
+}
 
 module.exports = { handler };
