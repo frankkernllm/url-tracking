@@ -49,6 +49,21 @@ const handler = async (event, context) => {
       
       console.log(`✅ Attribution stored with ${keys.length} lookup keys`);
       
+      // Also send page view data to analytics
+      try {
+        await fetch('https://trackingojoy.netlify.app/.netlify/functions/analytics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...attributionData,
+            event_type: 'page_view'
+          })
+        });
+        console.log('📊 Page view sent to analytics');
+      } catch (analyticsError) {
+        console.log('⚠️ Analytics page view failed:', analyticsError.message);
+      }
+      
       return {
         statusCode: 200,
         headers: { 'Access-Control-Allow-Origin': '*' },
