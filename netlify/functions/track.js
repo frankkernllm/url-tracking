@@ -138,6 +138,21 @@ const handler = async (event, context) => {
       } catch (analyticsError) {
         console.log('⚠️ Analytics storage failed:', analyticsError.message);
       }
+    } else {
+      // This is a page view or other event, also store for analytics
+      try {
+        await fetch('https://trackingojoy.netlify.app/.netlify/functions/analytics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...trackingData,
+            event_type: 'page_view'
+          })
+        });
+        console.log('📊 Page view stored for analytics');
+      } catch (analyticsError) {
+        console.log('⚠️ Page view analytics storage failed:', analyticsError.message);
+      }
     }
     
     return {
