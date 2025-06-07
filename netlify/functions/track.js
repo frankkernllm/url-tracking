@@ -1,4 +1,16 @@
 const handler = async (event, context) => {
+  // Handle CORS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS'
+      }
+    };
+  }
+
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
@@ -10,23 +22,21 @@ const handler = async (event, context) => {
   try {
     const data = JSON.parse(event.body);
     
-    // Extract all the tracking data
     const trackingData = {
       timestamp: new Date().toISOString(),
       source: data.source || 'direct',
       campaign: data.campaign || 'none',
       content: data.content || 'none',
       page_url: data.page_url || '',
+      conversion_page: data.conversion_page || '',
       email: data.email || '',
       name: data.name || '',
       phone: data.phone || '',
-      ip_address: event.headers['x-forwarded-for'] || event.headers['client-ip'] || '',
+      ip_address: event.headers['x-forwarded-for'] || '',
       user_agent: event.headers['user-agent'] || ''
     };
     
     console.log('Conversion tracked:', trackingData);
-    
-    // TODO: Here we'll add CSV storage next
     
     return {
       statusCode: 200,
