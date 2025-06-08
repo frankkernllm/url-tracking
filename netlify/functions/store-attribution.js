@@ -1,8 +1,5 @@
-// Enhanced store-attribution.js with comprehensive bot detection
-// Stores attribution data for later lookup during purchases
-
-// Simple in-memory storage (for demo - replace with database in production)
-let attributionStore = new Map();
+// File: netlify/functions/store-attribution.js
+// Redis-powered attribution storage with API Key Security
 
 const handler = async (event, context) => {
   // Handle CORS preflight
@@ -11,133 +8,75 @@ const handler = async (event, context) => {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
       }
     };
   }
 
+  // 🔒 Security Check - Verify API Key
+  const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
+  const validApiKey = process.env.OJOY_API_KEY;
+
+  if (!validApiKey) {
+    console.error('❌ No API key configured in environment');
+    return {
+      statusCode: 500,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Server configuration error' })
+    };
+  }
+
+  if (!apiKey || apiKey !== validApiKey) {
+    console.log('🚫 Unauthorized access attempt');
+    return {
+      statusCode: 401,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Unauthorized' })
+    };
+  }
+
+  console.log('✅ API key validated');
+
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!redisUrl || !redisToken) {
+    console.error('❌ Missing Redis credentials');
+    return {
+      statusCode: 500,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Redis not configured' })
+    };
+  }
+
+  // Redis helper function
+  const redis = async (command) => {
+    const response = await fetch(`${redisUrl}/${command}`, {
+      headers: { Authorization: `Bearer ${redisToken}` }
+    });
+    return response.json();
+  };
+
   if (event.httpMethod === 'POST') {
     try {
       const attributionData = JSON.parse(event.body);
-      const userAgent = event.headers['user-agent'] || '';
-      const ip = event.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
-                 event.headers['x-real-ip'] || 'unknown';
       
-      console.log(`🔍 Analyzing traffic from IP: ${ip}`);
-      console.log(`🔍 User Agent: ${userAgent}`);
+      console.log('📊 Storing attribution data:', JSON.stringify(attributionData, null, 2));
       
-      // BOT DETECTION LOGIC
-      const botDetection = detectBot(userAgent, attributionData, ip);
+      // Store attribution data with multiple lookup keys for flexibility
+      const baseKey = `attribution:${attributionData.ip_address}:${Date.now()}`;
+      const ipKey = `attribution_ip:${attributionData.ip_address}`;
+      const sessionKey = `attribution_session:${attributionData.session_id}`;
       
-      if (botDetection.isBot) {
-        console.log(`🤖 Bot detected: ${botDetection.reason} - IP: ${ip}`);
-        console.log(`🤖 Bot score: ${botDetection.score}/100`);
-        
-        // Store bot data separately (optional - for analysis)
-        const botKey = `bot:${ip}:${Date.now()}`;
-        attributionStore.set(botKey, {
-          ...attributionData,
-          ip_address: ip,
-          user_agent: userAgent,
-          bot_detected: true,
-          bot_reason: botDetection.reason,
-          bot_score: botDetection.score,
-          stored_at: new Date().toISOString()
-        });
-        
-        return {
-          statusCode: 200,
-          headers: { 'Access-Control-Allow-Origin': '*' },
-          body: JSON.stringify({ 
-            success: true, 
-            message: 'Bot traffic filtered',
-            bot_detected: true,
-            reason: botDetection.reason,
-            score: botDetection.score
-          })
-        };
-      }
+      // Store the full attribution data
+      await redis(`set/${baseKey}/${encodeURIComponent(JSON.stringify(attributionData))}`);
       
-      // RATE LIMITING - Check for rapid requests from same IP
-      const recentKey = `recent:${ip}`;
-      const recentRequests = attributionStore.get(recentKey) || [];
-      const now = Date.now();
-      const fiveSecondsAgo = now - 5000;
+      // Store lookup keys that expire after 24 hours (86400 seconds)
+      await redis(`setex/${ipKey}/86400/${baseKey}`);
+      await redis(`setex/${sessionKey}/86400/${baseKey}`);
       
-      // Filter out requests older than 5 seconds
-      const recentValidRequests = recentRequests.filter(time => time > fiveSecondsAgo);
-      
-      if (recentValidRequests.length >= 2) {
-        console.log(`🚫 Rate limited: ${ip} - ${recentValidRequests.length} requests in 5 seconds`);
-        return {
-          statusCode: 200,
-          headers: { 'Access-Control-Allow-Origin': '*' },
-          body: JSON.stringify({ 
-            success: true, 
-            message: 'Rate limited',
-            rate_limited: true
-          })
-        };
-      }
-      
-      // Add current request to recent requests
-      recentValidRequests.push(now);
-      attributionStore.set(recentKey, recentValidRequests);
-      
-      // PROCEED WITH NORMAL TRACKING for legitimate traffic
-      console.log(`✅ Legitimate traffic detected, storing attribution data`);
-      console.log(`✅ Bot score: ${botDetection.score}/100 (below threshold)`);
-      
-      // Enhanced attribution data with bot detection results
-      const enhancedData = {
-        ...attributionData,
-        ip_address: ip,
-        user_agent: userAgent,
-        bot_detected: false,
-        bot_score: botDetection.score,
-        timestamp: new Date().toISOString(),
-        is_returning_visitor: checkReturningVisitor(ip),
-        session_id: attributionData.session_id || generateSessionId()
-      };
-      
-      // Create multiple lookup keys for flexible matching
-      const keys = [
-        `ip:${ip}`,
-        `session:${enhancedData.session_id}`,
-        `timestamp:${Math.floor(new Date().getTime() / 60000)}`
-      ];
-      
-      keys.forEach(key => {
-        attributionStore.set(key, {
-          ...enhancedData,
-          stored_at: new Date().toISOString()
-        });
-      });
-      
-      console.log(`✅ Attribution stored with ${keys.length} lookup keys`);
-      
-      // Send to analytics only if legitimate traffic
-      try {
-        await fetch('https://trackingojoy.netlify.app/.netlify/functions/analytics', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...enhancedData,
-            event_type: 'page_view'
-          })
-        });
-        console.log('📊 Legitimate page view sent to analytics');
-      } catch (analyticsError) {
-        console.log('⚠️ Analytics page view failed:', analyticsError.message);
-      }
-      
-      // Memory management
-      if (attributionStore.size > 1000) {
-        const entries = Array.from(attributionStore.entries()).slice(-800);
-        attributionStore.clear();
-        entries.forEach(([key, value]) => attributionStore.set(key, value));
-      }
+      console.log('✅ Attribution stored with 3 lookup keys');
       
       return {
         statusCode: 200,
@@ -145,14 +84,12 @@ const handler = async (event, context) => {
         body: JSON.stringify({ 
           success: true, 
           message: 'Attribution data stored successfully',
-          keys: keys.length,
-          session_id: enhancedData.session_id,
-          bot_score: botDetection.score
+          keys_created: 3
         })
       };
       
     } catch (error) {
-      console.error('❌ Error storing attribution:', error);
+      console.error('❌ Attribution storage error:', error);
       return {
         statusCode: 500,
         headers: { 'Access-Control-Allow-Origin': '*' },
@@ -162,63 +99,64 @@ const handler = async (event, context) => {
   }
   
   if (event.httpMethod === 'GET') {
-    // Lookup attribution data
-    const { ip, session_id, timestamp, email } = event.queryStringParameters || {};
-    
     try {
-      let attributionData = null;
+      const { ip, timestamp } = event.queryStringParameters || {};
       
-      // Try different lookup strategies
-      if (session_id) {
-        attributionData = attributionStore.get(`session:${session_id}`);
-        console.log(`🔍 Session lookup for ${session_id}:`, !!attributionData);
+      if (!ip) {
+        return {
+          statusCode: 400,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ error: 'IP address required', found: false })
+        };
       }
       
-      if (!attributionData && ip) {
-        attributionData = attributionStore.get(`ip:${ip}`);
-        console.log(`🔍 IP lookup for ${ip}:`, !!attributionData);
+      console.log(`🔍 Looking up attribution for IP: ${ip}`);
+      
+      // Try to find attribution data by IP
+      const ipLookupKey = `attribution_ip:${ip}`;
+      const lookupResult = await redis(`get/${ipLookupKey}`);
+      
+      if (!lookupResult.result) {
+        console.log('⚠️ No attribution found for IP');
+        return {
+          statusCode: 200,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ found: false, message: 'No attribution data found' })
+        };
       }
       
-      if (!attributionData && timestamp) {
-        // Look for attribution data within 5 minutes of the timestamp
-        const targetMinute = Math.floor(new Date(timestamp).getTime() / 60000);
-        for (let i = -5; i <= 5; i++) {
-          const key = `timestamp:${targetMinute + i}`;
-          attributionData = attributionStore.get(key);
-          if (attributionData) {
-            console.log(`🔍 Timestamp lookup found match at ${targetMinute + i}`);
-            break;
-          }
-        }
+      // Get the actual attribution data
+      const attributionKey = lookupResult.result;
+      const attributionResult = await redis(`get/${attributionKey}`);
+      
+      if (!attributionResult.result) {
+        console.log('⚠️ Attribution key found but data missing');
+        return {
+          statusCode: 200,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: JSON.stringify({ found: false, message: 'Attribution data expired' })
+        };
       }
       
-      if (!attributionData) {
-        // Fallback: find most recent entry for this IP
-        const ipEntries = Array.from(attributionStore.entries())
-          .filter(([key]) => key.startsWith(`ip:${ip}`))
-          .sort(([,a], [,b]) => new Date(b.timestamp) - new Date(a.timestamp));
-        
-        if (ipEntries.length > 0) {
-          attributionData = ipEntries[0][1];
-          console.log(`🔍 Recent IP fallback found data`);
-        }
-      }
+      const attributionData = JSON.parse(attributionResult.result);
+      console.log('✅ Attribution data found and returned');
       
       return {
         statusCode: 200,
         headers: { 'Access-Control-Allow-Origin': '*' },
         body: JSON.stringify({ 
-          found: !!attributionData,
+          found: true, 
           data: attributionData,
-          lookup_params: { ip, session_id, timestamp, email }
+          lookup_method: 'ip_address'
         })
       };
       
     } catch (error) {
+      console.error('❌ Attribution lookup error:', error);
       return {
         statusCode: 500,
         headers: { 'Access-Control-Allow-Origin': '*' },
-        body: JSON.stringify({ error: error.message })
+        body: JSON.stringify({ error: error.message, found: false })
       };
     }
   }
@@ -229,151 +167,5 @@ const handler = async (event, context) => {
     body: 'Method not allowed'
   };
 };
-
-// COMPREHENSIVE BOT DETECTION FUNCTION
-function detectBot(userAgent, attributionData, ip) {
-  let score = 0;
-  let reasons = [];
-  
-  const ua = userAgent.toLowerCase();
-  
-  // Known bot user agents (high confidence) - ENHANCED LIST
-  const knownBots = [
-    // Search engine bots
-    'googlebot', 'bingbot', 'slurp', 'duckduckbot', 'baiduspider',
-    'yandexbot', 'sogou', 'exabot',
-    
-    // Google specific bots
-    'adsbot', 'adsbot-google', 'adsbot-google-mobile', 'mediapartners-google',
-    'googlebot-mobile', 'googlebot-image', 'googlebot-news', 'googlebot-video',
-    'google-adwords-instant', 'google-structured-data-testing-tool',
-    
-    // Social media bots
-    'facebookexternalhit', 'facebookcatalog', 'facebookbot',
-    'twitterbot', 'linkedinbot', 'pinterestbot', 'redditbot',
-    'whatsapp', 'telegram', 'slackbot', 'discordbot',
-    
-    // SEO and monitoring bots
-    'semrushbot', 'ahrefs', 'ahrefsbot', 'mj12bot', 'dotbot', 'rogerbot',
-    'screaming frog', 'seobilitybot', 'serpstatbot', 'linkdexbot',
-    'uptimerobot', 'pingdom', 'gtmetrix', 'pagespeed',
-    
-    // Security and analysis bots
-    'netcraftsurveyagent', 'wappalyzer', 'securitytrails',
-    'shodan', 'censys', 'masscan', 'nmap',
-    
-    // Generic bot indicators
-    'crawler', 'spider', 'scraper', 'bot', 'crawl', 'fetcher',
-    'indexer', 'monitor', 'checker', 'validator', 'test',
-    
-    // Headless browsers and automation
-    'headless', 'phantom', 'selenium', 'puppeteer', 'playwright',
-    'chromedriver', 'webdriver', 'automated'
-  ];
-  
-  // Check for known bot patterns
-  for (const bot of knownBots) {
-    if (ua.includes(bot)) {
-      score += 100;
-      reasons.push(`Known bot user agent: ${bot}`);
-      break;
-    }
-  }
-  
-  // Additional bot patterns
-  if (ua.includes('compatible;') && ua.includes('+http')) {
-    score += 95;
-    reasons.push('Bot signature pattern detected');
-  }
-  
-  // Check for Google IP ranges (approximate)
-  if (ip.startsWith('66.249.') || ip.startsWith('74.125.') || 
-      ip.startsWith('209.85.') || ip.startsWith('216.239.') ||
-      ip.startsWith('64.233.') || ip.startsWith('72.14.') ||
-      ip.startsWith('216.58.') || ip.startsWith('172.217.')) {
-    score += 60;
-    reasons.push('Google IP range detected');
-  }
-  
-  // Suspicious user agent patterns
-  if (ua.includes('headless') || ua.includes('phantom') || ua.includes('selenium')) {
-    score += 90;
-    reasons.push('Headless browser detected');
-  }
-  
-  // Empty or very short user agents
-  if (!userAgent || userAgent.length < 20) {
-    score += 70;
-    reasons.push('Suspicious user agent length');
-  }
-  
-  // Very long user agents (sometimes used by bots)
-  if (userAgent && userAgent.length > 500) {
-    score += 40;
-    reasons.push('Unusually long user agent');
-  }
-  
-  // Missing typical browser features
-  if (!attributionData.screen_resolution || attributionData.screen_resolution === 'unknown') {
-    score += 30;
-    reasons.push('Missing screen resolution');
-  }
-  
-  if (!attributionData.language || attributionData.language === 'unknown') {
-    score += 20;
-    reasons.push('Missing language data');
-  }
-  
-  if (!attributionData.timezone || attributionData.timezone === 'unknown') {
-    score += 20;
-    reasons.push('Missing timezone data');
-  }
-  
-  // Session duration indicators (if available)
-  if (attributionData.session_duration === 0 || attributionData.session_duration < 1000) {
-    score += 40;
-    reasons.push('Extremely short session duration');
-  }
-  
-  // Suspicious IP patterns
-  if (ip === 'unknown' || ip.startsWith('127.') || ip.startsWith('10.') || ip.startsWith('192.168.')) {
-    score += 10;
-    reasons.push('Local/unknown IP address');
-  }
-  
-  // Check for common bot behaviors
-  if (attributionData.pages_viewed === 1 && attributionData.session_duration < 2000) {
-    score += 30;
-    reasons.push('Single page hit with minimal duration');
-  }
-  
-  // User agent contains version patterns typical of bots
-  if (ua.match(/\d+\.\d+\.\d+\.\d+/) && ua.includes('build/')) {
-    score += 25;
-    reasons.push('Android bot pattern detected');
-  }
-  
-  const isBot = score >= 60; // Threshold for bot detection (lowered slightly)
-  
-  return {
-    isBot,
-    score,
-    reason: reasons.length > 0 ? reasons.join(', ') : 'Clean traffic detected'
-  };
-}
-
-// Helper functions
-function checkReturningVisitor(ip) {
-  const visitorKey = `visitor:${ip}`;
-  const exists = attributionStore.has(visitorKey);
-  if (!exists) {
-    attributionStore.set(visitorKey, Date.now());
-  }
-  return exists;
-}
-
-function generateSessionId() {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2);
-}
 
 module.exports = { handler };
