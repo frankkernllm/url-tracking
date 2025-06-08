@@ -1,12 +1,7 @@
 // File: netlify/functions/analytics.js
-// Enhanced Analytics API endpoint for free trial tracking
-
-// In-memory storage for demo (use database in production)
-let conversionStore = new Map();
-let pageViewStore = new Map();
+// Redis-powered analytics API
 
 const handler = async (event, context) => {
-  // Handle CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
@@ -18,51 +13,78 @@ const handler = async (event, context) => {
     };
   }
 
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!redisUrl || !redisToken) {
+    console.error('❌ Missing Redis credentials');
+    return {
+      statusCode: 500,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Redis not configured' })
+    };
+  }
+
+  // Redis helper function
+  const redis = async (command) => {
+    const response = await fetch(`${redisUrl}/${command}`, {
+      headers: { Authorization: `Bearer ${redisToken}` }
+    });
+    return response.json();
+  };
+
   if (event.httpMethod === 'GET') {
-    // Return analytics data including free trial conversions
     try {
-      const { start_date, end_date, source, campaign, type } = event.queryStringParameters || {};
+      const { start_date, end_date, source, campaign } = event.queryStringParameters || {};
       
-      console.log(`📊 Analytics GET request - Filters: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
+      console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
       
-      // Get all stored conversions (including $0 free trials)
-      const allConversions = Array.from(conversionStore.values())
-        .filter(item => item.event_type === 'purchase' || item.event_type === 'conversion')
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      // Get all conversions and page views from Redis
+      const [conversionsResult, pageViewsResult] = await Promise.all([
+        redis('keys/conversions:*'),
+        redis('keys/pageviews:*')
+      ]);
       
-      console.log(`📊 Found ${allConversions.length} total conversions in store`);
+      const conversionKeys = conversionsResult.result || [];
+      const pageViewKeys = pageViewsResult.result || [];
       
-      // Get all stored page views
-      const allPageViews = Array.from(pageViewStore.values())
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      // Fetch all conversion data
+      let allConversions = [];
+      if (conversionKeys.length > 0) {
+        const conversionData = await redis(`mget/${conversionKeys.join('/')}`);
+        allConversions = (conversionData.result || [])
+          .filter(item => item)
+          .map(item => JSON.parse(item))
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      }
       
-      console.log(`📊 Found ${allPageViews.length} total page views in store`);
+      // Fetch all page view data
+      let allPageViews = [];
+      if (pageViewKeys.length > 0) {
+        const pageViewData = await redis(`mget/${pageViewKeys.join('/')}`);
+        allPageViews = (pageViewData.result || [])
+          .filter(item => item)
+          .map(item => JSON.parse(item))
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      }
       
-      // Apply filters to both datasets
+      console.log(`📊 Analytics query returned ${allConversions.length} conversions`);
+      
+      // Apply filters
       let filteredConversions = applyFilters(allConversions, { start_date, end_date, source, campaign });
       let filteredPageViews = applyFilters(allPageViews, { start_date, end_date, source, campaign });
       
-      console.log(`📊 After filtering: ${filteredConversions.length} conversions, ${filteredPageViews.length} page views`);
-      
-      // Calculate comprehensive analytics
+      // Calculate analytics (same logic as before)
       const totalConversions = filteredConversions.length;
       const totalPageViews = filteredPageViews.length;
-      
-      // For free trial business: all conversions are trials, revenue tracking is secondary
       const freeTrials = filteredConversions.filter(item => (parseFloat(item.order_total) || 0) === 0);
       const paidConversions = filteredConversions.filter(item => (parseFloat(item.order_total) || 0) > 0);
-      
-      const totalRevenue = filteredConversions.reduce((sum, item) => 
-        sum + (parseFloat(item.order_total) || 0), 0
-      );
-      
+      const totalRevenue = filteredConversions.reduce((sum, item) => sum + (parseFloat(item.order_total) || 0), 0);
       const avgOrderValue = paidConversions.length > 0 ? totalRevenue / paidConversions.length : 0;
-      const conversionRate = totalPageViews > 0 ? (totalConversions / totalPageViews * 100) : 0;
-      
-      // Unique visitors (deduplicated by IP address)
       const uniqueVisitors = new Set(filteredPageViews.map(item => item.ip_address)).size;
+      const conversionRate = uniqueVisitors > 0 ? (totalConversions / uniqueVisitors * 100) : 0;
       
-      // Traffic source analysis (page views)
+      // Build traffic sources, campaigns, landing pages (same logic)
       const trafficSources = {};
       const campaignPerformance = {};
       const landingPageStats = {};
@@ -72,19 +94,16 @@ const handler = async (event, context) => {
         const campaign = item.campaign || 'none';
         const landingPage = item.landing_page || item.page_url || 'unknown';
         
-        // Traffic sources
         if (!trafficSources[source]) {
           trafficSources[source] = { pageViews: 0, conversions: 0, revenue: 0 };
         }
         trafficSources[source].pageViews++;
         
-        // Campaigns
         if (!campaignPerformance[campaign]) {
           campaignPerformance[campaign] = { pageViews: 0, conversions: 0, revenue: 0 };
         }
         campaignPerformance[campaign].pageViews++;
         
-        // Landing pages
         if (!landingPageStats[landingPage]) {
           landingPageStats[landingPage] = { pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() };
         }
@@ -92,7 +111,6 @@ const handler = async (event, context) => {
         landingPageStats[landingPage].uniqueVisitors.add(item.ip_address);
       });
       
-      // Add conversion data to sources/campaigns/pages (including $0 conversions)
       filteredConversions.forEach(item => {
         const source = item.source || 'direct';
         const campaign = item.campaign || 'none';
@@ -115,7 +133,7 @@ const handler = async (event, context) => {
         }
       });
       
-      // Calculate conversion rates and format data
+      // Format response data
       const topSources = Object.entries(trafficSources)
         .map(([source, data]) => ({
           source,
@@ -124,8 +142,7 @@ const handler = async (event, context) => {
           revenue: data.revenue,
           conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
         }))
-        .sort((a, b) => b.pageViews - a.pageViews)
-        .slice(0, 10);
+        .sort((a, b) => b.pageViews - a.pageViews);
       
       const topCampaigns = Object.entries(campaignPerformance)
         .map(([campaign, data]) => ({
@@ -135,8 +152,7 @@ const handler = async (event, context) => {
           revenue: data.revenue,
           conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
         }))
-        .sort((a, b) => b.pageViews - a.pageViews)
-        .slice(0, 10);
+        .sort((a, b) => b.pageViews - a.pageViews);
       
       const topLandingPages = Object.entries(landingPageStats)
         .map(([page, data]) => ({
@@ -147,10 +163,9 @@ const handler = async (event, context) => {
           revenue: data.revenue,
           conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
         }))
-        .sort((a, b) => b.pageViews - a.pageViews)
-        .slice(0, 10);
+        .sort((a, b) => b.pageViews - a.pageViews);
       
-      // Daily trends for both page views and conversions
+      // Daily trends
       const dailyStats = {};
       
       filteredPageViews.forEach(item => {
@@ -180,56 +195,28 @@ const handler = async (event, context) => {
           conversionRate: data.pageViews > 0 ? (data.conversions / data.pageViews * 100).toFixed(1) : '0.0'
         }));
       
-      const analytics = {
-        summary: {
-          total_page_views: totalPageViews,
-          unique_visitors: uniqueVisitors,
-          total_conversions: totalConversions,
-          free_trials: freeTrials.length,
-          paid_conversions: paidConversions.length,
-          total_revenue: totalRevenue,
-          avg_order_value: avgOrderValue,
-          conversion_rate: conversionRate.toFixed(1),
-          date_range: { start: start_date, end: end_date }
-        },
-        traffic_sources: topSources,
-        campaign_performance: topCampaigns,
-        landing_page_performance: topLandingPages,
-        daily_trends: dailyTrends,
-        conversions: filteredConversions.map(item => ({
-          timestamp: item.timestamp,
-          source: item.source,
-          campaign: item.campaign,
-          content: item.content,
-          medium: item.medium,
-          landing_page: item.landing_page,
-          email: item.email,
-          name: item.name,
-          order_total: item.order_total || 0,
-          offer_name: item.offer_name,
-          order_id: item.order_id,
-          subscription_id: item.subscription_id,
-          attribution_found: item.attribution_found,
-          attribution_source: item.attribution_source,
-          is_free_trial: (parseFloat(item.order_total) || 0) === 0
-        })),
-        page_views: filteredPageViews.map(item => ({
-          timestamp: item.timestamp,
-          source: item.source,
-          campaign: item.campaign,
-          landing_page: item.landing_page || item.page_url,
-          ip_address: item.ip_address,
-          user_agent: item.user_agent,
-          referrer_url: item.referrer_url
-        }))
-      };
-      
-      console.log(`📊 Analytics response: ${totalPageViews} page views, ${totalConversions} conversions (${freeTrials.length} free trials + ${paidConversions.length} paid)`);
-      
       return {
         statusCode: 200,
         headers: { 'Access-Control-Allow-Origin': '*' },
-        body: JSON.stringify(analytics)
+        body: JSON.stringify({
+          summary: {
+            total_page_views: totalPageViews,
+            unique_visitors: uniqueVisitors,
+            total_conversions: totalConversions,
+            free_trials: freeTrials.length,
+            paid_conversions: paidConversions.length,
+            total_revenue: totalRevenue,
+            avg_order_value: avgOrderValue,
+            conversion_rate: conversionRate.toFixed(1),
+            date_range: { start: start_date, end: end_date }
+          },
+          traffic_sources: topSources,
+          campaign_performance: topCampaigns,
+          landing_page_performance: topLandingPages,
+          daily_trends: dailyTrends,
+          conversions: filteredConversions,
+          page_views: filteredPageViews
+        })
       };
       
     } catch (error) {
@@ -243,44 +230,22 @@ const handler = async (event, context) => {
   }
   
   if (event.httpMethod === 'POST') {
-    // Store both conversion and page view data
     try {
       const data = JSON.parse(event.body);
       
-      console.log(`📥 Analytics POST received - Event type: ${data.event_type}`);
-      console.log(`📥 Data: ${JSON.stringify(data, null, 2)}`);
+      console.log(`📥 Storing ${data.event_type}: ${data.email || 'no email'}`);
       
       if (data.event_type === 'purchase' || data.event_type === 'conversion' || data.order_total !== undefined) {
-        // Store conversion data (including $0 free trials)
-        const key = `conversion:${data.timestamp}:${Math.random()}`;
-        conversionStore.set(key, data);
-        console.log(`📊 Stored conversion: ${data.email} - Order total: $${data.order_total || 0} - Free trial: ${(parseFloat(data.order_total) || 0) === 0}`);
+        // Store conversion
+        const key = `conversions:${data.timestamp}:${Math.random()}`;
+        await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
+        console.log(`✅ Stored conversion: ${data.email}`);
       } else {
-        // Store page view data
-        const key = `pageview:${data.timestamp}:${Math.random()}`;
-        pageViewStore.set(key, {
-          ...data,
-          event_type: 'page_view'
-        });
-        console.log(`📊 Stored page view: ${data.source} → ${data.landing_page}`);
+        // Store page view
+        const key = `pageviews:${data.timestamp}:${Math.random()}`;
+        await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
+        console.log(`✅ Stored page view: ${data.source} → ${data.landing_page}`);
       }
-      
-      // Memory management - keep more conversions since they're valuable
-      if (conversionStore.size > 2000) {
-        const entries = Array.from(conversionStore.entries()).slice(-1500);
-        conversionStore.clear();
-        entries.forEach(([key, value]) => conversionStore.set(key, value));
-        console.log('🧹 Cleaned up conversion store');
-      }
-      
-      if (pageViewStore.size > 3000) {
-        const entries = Array.from(pageViewStore.entries()).slice(-2000);
-        pageViewStore.clear();
-        entries.forEach(([key, value]) => pageViewStore.set(key, value));
-        console.log('🧹 Cleaned up page view store');
-      }
-      
-      console.log(`📊 Current store sizes: ${conversionStore.size} conversions, ${pageViewStore.size} page views`);
       
       return {
         statusCode: 200,
@@ -305,7 +270,6 @@ const handler = async (event, context) => {
   };
 };
 
-// Helper function to apply filters
 function applyFilters(data, filters) {
   let filtered = data;
   
