@@ -92,7 +92,8 @@ const handler = async (event, context) => {
       } catch (lookupError) {
         console.log('❌ Attribution lookup failed:', lookupError.message);
       }
-// 🔧 ENHANCED: Try alternative attribution lookup methods if IP lookup fails
+
+      // 🔧 ENHANCED: Try alternative attribution lookup methods if IP lookup fails
       if (!attributionData && data.email) {
         console.log('🔍 Trying email-based attribution lookup...');
         try {
@@ -165,13 +166,6 @@ const handler = async (event, context) => {
               console.log(`⚠️ Attribution data found via source match (score: ${bestMatchScore}) - may be imprecise`);
             } else {
               console.log(`❌ No high-confidence attribution match found (best score: ${bestMatchScore})`);
-            }
-          }
-        } catch (emailLookupError) {
-          console.log('❌ Email-based attribution lookup failed:', emailLookupError.message);
-        }
-      }
-              }
             }
           }
         } catch (emailLookupError) {
