@@ -1,17 +1,42 @@
 // File: netlify/functions/analytics.js
-// Redis-powered analytics API
+// Redis-powered analytics API with API Key Security
 
 const handler = async (event, context) => {
+  // Handle CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
       }
     };
   }
+
+  // 🔒 Security Check - Verify API Key
+  const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
+  const validApiKey = process.env.OJOY_API_KEY;
+
+  if (!validApiKey) {
+    console.error('❌ No API key configured in environment');
+    return {
+      statusCode: 500,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Server configuration error' })
+    };
+  }
+
+  if (!apiKey || apiKey !== validApiKey) {
+    console.log('🚫 Unauthorized access attempt');
+    return {
+      statusCode: 401,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Unauthorized' })
+    };
+  }
+
+  console.log('✅ API key validated');
 
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
