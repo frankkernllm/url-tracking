@@ -1,5 +1,5 @@
 // File: netlify/functions/analytics.js
-// Redis-powered analytics API with API Key Security
+// Fixed Redis-powered analytics API - Now reads attribution data correctly
 
 const handler = async (event, context) => {
   // Handle CORS preflight
@@ -64,14 +64,30 @@ const handler = async (event, context) => {
       
       console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
       
-      // Get all conversions and page views from Redis
-      const [conversionsResult, pageViewsResult] = await Promise.all([
-        redis('keys/conversions:*'),
-        redis('keys/pageviews:*')
+      // 🔧 FIXED: Get attribution data and conversions from the correct Redis keys
+      const [attributionResult, conversionsResult] = await Promise.all([
+        redis('keys/attribution:*'),  // ✅ Read attribution data
+        redis('keys/conversions:*')   // Keep conversions as is
       ]);
       
+      const attributionKeys = attributionResult.result || [];
       const conversionKeys = conversionsResult.result || [];
-      const pageViewKeys = pageViewsResult.result || [];
+      
+      console.log(`📊 Found ${attributionKeys.length} attribution keys and ${conversionKeys.length} conversion keys`);
+      
+      // Fetch all attribution data (page views)
+      let allPageViews = [];
+      if (attributionKeys.length > 0) {
+        const attributionData = await redis(`mget/${attributionKeys.join('/')}`);
+        allPageViews = (attributionData.result || [])
+          .filter(item => item)
+          .map(item => JSON.parse(item))
+          .map(item => ({
+            ...item,
+            event_type: 'page_view'  // Ensure it's marked as page view
+          }))
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      }
       
       // Fetch all conversion data
       let allConversions = [];
@@ -83,21 +99,13 @@ const handler = async (event, context) => {
           .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       }
       
-      // Fetch all page view data
-      let allPageViews = [];
-      if (pageViewKeys.length > 0) {
-        const pageViewData = await redis(`mget/${pageViewKeys.join('/')}`);
-        allPageViews = (pageViewData.result || [])
-          .filter(item => item)
-          .map(item => JSON.parse(item))
-          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      }
-      
-      console.log(`📊 Analytics query returned ${allConversions.length} conversions`);
+      console.log(`📊 Analytics query returned ${allPageViews.length} page views and ${allConversions.length} conversions`);
       
       // Apply filters
       let filteredConversions = applyFilters(allConversions, { start_date, end_date, source, campaign });
       let filteredPageViews = applyFilters(allPageViews, { start_date, end_date, source, campaign });
+      
+      console.log(`📊 After filtering: ${filteredPageViews.length} page views and ${filteredConversions.length} conversions`);
       
       // Calculate analytics (same logic as before)
       const totalConversions = filteredConversions.length;
@@ -116,7 +124,7 @@ const handler = async (event, context) => {
       
       filteredPageViews.forEach(item => {
         const source = item.source || 'direct';
-        const campaign = item.campaign || 'none';
+        const campaign = item.utm_campaign || item.campaign || 'none';  // ✅ Use utm_campaign if available
         const landingPage = item.landing_page || item.page_url || 'unknown';
         
         if (!trafficSources[source]) {
@@ -138,7 +146,7 @@ const handler = async (event, context) => {
       
       filteredConversions.forEach(item => {
         const source = item.source || 'direct';
-        const campaign = item.campaign || 'none';
+        const campaign = item.utm_campaign || item.campaign || 'none';  // ✅ Use utm_campaign if available
         const landingPage = item.landing_page || item.page_url || 'unknown';
         const revenue = parseFloat(item.order_total) || 0;
         
@@ -266,7 +274,7 @@ const handler = async (event, context) => {
         await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
         console.log(`✅ Stored conversion: ${data.email}`);
       } else {
-        // Store page view
+        // Store page view - Keep this for future data, but analytics now reads from attribution keys
         const key = `pageviews:${data.timestamp}:${Math.random()}`;
         await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
         console.log(`✅ Stored page view: ${data.source} → ${data.landing_page}`);
@@ -314,7 +322,7 @@ function applyFilters(data, filters) {
   }
   
   if (filters.campaign) {
-    filtered = filtered.filter(item => item.campaign === filters.campaign);
+    filtered = filtered.filter(item => (item.utm_campaign || item.campaign) === filters.campaign);
   }
   
   return filtered;
