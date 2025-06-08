@@ -7,7 +7,7 @@ const handler = async (event, context) => {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',  // ✅ Added X-API-Key
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
         'Access-Control-Allow-Methods': 'POST, OPTIONS'
       }
     };
@@ -62,18 +62,24 @@ const handler = async (event, context) => {
     if (isSpiffyWebhook) {
       console.log('🛒 Spiffy webhook detected, looking up attribution...');
       
-      const userIP = event.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
-                     event.headers['x-real-ip'] || 
-                     'unknown';
+      // Extract customer IP from webhook payload (not server headers)
+      const customerIP = data.checkoutview?.pageviewcheckout?.pageview?.ip || 
+                        data.pageview?.ip || 
+                        data.ip ||
+                        event.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+                        event.headers['x-real-ip'] || 
+                        'unknown';
+      
+      console.log('🔍 Customer IP extracted:', customerIP);
       
       try {
-        // 🔧 FIXED: Added API key header to attribution lookup
+        // Try direct IP-based attribution lookup
         const lookupResponse = await fetch(
-          `https://trackingojoy.netlify.app/.netlify/functions/store-attribution?ip=${userIP}&timestamp=${new Date().toISOString()}`,
+          `https://trackingojoy.netlify.app/.netlify/functions/store-attribution?ip=${customerIP}&timestamp=${new Date().toISOString()}`,
           { 
             method: 'GET',
             headers: {
-              'X-API-Key': process.env.OJOY_API_KEY  // ✅ Added missing API key!
+              'X-API-Key': process.env.OJOY_API_KEY
             }
           }
         );
@@ -82,9 +88,9 @@ const handler = async (event, context) => {
           const lookupResult = await lookupResponse.json();
           if (lookupResult.found) {
             attributionData = lookupResult.data;
-            console.log('✅ Attribution data found via lookup');
+            console.log('✅ Attribution data found via IP lookup');
           } else {
-            console.log('⚠️ No attribution data found for this user');
+            console.log('⚠️ No attribution data found for this IP');
           }
         } else {
           console.log('❌ Attribution lookup failed with status:', lookupResponse.status);
@@ -104,7 +110,7 @@ const handler = async (event, context) => {
             console.log(`🔍 Searching ${emailKeys.result.length} attribution keys for ${data.email}`);
             
             // Check recent attribution data for a match
-            const recentKeys = emailKeys.result.slice(-20); // Check last 20 records (increased from 10)
+            const recentKeys = emailKeys.result.slice(-20); // Check last 20 records
             let bestMatch = null;
             let bestMatchScore = 0;
             
@@ -117,13 +123,18 @@ const handler = async (event, context) => {
                   // Calculate time difference
                   const timeDiff = Date.now() - new Date(parsedData.timestamp).getTime();
                   
-                  // Only consider attribution within 2 hours (much stricter)
-                  if (timeDiff < 2 * 60 * 60 * 1000) {
+                  // Only consider attribution within 1 hour (strict timing)
+                  if (timeDiff < 1 * 60 * 60 * 1000) {
                     let matchScore = 0;
                     
                     // Scoring system for attribution matching
                     // High priority: exact email match
                     if (parsedData.email && parsedData.email === data.email) {
+                      matchScore += 100;
+                    }
+                    
+                    // High priority: exact IP match
+                    if (parsedData.ip_address && parsedData.ip_address === customerIP) {
                       matchScore += 100;
                     }
                     
@@ -139,6 +150,7 @@ const handler = async (event, context) => {
                     console.log(`🔍 Attribution match candidate:`, {
                       key: key.substring(0, 50) + '...',
                       email: parsedData.email,
+                      ip: parsedData.ip_address,
                       source: parsedData.source,
                       timeDiff: Math.round(timeDiff / 60000) + 'm',
                       score: matchScore
@@ -158,14 +170,17 @@ const handler = async (event, context) => {
             }
             
             // Only use attribution if we found a high-confidence match
-            if (bestMatch && bestMatchScore >= 100) { // Require email match
+            if (bestMatch && bestMatchScore >= 100) { // Require email or IP match
               attributionData = bestMatch;
-              console.log(`✅ Attribution data found via email match (score: ${bestMatchScore})`);
+              console.log(`✅ Attribution data found via high-confidence match (score: ${bestMatchScore})`);
             } else if (bestMatch && bestMatchScore >= 50) {
               attributionData = bestMatch;
-              console.log(`⚠️ Attribution data found via source match (score: ${bestMatchScore}) - may be imprecise`);
+              console.log(`⚠️ Attribution data found via medium-confidence match (score: ${bestMatchScore})`);
+            } else if (bestMatch && bestMatchScore >= 10) { // Accept timing-based matches within 10 minutes
+              attributionData = bestMatch;
+              console.log(`⚠️ Attribution data found via timing match (score: ${bestMatchScore}) - low confidence`);
             } else {
-              console.log(`❌ No high-confidence attribution match found (best score: ${bestMatchScore})`);
+              console.log(`❌ No high-confidence attribution match found (best score: ${bestMatchScore || 0})`);
             }
           }
         } catch (emailLookupError) {
@@ -173,6 +188,23 @@ const handler = async (event, context) => {
         }
       }
     }
+    
+    // Extract customer data from Spiffy webhook payload
+    const customerUserAgent = data.checkoutview?.pageviewcheckout?.pageview?.user_agent || 
+                             data.pageview?.user_agent || 
+                             data.user_agent ||
+                             attributionData?.user_agent || 
+                             event.headers['user-agent'] || '';
+    
+    const customerIPAddress = data.checkoutview?.pageviewcheckout?.pageview?.ip || 
+                             data.pageview?.ip || 
+                             data.ip ||
+                             event.headers['x-forwarded-for'] || '';
+    
+    // Extract landing page from webhook or attribution
+    const landingPage = data.checkoutview?.pageviewcheckout?.pageview?.url ||
+                       attributionData?.landing_page ||
+                       data.page_url || '';
     
     const trackingData = {
       timestamp: new Date().toISOString(),
@@ -193,9 +225,9 @@ const handler = async (event, context) => {
       
       source_type: attributionData?.source_type || 'unknown',
       referrer_url: attributionData?.referrer_url || data.page_url || '',
-      landing_page: attributionData?.landing_page || '',
+      landing_page: landingPage,
       
-      page_url: data.page_url || attributionData?.landing_page || '',
+      page_url: data.page_url || landingPage || '',
       conversion_page: data.conversion_page || '',
       
       email: data.email || '',
@@ -211,8 +243,9 @@ const handler = async (event, context) => {
         subscription_id: data.subscription_id
       }),
       
-      ip_address: event.headers['x-forwarded-for'] || '',
-      user_agent: attributionData?.user_agent || event.headers['user-agent'] || '',
+      // Use customer data from webhook payload, not server headers
+      ip_address: customerIPAddress,
+      user_agent: customerUserAgent,
       
       ...(attributionData && {
         screen_resolution: attributionData.screen_resolution,
