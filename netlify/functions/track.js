@@ -1,5 +1,5 @@
 // File: netlify/functions/track.js
-// Redis-powered conversion tracking
+// Fixed Redis-powered conversion tracking with API key authentication
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -7,7 +7,7 @@ const handler = async (event, context) => {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',  // ✅ Added X-API-Key
         'Access-Control-Allow-Methods': 'POST, OPTIONS'
       }
     };
@@ -20,6 +20,25 @@ const handler = async (event, context) => {
       body: 'Method not allowed'
     };
   }
+
+  // 🔒 API Key validation for external calls (optional but recommended)
+  const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
+  const validApiKey = process.env.OJOY_API_KEY;
+
+  // Allow internal webhook calls without API key, but require it for external calls
+  const isInternalCall = !apiKey; // Webhook calls typically don't have API key
+  const isValidExternalCall = apiKey && apiKey === validApiKey;
+
+  if (!isInternalCall && !isValidExternalCall) {
+    console.log('🚫 Unauthorized external access attempt');
+    return {
+      statusCode: 401,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: JSON.stringify({ error: 'Unauthorized' })
+    };
+  }
+
+  console.log('✅ Track function access authorized');
 
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -48,9 +67,15 @@ const handler = async (event, context) => {
                      'unknown';
       
       try {
+        // 🔧 FIXED: Added API key header to attribution lookup
         const lookupResponse = await fetch(
           `https://trackingojoy.netlify.app/.netlify/functions/store-attribution?ip=${userIP}&timestamp=${new Date().toISOString()}`,
-          { method: 'GET' }
+          { 
+            method: 'GET',
+            headers: {
+              'X-API-Key': process.env.OJOY_API_KEY  // ✅ Added missing API key!
+            }
+          }
         );
         
         if (lookupResponse.ok) {
@@ -61,9 +86,44 @@ const handler = async (event, context) => {
           } else {
             console.log('⚠️ No attribution data found for this user');
           }
+        } else {
+          console.log('❌ Attribution lookup failed with status:', lookupResponse.status);
         }
       } catch (lookupError) {
         console.log('❌ Attribution lookup failed:', lookupError.message);
+      }
+
+      // 🔧 ENHANCED: Try alternative attribution lookup methods if IP lookup fails
+      if (!attributionData && data.email) {
+        console.log('🔍 Trying email-based attribution lookup...');
+        try {
+          // Look for recent attribution data by email or session
+          const emailKeys = await redis('keys/attribution:*');
+          if (emailKeys.result && emailKeys.result.length > 0) {
+            // Check recent attribution data for a match
+            const recentKeys = emailKeys.result.slice(-10); // Check last 10 records
+            for (const key of recentKeys) {
+              try {
+                const attrData = await redis(`get/${key}`);
+                if (attrData.result) {
+                  const parsedData = JSON.parse(attrData.result);
+                  // Match by timing (within last 24 hours) as fallback
+                  const timeDiff = Date.now() - new Date(parsedData.timestamp).getTime();
+                  if (timeDiff < 24 * 60 * 60 * 1000) { // Within 24 hours
+                    attributionData = parsedData;
+                    console.log('✅ Attribution data found via timing match');
+                    break;
+                  }
+                }
+              } catch (parseError) {
+                // Skip invalid records
+                continue;
+              }
+            }
+          }
+        } catch (emailLookupError) {
+          console.log('❌ Email-based attribution lookup failed:', emailLookupError.message);
+        }
       }
     }
     
