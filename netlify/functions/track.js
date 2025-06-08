@@ -92,32 +92,85 @@ const handler = async (event, context) => {
       } catch (lookupError) {
         console.log('❌ Attribution lookup failed:', lookupError.message);
       }
-
-      // 🔧 ENHANCED: Try alternative attribution lookup methods if IP lookup fails
+// 🔧 ENHANCED: Try alternative attribution lookup methods if IP lookup fails
       if (!attributionData && data.email) {
         console.log('🔍 Trying email-based attribution lookup...');
         try {
           // Look for recent attribution data by email or session
           const emailKeys = await redis('keys/attribution:*');
           if (emailKeys.result && emailKeys.result.length > 0) {
+            
+            console.log(`🔍 Searching ${emailKeys.result.length} attribution keys for ${data.email}`);
+            
             // Check recent attribution data for a match
-            const recentKeys = emailKeys.result.slice(-10); // Check last 10 records
+            const recentKeys = emailKeys.result.slice(-20); // Check last 20 records (increased from 10)
+            let bestMatch = null;
+            let bestMatchScore = 0;
+            
             for (const key of recentKeys) {
               try {
                 const attrData = await redis(`get/${key}`);
                 if (attrData.result) {
                   const parsedData = JSON.parse(attrData.result);
-                  // Match by timing (within last 24 hours) as fallback
+                  
+                  // Calculate time difference
                   const timeDiff = Date.now() - new Date(parsedData.timestamp).getTime();
-                  if (timeDiff < 24 * 60 * 60 * 1000) { // Within 24 hours
-                    attributionData = parsedData;
-                    console.log('✅ Attribution data found via timing match');
-                    break;
+                  
+                  // Only consider attribution within 2 hours (much stricter)
+                  if (timeDiff < 2 * 60 * 60 * 1000) {
+                    let matchScore = 0;
+                    
+                    // Scoring system for attribution matching
+                    // High priority: exact email match
+                    if (parsedData.email && parsedData.email === data.email) {
+                      matchScore += 100;
+                    }
+                    
+                    // Medium priority: same source (if available in webhook)
+                    if (parsedData.source && data.utm_source && parsedData.source === data.utm_source) {
+                      matchScore += 50;
+                    }
+                    
+                    // Low priority: time proximity (newer = better score)
+                    const timeScore = Math.max(0, 10 - (timeDiff / (10 * 60 * 1000))); // 0-10 based on minutes
+                    matchScore += timeScore;
+                    
+                    console.log(`🔍 Attribution match candidate:`, {
+                      key: key.substring(0, 50) + '...',
+                      email: parsedData.email,
+                      source: parsedData.source,
+                      timeDiff: Math.round(timeDiff / 60000) + 'm',
+                      score: matchScore
+                    });
+                    
+                    // Keep track of best match
+                    if (matchScore > bestMatchScore) {
+                      bestMatch = parsedData;
+                      bestMatchScore = matchScore;
+                    }
                   }
                 }
               } catch (parseError) {
                 // Skip invalid records
                 continue;
+              }
+            }
+            
+            // Only use attribution if we found a high-confidence match
+            if (bestMatch && bestMatchScore >= 100) { // Require email match
+              attributionData = bestMatch;
+              console.log(`✅ Attribution data found via email match (score: ${bestMatchScore})`);
+            } else if (bestMatch && bestMatchScore >= 50) {
+              attributionData = bestMatch;
+              console.log(`⚠️ Attribution data found via source match (score: ${bestMatchScore}) - may be imprecise`);
+            } else {
+              console.log(`❌ No high-confidence attribution match found (best score: ${bestMatchScore})`);
+            }
+          }
+        } catch (emailLookupError) {
+          console.log('❌ Email-based attribution lookup failed:', emailLookupError.message);
+        }
+      }
               }
             }
           }
