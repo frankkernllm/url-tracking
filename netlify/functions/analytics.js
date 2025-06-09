@@ -46,7 +46,7 @@ const handler = async (event, context) => {
       let conversionKeys = [];
       
       try {
-        // Get attribution keys - using IPv6-safe pattern
+        // CRITICAL FIX: Use underscore pattern for IPv6-safe keys
         const attributionResult = await redis('keys/attribution_*');
         attributionKeys = attributionResult.result || [];
         console.log(`🔍 Raw attribution keys found: ${attributionKeys.length}`);
