@@ -1,5 +1,5 @@
 // File: netlify/functions/store-attribution.js
-// FINAL FIX: Properly handles session lookup and Redis key patterns
+// FINAL FIX: IPv6-safe key pattern using URL encoding
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -17,17 +17,7 @@ const handler = async (event, context) => {
   const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
   const validApiKey = process.env.OJOY_API_KEY;
 
-  if (!validApiKey) {
-    console.error('❌ No API key configured in environment');
-    return {
-      statusCode: 500,
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: JSON.stringify({ error: 'Server configuration error' })
-    };
-  }
-
   if (!apiKey || apiKey !== validApiKey) {
-    console.log('🚫 Unauthorized access attempt');
     return {
       statusCode: 401,
       headers: { 'Access-Control-Allow-Origin': '*' },
@@ -37,15 +27,6 @@ const handler = async (event, context) => {
 
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-  if (!redisUrl || !redisToken) {
-    console.error('❌ Missing Redis credentials');
-    return {
-      statusCode: 500,
-      headers: { 'Access-Control-Allow-Origin': '*' },
-      body: JSON.stringify({ error: 'Redis not configured' })
-    };
-  }
 
   const redis = async (command) => {
     const response = await fetch(`${redisUrl}/${command}`, {
@@ -62,35 +43,25 @@ const handler = async (event, context) => {
     const clientIP = event.headers['x-client-ip'];
     
     if (forwarded) {
-      const firstIP = forwarded.split(',')[0].trim();
-      console.log('🔍 Visitor IP from X-Forwarded-For:', firstIP);
-      return firstIP;
+      return forwarded.split(',')[0].trim();
     }
+    if (cfIP) return cfIP;
+    if (realIP) return realIP;
+    if (clientIP) return clientIP;
     
-    if (cfIP) {
-      console.log('🔍 Visitor IP from CF-Connecting-IP:', cfIP);
-      return cfIP;
-    }
-    
-    if (realIP) {
-      console.log('🔍 Visitor IP from X-Real-IP:', realIP);
-      return realIP;
-    }
-    
-    if (clientIP) {
-      console.log('🔍 Visitor IP from X-Client-IP:', clientIP);
-      return clientIP;
-    }
-    
-    console.log('⚠️ No visitor IP found in headers');
     return 'unknown';
+  }
+
+  // IPv6-safe key encoding
+  function encodeIPForKey(ip) {
+    // Replace colons with underscores for IPv6 addresses
+    return ip.replace(/:/g, '_');
   }
 
   if (event.httpMethod === 'POST') {
     try {
       const attributionData = JSON.parse(event.body);
       
-      // CRITICAL FIX: Add real visitor IP to attribution data
       const visitorIP = getVisitorIP(event);
       attributionData.ip_address = visitorIP;
       
@@ -102,17 +73,20 @@ const handler = async (event, context) => {
       });
       
       const timestamp = Date.now();
+      const encodedIP = encodeIPForKey(visitorIP);
       
-      // FIXED: Use consistent key pattern that analytics.js expects
-      const baseKey = `attribution:${visitorIP}:${timestamp}`;
+      // FIXED: IPv6-safe key pattern
+      const baseKey = `attribution_${encodedIP}_${timestamp}`;
+      
+      console.log('🔑 Creating base key:', baseKey);
       
       // Store the full attribution data
       await redis(`set/${baseKey}/${encodeURIComponent(JSON.stringify(attributionData))}`);
       console.log('✅ Stored attribution with key:', baseKey);
       
       // Create lookup keys with longer expiration (24 hours = 86400 seconds)
-      const ipKey = `attribution_ip:${visitorIP}`;
-      const sessionKey = `attribution_session:${attributionData.session_id}`;
+      const ipKey = `attribution_ip_${encodedIP}`;
+      const sessionKey = `attribution_session_${attributionData.session_id}`;
       
       await redis(`setex/${ipKey}/86400/${baseKey}`);
       await redis(`setex/${sessionKey}/86400/${baseKey}`);
@@ -127,7 +101,8 @@ const handler = async (event, context) => {
           message: 'Attribution data stored successfully',
           visitor_ip: visitorIP,
           keys_created: 3,
-          base_key: baseKey
+          base_key: baseKey,
+          encoded_ip: encodedIP
         })
       };
       
@@ -147,7 +122,6 @@ const handler = async (event, context) => {
       
       console.log('🔍 GET request params:', { ip, session_id, timestamp });
       
-      // FIXED: Better parameter validation
       if (!ip && !session_id) {
         return {
           statusCode: 400,
@@ -162,10 +136,11 @@ const handler = async (event, context) => {
       let lookupResult = null;
       let lookupMethod = 'none';
       
-      // Try different lookup methods in order of preference
+      // Try different lookup methods
       if (ip) {
-        console.log(`🔍 Looking up attribution for IP: ${ip}`);
-        const ipLookupKey = `attribution_ip:${ip}`;
+        const encodedIP = encodeIPForKey(ip);
+        console.log(`🔍 Looking up attribution for encoded IP: ${encodedIP}`);
+        const ipLookupKey = `attribution_ip_${encodedIP}`;
         lookupResult = await redis(`get/${ipLookupKey}`);
         if (lookupResult.result) {
           lookupMethod = 'ip_address';
@@ -175,7 +150,7 @@ const handler = async (event, context) => {
       
       if (!lookupResult?.result && session_id) {
         console.log(`🔍 Looking up attribution for session: ${session_id}`);
-        const sessionLookupKey = `attribution_session:${session_id}`;
+        const sessionLookupKey = `attribution_session_${session_id}`;
         lookupResult = await redis(`get/${sessionLookupKey}`);
         if (lookupResult.result) {
           lookupMethod = 'session_id';
