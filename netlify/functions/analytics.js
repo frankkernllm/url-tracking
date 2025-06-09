@@ -47,7 +47,7 @@ const handler = async (event, context) => {
       
       try {
         // CRITICAL FIX: Use underscore pattern for IPv6-safe keys
-        const attributionResult = await redis('keys/attribution_*');
+       const attributionResult = await redis('keys/attribution_*');
         attributionKeys = attributionResult.result || [];
         console.log(`🔍 Raw attribution keys found: ${attributionKeys.length}`);
         
