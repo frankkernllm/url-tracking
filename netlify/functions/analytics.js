@@ -1,5 +1,5 @@
 // File: netlify/functions/analytics.js
-// BRAND NEW FILE - IPv6-safe pattern fixed
+// FINAL FIX: Use Redis SCAN instead of KEYS command
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -13,7 +13,6 @@ const handler = async (event, context) => {
     };
   }
 
-  // Security check
   const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
   const validApiKey = process.env.OJOY_API_KEY;
 
@@ -41,34 +40,79 @@ const handler = async (event, context) => {
       
       console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
       
-      // 🔧 CRITICAL FIX: IPv6-safe pattern with underscore
+      // 🔧 CRITICAL FIX: Use SCAN instead of KEYS for better Redis compatibility
       let attributionKeys = [];
       let conversionKeys = [];
       
       try {
-        console.log('🔍 Searching for attribution keys with pattern: attribution_*');
-        const attributionResult = await redis('keys/attribution_*');
-        attributionKeys = attributionResult.result || [];
-        console.log(`🔍 Found ${attributionKeys.length} attribution keys`);
+        console.log('🔍 Using Redis SCAN to find attribution keys...');
         
-        // Debug: Log first few keys
-        if (attributionKeys.length > 0) {
-          console.log(`📋 Sample attribution keys:`, attributionKeys.slice(0, 2));
+        // Method 1: Try SCAN with pattern
+        try {
+          const scanResult = await redis('scan/0/match/attribution_*/count/1000');
+          if (scanResult.result && scanResult.result[1]) {
+            attributionKeys = scanResult.result[1];
+            console.log(`✅ SCAN found ${attributionKeys.length} attribution keys`);
+          }
+        } catch (scanError) {
+          console.log('⚠️ SCAN failed, trying alternative approach:', scanError);
+          
+          // Method 2: Try direct KEYS command with different syntax
+          try {
+            const keysResult = await redis('keys/*attribution_*');
+            attributionKeys = keysResult.result || [];
+            console.log(`✅ Alternative KEYS found ${attributionKeys.length} attribution keys`);
+          } catch (keysError) {
+            console.log('⚠️ Alternative KEYS failed:', keysError);
+            
+            // Method 3: Try basic pattern
+            try {
+              const basicResult = await redis('keys/attribution*');
+              attributionKeys = basicResult.result || [];
+              console.log(`✅ Basic pattern found ${attributionKeys.length} attribution keys`);
+            } catch (basicError) {
+              console.log('❌ All key discovery methods failed:', basicError);
+              attributionKeys = [];
+            }
+          }
         }
         
+        // Get conversion keys (this usually works)
         const conversionsResult = await redis('keys/conversions:*');
         conversionKeys = conversionsResult.result || [];
         console.log(`🔍 Found ${conversionKeys.length} conversion keys`);
         
       } catch (redisError) {
-        console.error('❌ Redis key fetch error:', redisError);
+        console.error('❌ Redis operation failed:', redisError);
         attributionKeys = [];
         conversionKeys = [];
       }
       
-      console.log(`📊 Found ${attributionKeys.length} attribution keys and ${conversionKeys.length} conversion keys`);
+      console.log(`📊 Final count: ${attributionKeys.length} attribution keys and ${conversionKeys.length} conversion keys`);
       
-      // Fetch attribution data (page views)
+      // If we still have 0 attribution keys, try one more fallback approach
+      if (attributionKeys.length === 0) {
+        console.log('🔄 Attempting fallback key discovery...');
+        try {
+          // Try to get ALL keys and filter
+          const allKeysResult = await redis('keys/*');
+          if (allKeysResult.result) {
+            attributionKeys = allKeysResult.result.filter(key => 
+              key && (key.startsWith('attribution_') || key.includes('attribution'))
+            );
+            console.log(`🔄 Fallback found ${attributionKeys.length} attribution keys from ${allKeysResult.result.length} total keys`);
+          }
+        } catch (fallbackError) {
+          console.log('❌ Fallback approach failed:', fallbackError);
+        }
+      }
+      
+      // Debug: Log key patterns we found
+      if (attributionKeys.length > 0) {
+        console.log(`📋 Sample attribution keys:`, attributionKeys.slice(0, 3));
+      }
+      
+      // Fetch attribution data
       let allPageViews = [];
       if (attributionKeys.length > 0) {
         try {
@@ -107,23 +151,17 @@ const handler = async (event, context) => {
               try {
                 return JSON.parse(item);
               } catch (parseError) {
-                console.log('⚠️ Failed to parse conversion item');
                 return null;
               }
             })
             .filter(item => item)
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
           
-          // Deduplicate conversions by email
+          // Deduplicate by email
           const seenEmails = new Set();
           allConversions = rawConversions.filter(conversion => {
             if (!conversion.email) return true;
-            
-            if (seenEmails.has(conversion.email)) {
-              console.log(`🚫 Removing duplicate conversion for: ${conversion.email}`);
-              return false;
-            }
-            
+            if (seenEmails.has(conversion.email)) return false;
             seenEmails.add(conversion.email);
             return true;
           });
@@ -148,7 +186,6 @@ const handler = async (event, context) => {
       const totalConversions = filteredConversions.length;
       const totalPageViews = filteredPageViews.length;
       
-      // Unique visitors by IP
       const uniqueVisitorIPs = new Set();
       filteredPageViews.forEach(pv => {
         if (pv.ip_address && pv.ip_address !== 'unknown') {
@@ -175,10 +212,7 @@ const handler = async (event, context) => {
         
         if (!trafficSources[source]) {
           trafficSources[source] = { 
-            pageViews: 0, 
-            conversions: 0, 
-            revenue: 0, 
-            uniqueVisitors: new Set() 
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() 
           };
         }
         trafficSources[source].pageViews++;
@@ -188,10 +222,7 @@ const handler = async (event, context) => {
         
         if (!campaignPerformance[campaign]) {
           campaignPerformance[campaign] = { 
-            pageViews: 0, 
-            conversions: 0, 
-            revenue: 0,
-            uniqueVisitors: new Set()
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set()
           };
         }
         campaignPerformance[campaign].pageViews++;
@@ -201,10 +232,7 @@ const handler = async (event, context) => {
         
         if (!landingPageStats[landingPage]) {
           landingPageStats[landingPage] = { 
-            pageViews: 0, 
-            conversions: 0, 
-            revenue: 0, 
-            uniqueVisitors: new Set() 
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() 
           };
         }
         landingPageStats[landingPage].pageViews++;
@@ -328,13 +356,12 @@ const handler = async (event, context) => {
           conversions: filteredConversions,
           page_views: filteredPageViews,
           
-          // Debug info to verify deployment
           debug: {
             attribution_keys_found: attributionKeys.length,
             conversion_keys_found: conversionKeys.length,
             sample_attribution_key: attributionKeys[0] || 'none',
             deployment_timestamp: new Date().toISOString(),
-            pattern_used: 'attribution_*'
+            redis_method: 'scan_fallback_approach'
           }
         })
       };
@@ -349,7 +376,6 @@ const handler = async (event, context) => {
     }
   }
   
-  // Handle POST requests
   if (event.httpMethod === 'POST') {
     try {
       const data = JSON.parse(event.body);
