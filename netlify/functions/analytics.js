@@ -1,5 +1,5 @@
-// File: netlify/functions/analytics.js  
-// FIXED: IPv6 support and proper Redis key reading
+// File: netlify/functions/analytics.js
+// BRAND NEW FILE - IPv6-safe pattern fixed
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -41,68 +41,52 @@ const handler = async (event, context) => {
       
       console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
       
-      // FIXED: Better Redis key fetching with IPv6 support
+      // 🔧 CRITICAL FIX: IPv6-safe pattern with underscore
       let attributionKeys = [];
       let conversionKeys = [];
       
       try {
-        // CRITICAL FIX: Use underscore pattern for IPv6-safe keys
-       const attributionResult = await redis('keys/attribution_*');
+        console.log('🔍 Searching for attribution keys with pattern: attribution_*');
+        const attributionResult = await redis('keys/attribution_*');
         attributionKeys = attributionResult.result || [];
-        console.log(`🔍 Raw attribution keys found: ${attributionKeys.length}`);
+        console.log(`🔍 Found ${attributionKeys.length} attribution keys`);
         
-        // Debug: Log first few keys to see the pattern
+        // Debug: Log first few keys
         if (attributionKeys.length > 0) {
-          console.log(`📋 Sample attribution keys:`, attributionKeys.slice(0, 3));
+          console.log(`📋 Sample attribution keys:`, attributionKeys.slice(0, 2));
         }
         
-        // Get conversion keys
         const conversionsResult = await redis('keys/conversions:*');
         conversionKeys = conversionsResult.result || [];
-        console.log(`🔍 Raw conversion keys found: ${conversionKeys.length}`);
+        console.log(`🔍 Found ${conversionKeys.length} conversion keys`);
         
       } catch (redisError) {
         console.error('❌ Redis key fetch error:', redisError);
-        // Continue with empty arrays rather than failing completely
         attributionKeys = [];
         conversionKeys = [];
       }
       
       console.log(`📊 Found ${attributionKeys.length} attribution keys and ${conversionKeys.length} conversion keys`);
       
-      // Fetch attribution data (page views) with error handling
+      // Fetch attribution data (page views)
       let allPageViews = [];
       if (attributionKeys.length > 0) {
         try {
-          // Batch fetch attribution data - handle IPv6 keys carefully
-          const chunkSize = 50; // Process in smaller chunks to avoid issues
-          
-          for (let i = 0; i < attributionKeys.length; i += chunkSize) {
-            const chunk = attributionKeys.slice(i, i + chunkSize);
-            console.log(`📦 Processing attribution chunk ${Math.floor(i/chunkSize) + 1}/${Math.ceil(attributionKeys.length/chunkSize)}`);
-            
-            try {
-              const chunkResult = await redis(`mget/${chunk.join('/')}`);
-              const chunkData = (chunkResult.result || [])
-                .filter(item => item) // Remove null/undefined items
-                .map(item => {
-                  try {
-                    return JSON.parse(item);
-                  } catch (parseError) {
-                    console.log('⚠️ Failed to parse attribution item:', parseError);
-                    return null;
-                  }
-                })
-                .filter(item => item) // Remove failed parses
-                .map(item => ({ ...item, event_type: 'page_view' }));
-              
-              allPageViews = allPageViews.concat(chunkData);
-              
-            } catch (chunkError) {
-              console.log(`⚠️ Failed to fetch attribution chunk:`, chunkError);
-              // Continue with other chunks
-            }
-          }
+          console.log('📦 Fetching attribution data...');
+          const attributionData = await redis(`mget/${attributionKeys.join('/')}`);
+          allPageViews = (attributionData.result || [])
+            .filter(item => item)
+            .map(item => {
+              try {
+                return JSON.parse(item);
+              } catch (parseError) {
+                console.log('⚠️ Failed to parse attribution item');
+                return null;
+              }
+            })
+            .filter(item => item)
+            .map(item => ({ ...item, event_type: 'page_view' }))
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
           
           console.log(`📊 Successfully parsed ${allPageViews.length} page views`);
           
@@ -112,7 +96,7 @@ const handler = async (event, context) => {
         }
       }
       
-      // Fetch conversion data with PROPER DEDUPLICATION
+      // Fetch conversion data with deduplication
       let allConversions = [];
       if (conversionKeys.length > 0) {
         try {
@@ -123,17 +107,17 @@ const handler = async (event, context) => {
               try {
                 return JSON.parse(item);
               } catch (parseError) {
-                console.log('⚠️ Failed to parse conversion item:', parseError);
+                console.log('⚠️ Failed to parse conversion item');
                 return null;
               }
             })
             .filter(item => item)
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
           
-          // CRITICAL FIX: Deduplicate conversions by email
+          // Deduplicate conversions by email
           const seenEmails = new Set();
           allConversions = rawConversions.filter(conversion => {
-            if (!conversion.email) return true; // Keep conversions without email
+            if (!conversion.email) return true;
             
             if (seenEmails.has(conversion.email)) {
               console.log(`🚫 Removing duplicate conversion for: ${conversion.email}`);
@@ -152,9 +136,6 @@ const handler = async (event, context) => {
         }
       }
       
-      // Sort page views by timestamp
-      allPageViews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      
       console.log(`📊 Analytics query returned ${allPageViews.length} page views and ${allConversions.length} conversions`);
       
       // Apply filters
@@ -167,7 +148,7 @@ const handler = async (event, context) => {
       const totalConversions = filteredConversions.length;
       const totalPageViews = filteredPageViews.length;
       
-      // Deduplicate page views by IP for unique visitors count
+      // Unique visitors by IP
       const uniqueVisitorIPs = new Set();
       filteredPageViews.forEach(pv => {
         if (pv.ip_address && pv.ip_address !== 'unknown') {
@@ -192,7 +173,6 @@ const handler = async (event, context) => {
         const campaign = item.utm_campaign || item.campaign || 'none';
         const landingPage = item.landing_page || item.page_url || 'unknown';
         
-        // Traffic sources
         if (!trafficSources[source]) {
           trafficSources[source] = { 
             pageViews: 0, 
@@ -206,7 +186,6 @@ const handler = async (event, context) => {
           trafficSources[source].uniqueVisitors.add(item.ip_address);
         }
         
-        // Campaign performance
         if (!campaignPerformance[campaign]) {
           campaignPerformance[campaign] = { 
             pageViews: 0, 
@@ -220,7 +199,6 @@ const handler = async (event, context) => {
           campaignPerformance[campaign].uniqueVisitors.add(item.ip_address);
         }
         
-        // Landing pages
         if (!landingPageStats[landingPage]) {
           landingPageStats[landingPage] = { 
             pageViews: 0, 
@@ -235,7 +213,7 @@ const handler = async (event, context) => {
         }
       });
       
-      // Process conversions (deduplicated)
+      // Process conversions
       filteredConversions.forEach(item => {
         const source = item.source || 'direct';
         const campaign = item.utm_campaign || item.campaign || 'none';
@@ -347,14 +325,16 @@ const handler = async (event, context) => {
           campaign_performance: topCampaigns,
           landing_page_performance: topLandingPages,
           daily_trends: dailyTrends,
-          conversions: filteredConversions, // Already deduplicated
+          conversions: filteredConversions,
           page_views: filteredPageViews,
           
-          // Debug info
+          // Debug info to verify deployment
           debug: {
             attribution_keys_found: attributionKeys.length,
             conversion_keys_found: conversionKeys.length,
-            sample_attribution_key: attributionKeys[0] || 'none'
+            sample_attribution_key: attributionKeys[0] || 'none',
+            deployment_timestamp: new Date().toISOString(),
+            pattern_used: 'attribution_*'
           }
         })
       };
@@ -369,13 +349,12 @@ const handler = async (event, context) => {
     }
   }
   
-  // Handle POST requests (for storing data)
+  // Handle POST requests
   if (event.httpMethod === 'POST') {
     try {
       const data = JSON.parse(event.body);
       
       if (data.event_type === 'purchase' || data.event_type === 'conversion' || data.order_total !== undefined) {
-        // Use email-based key for conversions to prevent duplicates
         const key = data.email ? 
           `conversions:${data.email.replace(/[^a-zA-Z0-9]/g, '_')}:${Date.now()}` :
           `conversions:${data.timestamp}:${Math.random()}`;
@@ -411,7 +390,6 @@ const handler = async (event, context) => {
   };
 };
 
-// Apply date and criteria filters
 function applyFilters(data, filters) {
   let filtered = data;
   
