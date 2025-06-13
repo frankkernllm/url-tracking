@@ -1,5 +1,5 @@
 // File: netlify/functions/analytics.js
-// FINAL FIX: Use Redis SCAN instead of KEYS command
+// FIXED: Proper Redis SCAN iteration to include IPv6 addresses
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -40,47 +40,90 @@ const handler = async (event, context) => {
       
       console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}`);
       
-      // 🔧 CRITICAL FIX: Use SCAN instead of KEYS for better Redis compatibility
+      // 🔧 CRITICAL FIX: Use SCAN with proper cursor iteration for IPv6 support
       let attributionKeys = [];
       let conversionKeys = [];
       
       try {
-        console.log('🔍 Using Redis SCAN to find attribution keys...');
+        console.log('🔍 Using Redis SCAN to find ALL attribution keys...');
         
-        // Method 1: Try SCAN with pattern
-        try {
-          const scanResult = await redis('scan/0/match/attribution_*/count/1000');
-          if (scanResult.result && scanResult.result[1]) {
-            attributionKeys = scanResult.result[1];
-            console.log(`✅ SCAN found ${attributionKeys.length} attribution keys`);
-          }
-        } catch (scanError) {
-          console.log('⚠️ SCAN failed, trying alternative approach:', scanError);
-          
-          // Method 2: Try direct KEYS command with different syntax
+        // Properly scan for attribution keys with cursor iteration
+        let cursor = 0;
+        let scanCount = 0;
+        const maxScans = 100; // Safety limit
+        
+        do {
+          scanCount++;
           try {
-            const keysResult = await redis('keys/*attribution_*');
-            attributionKeys = keysResult.result || [];
-            console.log(`✅ Alternative KEYS found ${attributionKeys.length} attribution keys`);
-          } catch (keysError) {
-            console.log('⚠️ Alternative KEYS failed:', keysError);
-            
-            // Method 3: Try basic pattern
-            try {
-              const basicResult = await redis('keys/attribution*');
-              attributionKeys = basicResult.result || [];
-              console.log(`✅ Basic pattern found ${attributionKeys.length} attribution keys`);
-            } catch (basicError) {
-              console.log('❌ All key discovery methods failed:', basicError);
-              attributionKeys = [];
+            const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/1000`);
+            if (scanResult.result && Array.isArray(scanResult.result) && scanResult.result.length >= 2) {
+              cursor = parseInt(scanResult.result[0]);
+              const keys = scanResult.result[1] || [];
+              
+              // Filter out lookup keys (attribution_ip_* and attribution_session_*)
+              const validKeys = keys.filter(key => 
+                key && 
+                !key.startsWith('attribution_ip_') && 
+                !key.startsWith('attribution_session_')
+              );
+              
+              attributionKeys = attributionKeys.concat(validKeys);
+              console.log(`✅ SCAN iteration ${scanCount}: found ${validKeys.length} keys, new cursor: ${cursor}, total so far: ${attributionKeys.length}`);
+            } else {
+              console.log('⚠️ Unexpected SCAN result format:', scanResult);
+              break;
             }
+          } catch (scanError) {
+            console.log(`⚠️ SCAN iteration ${scanCount} failed:`, scanError);
+            break;
+          }
+        } while (cursor !== 0 && cursor !== '0' && scanCount < maxScans);
+        
+        console.log(`✅ SCAN complete: ${scanCount} iterations, found ${attributionKeys.length} total attribution keys`);
+        
+        // Debug: Check IPv4 vs IPv6 distribution
+        const ipv4Keys = attributionKeys.filter(key => {
+          const parts = key.split('_');
+          // IPv4 pattern: attribution_XXX_XXX_XXX_XXX_timestamp (6 parts total)
+          return parts.length === 6 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
+        });
+        const ipv6Keys = attributionKeys.filter(key => {
+          const parts = key.split('_');
+          // IPv6 has more parts due to more segments
+          return parts.length > 6;
+        });
+        console.log(`📊 Attribution keys breakdown - IPv4: ${ipv4Keys.length}, IPv6: ${ipv6Keys.length}`);
+        if (ipv6Keys.length > 0) {
+          console.log(`🌐 Sample IPv6 keys:`, ipv6Keys.slice(0, 3));
+        }
+        
+        // If no attribution keys found with SCAN, try fallback methods
+        if (attributionKeys.length === 0) {
+          console.log('⚠️ No keys found with SCAN, trying KEYS command fallback...');
+          try {
+            const keysResult = await redis('keys/attribution_*');
+            if (keysResult.result) {
+              attributionKeys = keysResult.result.filter(key => 
+                key && 
+                !key.startsWith('attribution_ip_') && 
+                !key.startsWith('attribution_session_')
+              );
+              console.log(`✅ KEYS fallback found ${attributionKeys.length} attribution keys`);
+            }
+          } catch (keysError) {
+            console.log('❌ KEYS fallback also failed:', keysError);
           }
         }
         
-        // Get conversion keys (this usually works)
-        const conversionsResult = await redis('keys/conversions:*');
-        conversionKeys = conversionsResult.result || [];
-        console.log(`🔍 Found ${conversionKeys.length} conversion keys`);
+        // Get conversion keys (usually fewer, so single operation is OK)
+        try {
+          const conversionsResult = await redis('keys/conversions:*');
+          conversionKeys = conversionsResult.result || [];
+          console.log(`🔍 Found ${conversionKeys.length} conversion keys`);
+        } catch (error) {
+          console.log('⚠️ Failed to get conversion keys:', error);
+          conversionKeys = [];
+        }
         
       } catch (redisError) {
         console.error('❌ Redis operation failed:', redisError);
@@ -90,49 +133,71 @@ const handler = async (event, context) => {
       
       console.log(`📊 Final count: ${attributionKeys.length} attribution keys and ${conversionKeys.length} conversion keys`);
       
-      // If we still have 0 attribution keys, try one more fallback approach
-      if (attributionKeys.length === 0) {
-        console.log('🔄 Attempting fallback key discovery...');
-        try {
-          // Try to get ALL keys and filter
-          const allKeysResult = await redis('keys/*');
-          if (allKeysResult.result) {
-            attributionKeys = allKeysResult.result.filter(key => 
-              key && (key.startsWith('attribution_') || key.includes('attribution'))
-            );
-            console.log(`🔄 Fallback found ${attributionKeys.length} attribution keys from ${allKeysResult.result.length} total keys`);
-          }
-        } catch (fallbackError) {
-          console.log('❌ Fallback approach failed:', fallbackError);
-        }
-      }
-      
-      // Debug: Log key patterns we found
-      if (attributionKeys.length > 0) {
-        console.log(`📋 Sample attribution keys:`, attributionKeys.slice(0, 3));
-      }
-      
-      // Fetch attribution data
+      // Fetch attribution data (handle large datasets in batches)
       let allPageViews = [];
       if (attributionKeys.length > 0) {
         try {
           console.log('📦 Fetching attribution data...');
-          const attributionData = await redis(`mget/${attributionKeys.join('/')}`);
-          allPageViews = (attributionData.result || [])
-            .filter(item => item)
-            .map(item => {
+          
+          // If there are too many keys, process in batches to avoid URL length limits
+          if (attributionKeys.length > 5000) {
+            console.log(`⚠️ Large dataset: ${attributionKeys.length} keys. Processing in batches...`);
+            
+            const batchSize = 1000;
+            for (let i = 0; i < attributionKeys.length; i += batchSize) {
+              const batch = attributionKeys.slice(i, i + batchSize);
               try {
-                return JSON.parse(item);
-              } catch (parseError) {
-                console.log('⚠️ Failed to parse attribution item');
-                return null;
+                const batchData = await redis(`mget/${batch.join('/')}`);
+                const parsedBatch = (batchData.result || [])
+                  .filter(item => item)
+                  .map(item => {
+                    try {
+                      return JSON.parse(item);
+                    } catch (parseError) {
+                      return null;
+                    }
+                  })
+                  .filter(item => item);
+                
+                allPageViews = allPageViews.concat(parsedBatch);
+                console.log(`✅ Batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(attributionKeys.length/batchSize)}: processed ${parsedBatch.length} records`);
+              } catch (batchError) {
+                console.error(`❌ Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
               }
-            })
-            .filter(item => item)
-            .map(item => ({ ...item, event_type: 'page_view' }))
-            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            }
+            
+            // Add event_type and sort
+            allPageViews = allPageViews
+              .map(item => ({ ...item, event_type: 'page_view' }))
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            
+          } else {
+            // Original code for smaller datasets
+            const attributionData = await redis(`mget/${attributionKeys.join('/')}`);
+            allPageViews = (attributionData.result || [])
+              .filter(item => item)
+              .map(item => {
+                try {
+                  return JSON.parse(item);
+                } catch (parseError) {
+                  console.log('⚠️ Failed to parse attribution item');
+                  return null;
+                }
+              })
+              .filter(item => item)
+              .map(item => ({ ...item, event_type: 'page_view' }))
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+          }
           
           console.log(`📊 Successfully parsed ${allPageViews.length} page views`);
+          
+          // Debug: Check IPv4 vs IPv6 in actual data
+          const ipv4Data = allPageViews.filter(pv => pv.ip_address && !pv.ip_address.includes(':'));
+          const ipv6Data = allPageViews.filter(pv => pv.ip_address && pv.ip_address.includes(':'));
+          console.log(`📊 Page view data - IPv4: ${ipv4Data.length}, IPv6: ${ipv6Data.length}`);
+          if (ipv6Data.length > 0) {
+            console.log(`🌐 Sample IPv6 IPs in data:`, ipv6Data.slice(0, 3).map(pv => pv.ip_address));
+          }
           
         } catch (attributionError) {
           console.error('❌ Attribution data fetch error:', attributionError);
@@ -334,6 +399,16 @@ const handler = async (event, context) => {
             (data.conversions / data.uniqueVisitors.size * 100).toFixed(1) : '0.0'
         }));
       
+      // Include IPv6 stats in debug
+      const ipv4KeysCount = attributionKeys.filter(key => {
+        const parts = key.split('_');
+        return parts.length === 6 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
+      }).length;
+      const ipv6KeysCount = attributionKeys.filter(key => {
+        const parts = key.split('_');
+        return parts.length > 6;
+      }).length;
+      
       return {
         statusCode: 200,
         headers: { 'Access-Control-Allow-Origin': '*' },
@@ -358,10 +433,13 @@ const handler = async (event, context) => {
           
           debug: {
             attribution_keys_found: attributionKeys.length,
+            ipv4_keys_found: ipv4KeysCount,
+            ipv6_keys_found: ipv6KeysCount,
             conversion_keys_found: conversionKeys.length,
             sample_attribution_key: attributionKeys[0] || 'none',
+            sample_ipv6_key: attributionKeys.find(k => k.split('_').length > 6) || 'none',
             deployment_timestamp: new Date().toISOString(),
-            redis_method: 'scan_fallback_approach'
+            redis_method: 'scan_with_cursor_iteration'
           }
         })
       };
