@@ -47,7 +47,7 @@ const handler = async (event, context) => {
       try {
         console.log('🔍 Finding ALL attribution keys including IPv6...');
         
-        // Method 1: Try SCAN first (the original working method for first 1000)
+        // Method 1: Get the first batch (mainly IPv4) using the working SCAN
         try {
           const scanResult = await redis('scan/0/match/attribution_*/count/1000');
           if (scanResult.result && scanResult.result[1]) {
@@ -62,61 +62,53 @@ const handler = async (event, context) => {
           console.log('⚠️ Initial SCAN failed:', scanError);
         }
         
-        // Method 2: Try KEYS command to get ALL keys (including IPv6)
-        if (attributionKeys.length > 0) {
-          console.log('🔄 Attempting to find additional keys with KEYS command...');
+        // Method 2: Specifically scan for IPv6 patterns (they start with 2xxx or similar)
+        console.log('🔍 Scanning specifically for IPv6 addresses...');
+        const ipv6Prefixes = ['2001', '2002', '2003', '2400', '2401', '2402', '2403', '2404', '2405', '2406', '2407', '2409', '2600', '2601', '2602', '2603', '2604', '2605', '2606', '2607', '2620', '2800', '2a00', '2a01', '2a02', '2a03'];
+        
+        for (const prefix of ipv6Prefixes) {
           try {
-            const keysResult = await redis('keys/attribution*');
-            if (keysResult.result && Array.isArray(keysResult.result)) {
-              const allKeys = keysResult.result.filter(key => 
+            const ipv6Result = await redis(`scan/0/match/attribution_${prefix}*/count/1000`);
+            if (ipv6Result.result && ipv6Result.result[1] && ipv6Result.result[1].length > 0) {
+              const ipv6Keys = ipv6Result.result[1].filter(key => 
                 key && 
                 !key.startsWith('attribution_ip_') && 
                 !key.startsWith('attribution_session_')
               );
               
-              // Merge with existing keys, avoiding duplicates
-              const keySet = new Set(attributionKeys);
-              allKeys.forEach(key => keySet.add(key));
-              attributionKeys = Array.from(keySet);
-              
-              console.log(`✅ KEYS command found ${allKeys.length} total keys, merged to ${attributionKeys.length} unique keys`);
+              if (ipv6Keys.length > 0) {
+                // Add to existing keys, avoiding duplicates
+                const keySet = new Set(attributionKeys);
+                ipv6Keys.forEach(key => keySet.add(key));
+                attributionKeys = Array.from(keySet);
+                console.log(`✅ Found ${ipv6Keys.length} IPv6 keys with prefix ${prefix}`);
+              }
             }
-          } catch (keysError) {
-            console.log('⚠️ KEYS command failed, sticking with SCAN results:', keysError);
+          } catch (prefixError) {
+            console.log(`⚠️ Failed to scan IPv6 prefix ${prefix}:`, prefixError);
           }
         }
         
-        // Method 3: If we still have few keys, try alternative patterns
-        if (attributionKeys.length < 100) {
-          console.log('⚠️ Very few keys found, trying alternative patterns...');
-          
-          // Try different Redis command syntaxes
-          const patterns = [
-            'keys/*attribution_*',
-            'keys/attribution_*',
-            'keys/*'
-          ];
-          
-          for (const pattern of patterns) {
-            try {
-              const result = await redis(pattern);
-              if (result.result && Array.isArray(result.result)) {
-                const foundKeys = result.result.filter(key => 
-                  key && 
-                  key.startsWith('attribution_') &&
-                  !key.startsWith('attribution_ip_') && 
-                  !key.startsWith('attribution_session_')
-                );
-                
-                if (foundKeys.length > attributionKeys.length) {
-                  attributionKeys = foundKeys;
-                  console.log(`✅ Pattern '${pattern}' found ${foundKeys.length} keys`);
-                  break;
-                }
-              }
-            } catch (err) {
-              console.log(`⚠️ Pattern '${pattern}' failed:`, err.message);
+        // Method 3: If the first scan found exactly 1000 keys, try to get the next batch
+        if (attributionKeys.length === 1000) {
+          console.log('🔍 First scan returned exactly 1000 keys, trying to get more batches...');
+          try {
+            // Try with a different cursor value
+            const scanResult2 = await redis('scan/1000/match/attribution_*/count/1000');
+            if (scanResult2.result && scanResult2.result[1] && scanResult2.result[1].length > 0) {
+              const moreKeys = scanResult2.result[1].filter(key => 
+                key && 
+                !key.startsWith('attribution_ip_') && 
+                !key.startsWith('attribution_session_')
+              );
+              
+              const keySet = new Set(attributionKeys);
+              moreKeys.forEach(key => keySet.add(key));
+              attributionKeys = Array.from(keySet);
+              console.log(`✅ Second batch found ${moreKeys.length} additional keys, total: ${attributionKeys.length}`);
             }
+          } catch (err) {
+            console.log('⚠️ Second batch scan failed:', err);
           }
         }
         
