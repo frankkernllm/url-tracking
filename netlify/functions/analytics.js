@@ -45,41 +45,69 @@ const handler = async (event, context) => {
       let conversionKeys = [];
       
       try {
-        console.log('🔍 Using Redis SCAN to find ALL attribution keys...');
+        console.log('🔍 Finding ALL attribution keys including IPv6...');
         
-        // Properly scan for attribution keys with cursor iteration
-        let cursor = 0;
-        let scanCount = 0;
-        const maxScans = 100; // Safety limit
+        // For Upstash, we need to use KEYS command as SCAN might have limitations
+        // First, let's try to get all keys that start with attribution_
+        try {
+          const keysResult = await redis('keys/attribution_*');
+          if (keysResult.result && Array.isArray(keysResult.result)) {
+            // Filter out lookup keys
+            attributionKeys = keysResult.result.filter(key => 
+              key && 
+              !key.startsWith('attribution_ip_') && 
+              !key.startsWith('attribution_session_')
+            );
+            console.log(`✅ KEYS command found ${attributionKeys.length} attribution keys`);
+          }
+        } catch (keysError) {
+          console.log('⚠️ KEYS command failed:', keysError);
+          
+          // Fallback: Try to get keys in chunks by prefix
+          console.log('🔄 Trying chunked approach...');
+          const prefixes = [
+            'attribution_1', 'attribution_2', 'attribution_3', 'attribution_4', 
+            'attribution_5', 'attribution_6', 'attribution_7', 'attribution_8', 
+            'attribution_9', 'attribution_0'
+          ];
+          
+          for (const prefix of prefixes) {
+            try {
+              const prefixResult = await redis(`keys/${prefix}*`);
+              if (prefixResult.result && Array.isArray(prefixResult.result)) {
+                const validKeys = prefixResult.result.filter(key => 
+                  key && 
+                  !key.startsWith('attribution_ip_') && 
+                  !key.startsWith('attribution_session_')
+                );
+                attributionKeys = attributionKeys.concat(validKeys);
+                console.log(`✅ Found ${validKeys.length} keys with prefix ${prefix}`);
+              }
+            } catch (prefixError) {
+              console.log(`⚠️ Failed to get keys for prefix ${prefix}:`, prefixError);
+            }
+          }
+          console.log(`✅ Chunked approach found ${attributionKeys.length} total attribution keys`);
+        }
         
-        do {
-          scanCount++;
+        // If still no keys, try the most basic approach
+        if (attributionKeys.length === 0) {
+          console.log('🔄 Trying basic wildcard approach...');
           try {
-            const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/1000`);
-            if (scanResult.result && Array.isArray(scanResult.result) && scanResult.result.length >= 2) {
-              cursor = parseInt(scanResult.result[0]);
-              const keys = scanResult.result[1] || [];
-              
-              // Filter out lookup keys (attribution_ip_* and attribution_session_*)
-              const validKeys = keys.filter(key => 
+            const allResult = await redis('keys/*');
+            if (allResult.result && Array.isArray(allResult.result)) {
+              attributionKeys = allResult.result.filter(key => 
                 key && 
+                key.startsWith('attribution_') &&
                 !key.startsWith('attribution_ip_') && 
                 !key.startsWith('attribution_session_')
               );
-              
-              attributionKeys = attributionKeys.concat(validKeys);
-              console.log(`✅ SCAN iteration ${scanCount}: found ${validKeys.length} keys, new cursor: ${cursor}, total so far: ${attributionKeys.length}`);
-            } else {
-              console.log('⚠️ Unexpected SCAN result format:', scanResult);
-              break;
+              console.log(`✅ Wildcard approach found ${attributionKeys.length} attribution keys from ${allResult.result.length} total keys`);
             }
-          } catch (scanError) {
-            console.log(`⚠️ SCAN iteration ${scanCount} failed:`, scanError);
-            break;
+          } catch (wildcardError) {
+            console.log('❌ Wildcard approach failed:', wildcardError);
           }
-        } while (cursor !== 0 && cursor !== '0' && scanCount < maxScans);
-        
-        console.log(`✅ SCAN complete: ${scanCount} iterations, found ${attributionKeys.length} total attribution keys`);
+        }
         
         // Debug: Check IPv4 vs IPv6 distribution
         const ipv4Keys = attributionKeys.filter(key => {
@@ -439,7 +467,7 @@ const handler = async (event, context) => {
             sample_attribution_key: attributionKeys[0] || 'none',
             sample_ipv6_key: attributionKeys.find(k => k.split('_').length > 6) || 'none',
             deployment_timestamp: new Date().toISOString(),
-            redis_method: 'scan_with_cursor_iteration'
+            redis_method: 'keys_command_with_fallbacks'
           }
         })
       };
