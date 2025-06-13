@@ -47,65 +47,76 @@ const handler = async (event, context) => {
       try {
         console.log('🔍 Finding ALL attribution keys including IPv6...');
         
-        // For Upstash, we need to use KEYS command as SCAN might have limitations
-        // First, let's try to get all keys that start with attribution_
+        // Method 1: Try SCAN first (the original working method for first 1000)
         try {
-          const keysResult = await redis('keys/attribution_*');
-          if (keysResult.result && Array.isArray(keysResult.result)) {
-            // Filter out lookup keys
-            attributionKeys = keysResult.result.filter(key => 
+          const scanResult = await redis('scan/0/match/attribution_*/count/1000');
+          if (scanResult.result && scanResult.result[1]) {
+            attributionKeys = scanResult.result[1].filter(key => 
               key && 
               !key.startsWith('attribution_ip_') && 
               !key.startsWith('attribution_session_')
             );
-            console.log(`✅ KEYS command found ${attributionKeys.length} attribution keys`);
+            console.log(`✅ Initial SCAN found ${attributionKeys.length} attribution keys`);
           }
-        } catch (keysError) {
-          console.log('⚠️ KEYS command failed:', keysError);
-          
-          // Fallback: Try to get keys in chunks by prefix
-          console.log('🔄 Trying chunked approach...');
-          const prefixes = [
-            'attribution_1', 'attribution_2', 'attribution_3', 'attribution_4', 
-            'attribution_5', 'attribution_6', 'attribution_7', 'attribution_8', 
-            'attribution_9', 'attribution_0'
-          ];
-          
-          for (const prefix of prefixes) {
-            try {
-              const prefixResult = await redis(`keys/${prefix}*`);
-              if (prefixResult.result && Array.isArray(prefixResult.result)) {
-                const validKeys = prefixResult.result.filter(key => 
-                  key && 
-                  !key.startsWith('attribution_ip_') && 
-                  !key.startsWith('attribution_session_')
-                );
-                attributionKeys = attributionKeys.concat(validKeys);
-                console.log(`✅ Found ${validKeys.length} keys with prefix ${prefix}`);
-              }
-            } catch (prefixError) {
-              console.log(`⚠️ Failed to get keys for prefix ${prefix}:`, prefixError);
-            }
-          }
-          console.log(`✅ Chunked approach found ${attributionKeys.length} total attribution keys`);
+        } catch (scanError) {
+          console.log('⚠️ Initial SCAN failed:', scanError);
         }
         
-        // If still no keys, try the most basic approach
-        if (attributionKeys.length === 0) {
-          console.log('🔄 Trying basic wildcard approach...');
+        // Method 2: Try KEYS command to get ALL keys (including IPv6)
+        if (attributionKeys.length > 0) {
+          console.log('🔄 Attempting to find additional keys with KEYS command...');
           try {
-            const allResult = await redis('keys/*');
-            if (allResult.result && Array.isArray(allResult.result)) {
-              attributionKeys = allResult.result.filter(key => 
+            const keysResult = await redis('keys/attribution*');
+            if (keysResult.result && Array.isArray(keysResult.result)) {
+              const allKeys = keysResult.result.filter(key => 
                 key && 
-                key.startsWith('attribution_') &&
                 !key.startsWith('attribution_ip_') && 
                 !key.startsWith('attribution_session_')
               );
-              console.log(`✅ Wildcard approach found ${attributionKeys.length} attribution keys from ${allResult.result.length} total keys`);
+              
+              // Merge with existing keys, avoiding duplicates
+              const keySet = new Set(attributionKeys);
+              allKeys.forEach(key => keySet.add(key));
+              attributionKeys = Array.from(keySet);
+              
+              console.log(`✅ KEYS command found ${allKeys.length} total keys, merged to ${attributionKeys.length} unique keys`);
             }
-          } catch (wildcardError) {
-            console.log('❌ Wildcard approach failed:', wildcardError);
+          } catch (keysError) {
+            console.log('⚠️ KEYS command failed, sticking with SCAN results:', keysError);
+          }
+        }
+        
+        // Method 3: If we still have few keys, try alternative patterns
+        if (attributionKeys.length < 100) {
+          console.log('⚠️ Very few keys found, trying alternative patterns...');
+          
+          // Try different Redis command syntaxes
+          const patterns = [
+            'keys/*attribution_*',
+            'keys/attribution_*',
+            'keys/*'
+          ];
+          
+          for (const pattern of patterns) {
+            try {
+              const result = await redis(pattern);
+              if (result.result && Array.isArray(result.result)) {
+                const foundKeys = result.result.filter(key => 
+                  key && 
+                  key.startsWith('attribution_') &&
+                  !key.startsWith('attribution_ip_') && 
+                  !key.startsWith('attribution_session_')
+                );
+                
+                if (foundKeys.length > attributionKeys.length) {
+                  attributionKeys = foundKeys;
+                  console.log(`✅ Pattern '${pattern}' found ${foundKeys.length} keys`);
+                  break;
+                }
+              }
+            } catch (err) {
+              console.log(`⚠️ Pattern '${pattern}' failed:`, err.message);
+            }
           }
         }
         
@@ -125,21 +136,19 @@ const handler = async (event, context) => {
           console.log(`🌐 Sample IPv6 keys:`, ipv6Keys.slice(0, 3));
         }
         
-        // If no attribution keys found with SCAN, try fallback methods
+        // CRITICAL: If no keys found at all, this is a major issue
         if (attributionKeys.length === 0) {
-          console.log('⚠️ No keys found with SCAN, trying KEYS command fallback...');
+          console.error('❌ CRITICAL: No attribution keys found! Trying emergency fallback...');
+          
+          // Emergency fallback - try the exact same pattern that was working before
           try {
-            const keysResult = await redis('keys/attribution_*');
-            if (keysResult.result) {
-              attributionKeys = keysResult.result.filter(key => 
-                key && 
-                !key.startsWith('attribution_ip_') && 
-                !key.startsWith('attribution_session_')
-              );
-              console.log(`✅ KEYS fallback found ${attributionKeys.length} attribution keys`);
+            const scanResult = await redis('scan/0/match/attribution_*/count/1000');
+            if (scanResult.result && scanResult.result[1]) {
+              attributionKeys = scanResult.result[1];
+              console.log(`🚨 Emergency fallback found ${attributionKeys.length} keys`);
             }
-          } catch (keysError) {
-            console.log('❌ KEYS fallback also failed:', keysError);
+          } catch (e) {
+            console.error('❌ Emergency fallback also failed:', e);
           }
         }
         
@@ -467,7 +476,7 @@ const handler = async (event, context) => {
             sample_attribution_key: attributionKeys[0] || 'none',
             sample_ipv6_key: attributionKeys.find(k => k.split('_').length > 6) || 'none',
             deployment_timestamp: new Date().toISOString(),
-            redis_method: 'keys_command_with_fallbacks'
+            redis_method: 'hybrid_scan_keys_approach'
           }
         })
       };
