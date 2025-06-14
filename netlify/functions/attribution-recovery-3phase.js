@@ -13,8 +13,8 @@ exports.handler = async (event, context) => {
     try {
         console.log('🎯 Starting Three-Phase Attribution Recovery');
         
-        // Step 1: Fetch today's analytics data (same as your original script)
-        const analyticsData = await fetchTodaysAnalytics();
+        // Step 1: Fetch analytics data from June 11-14 (expanded from original script)
+        const analyticsData = await fetchAnalyticsData();
         
         // Step 2: Find unattributed conversions
         const unattributedConversions = findUnattributedConversions(analyticsData.conversions);
@@ -57,16 +57,21 @@ exports.handler = async (event, context) => {
     }
 };
 
-// Step 1: Fetch today's analytics data (copied from your original script)
-async function fetchTodaysAnalytics() {
-    console.log('📊 Fetching analytics data...');
+// Step 1: Fetch analytics data from June 11-14 (adapted from your original script)
+async function fetchAnalyticsData() {
+    console.log('📊 Fetching analytics data for June 11-14...');
     
-    const today = new Date().toISOString().split('T')[0];
+    // Use fixed date range to capture all unattributed conversions
+    const startDate = '2025-06-11';
+    const endDate = '2025-06-14';
+    
     const params = new URLSearchParams();
-    params.append('start_date', today);
-    params.append('end_date', today);
+    params.append('start_date', startDate);
+    params.append('end_date', endDate);
     
     const apiUrl = `https://trackingojoy.netlify.app/.netlify/functions/analytics?${params}`;
+    
+    console.log(`📡 API Request URL: ${apiUrl}`);
     
     const response = await fetch(apiUrl, {
         headers: {
@@ -79,9 +84,15 @@ async function fetchTodaysAnalytics() {
     }
     
     const data = await response.json();
-    console.log(`✅ Analytics data loaded for ${today}:`, data.summary);
+    console.log(`✅ Analytics data loaded for ${startDate} to ${endDate}:`);
     console.log(`   📊 Total conversions: ${data.conversions?.length || 0}`);
     console.log(`   📊 Total pageviews: ${data.page_views?.length || 0}`);
+    
+    if (data.page_views && data.page_views.length > 0) {
+        const ipv4Count = data.page_views.filter(pv => pv.ip_address && !pv.ip_address.includes(':')).length;
+        const ipv6Count = data.page_views.filter(pv => pv.ip_address && pv.ip_address.includes(':')).length;
+        console.log(`🌐 IP Address breakdown - IPv4: ${ipv4Count}, IPv6: ${ipv6Count}`);
+    }
     
     return data;
 }
@@ -189,7 +200,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window (from your original script)
+// Find IPv6 pageviews within time window (from your original script, works across multiple days)
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -203,6 +214,8 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
                pvTime <= conversionTime && 
                pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
     });
+    
+    console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     
     return ipv6Pageviews;
 }
