@@ -1,5 +1,5 @@
 // File: netlify/functions/store-attribution.js
-// FINAL FIX: IPv6-safe key pattern using URL encoding
+// ENHANCED: IPv6-safe + Device Fingerprinting + Geographic Keys (Phase 2 & 3)
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -58,6 +58,12 @@ const handler = async (event, context) => {
     return ip.replace(/:/g, '_');
   }
 
+  // PHASE 3: Clean string for Redis key usage
+  function cleanForRedisKey(str) {
+    if (!str || str === 'Unknown' || str === 'unknown') return '';
+    return str.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+  }
+
   if (event.httpMethod === 'POST') {
     try {
       const attributionData = JSON.parse(event.body);
@@ -69,13 +75,15 @@ const handler = async (event, context) => {
         session_id: attributionData.session_id,
         ip_address: visitorIP,
         source: attributionData.source,
-        landing_page: attributionData.landing_page
+        landing_page: attributionData.landing_page,
+        canvas_fp: attributionData.canvas_fingerprint?.substring(0, 10) + '...',
+        webgl_fp: attributionData.webgl_fingerprint?.substring(0, 10) + '...'
       });
       
       const timestamp = Date.now();
       const encodedIP = encodeIPForKey(visitorIP);
       
-      // FIXED: IPv6-safe key pattern
+      // Main attribution key (IPv6-safe)
       const baseKey = `attribution_${encodedIP}_${timestamp}`;
       
       console.log('🔑 Creating base key:', baseKey);
@@ -84,7 +92,7 @@ const handler = async (event, context) => {
       await redis(`set/${baseKey}/${encodeURIComponent(JSON.stringify(attributionData))}`);
       console.log('✅ Stored attribution with key:', baseKey);
       
-      // Create lookup keys with longer expiration (24 hours = 86400 seconds)
+      // Create lookup keys with 24-hour expiration (86400 seconds)
       const ipKey = `attribution_ip_${encodedIP}`;
       const sessionKey = `attribution_session_${attributionData.session_id}`;
       
@@ -93,16 +101,131 @@ const handler = async (event, context) => {
       
       console.log('✅ Created lookup keys:', { ipKey, sessionKey });
       
+      let additionalKeysCreated = 0;
+
+      // PHASE 2: Device fingerprint storage for cross-device attribution
+      try {
+        const deviceFingerprint = attributionData.canvas_fingerprint || '';
+        if (deviceFingerprint && deviceFingerprint !== 'unavailable' && deviceFingerprint.length > 10) {
+          // Use last 20 characters for uniqueness while keeping key reasonable length
+          const fpHash = deviceFingerprint.slice(-20);
+          const fpKey = `attribution_fp_${fpHash}_${timestamp}`;
+          await redis(`setex/${fpKey}/86400/${baseKey}`);
+          console.log('✅ Created fingerprint key:', fpKey);
+          additionalKeysCreated++;
+        }
+
+        // Additional WebGL fingerprint key for enhanced cross-device matching
+        const webglFingerprint = attributionData.webgl_fingerprint || '';
+        if (webglFingerprint && webglFingerprint !== 'unavailable' && webglFingerprint !== 'blocked' && webglFingerprint.length > 10) {
+          const webglHash = cleanForRedisKey(webglFingerprint.substring(0, 30));
+          if (webglHash.length > 5) {
+            const webglKey = `attribution_webgl_${webglHash}_${timestamp}`;
+            await redis(`setex/${webglKey}/86400/${baseKey}`);
+            console.log('✅ Created WebGL fingerprint key:', webglKey);
+            additionalKeysCreated++;
+          }
+        }
+      } catch (fpError) {
+        console.log('⚠️ Fingerprint key creation failed:', fpError.message);
+      }
+
+      // PHASE 3: Geographic keys for faster correlation (IPv6/IPv4 dual-stack solution)
+      if (visitorIP !== 'unknown') {
+        try {
+          console.log('🌍 Creating geographic correlation keys...');
+          
+          // Fetch geographic data from IPinfo API
+          const ipinfoToken = process.env.IPINFO_TOKEN;
+          if (ipinfoToken) {
+            const geoResponse = await fetch(`https://ipinfo.io/${visitorIP}?token=${ipinfoToken}`, {
+              signal: AbortSignal.timeout(3000) // 3 second timeout
+            });
+            
+            if (geoResponse.ok) {
+              const geoData = await geoResponse.json();
+              
+              // Extract ISP/organization info
+              const isp = geoData.company?.name || geoData.asn?.name || geoData.org || 'unknown';
+              const city = geoData.city || 'unknown';
+              const region = geoData.region || 'unknown';
+              
+              console.log('🌍 Geographic data obtained:', { 
+                city, 
+                region, 
+                isp: isp.substring(0, 30) 
+              });
+              
+              // Create geographic correlation keys for IPv6/IPv4 matching
+              if (city !== 'unknown' && isp !== 'unknown') {
+                const cleanCity = cleanForRedisKey(city);
+                const cleanISP = cleanForRedisKey(isp.substring(0, 20)); // Limit ISP length
+                
+                if (cleanCity.length > 2 && cleanISP.length > 2) {
+                  const geoKey = `attribution_geo_${cleanCity}_${cleanISP}_${timestamp}`;
+                  await redis(`setex/${geoKey}/86400/${baseKey}`);
+                  console.log('✅ Created geographic key:', geoKey);
+                  additionalKeysCreated++;
+                }
+                
+                // Additional regional key for broader matching
+                if (region !== 'unknown') {
+                  const cleanRegion = cleanForRedisKey(region);
+                  if (cleanRegion.length > 2) {
+                    const regionKey = `attribution_region_${cleanRegion}_${cleanISP}_${timestamp}`;
+                    await redis(`setex/${regionKey}/86400/${baseKey}`);
+                    console.log('✅ Created regional key:', regionKey);
+                    additionalKeysCreated++;
+                  }
+                }
+              }
+              
+              // Cache the geographic data for the track.js function to use
+              const cacheKey = `geo_cache:${encodedIP}`;
+              const cacheData = {
+                ip: geoData.ip,
+                city: geoData.city || 'Unknown',
+                region: geoData.region || 'Unknown',
+                country: geoData.country || 'Unknown',
+                isp: isp,
+                coordinates: geoData.loc || '0,0',
+                timezone: geoData.timezone || 'Unknown',
+                lookup_timestamp: new Date().toISOString()
+              };
+              
+              await redis(`setex/${cacheKey}/86400/${encodeURIComponent(JSON.stringify(cacheData))}`);
+              console.log('✅ Cached geographic data for track.js usage');
+              additionalKeysCreated++;
+              
+            } else {
+              console.log('⚠️ IPinfo API request failed:', geoResponse.status);
+            }
+          } else {
+            console.log('⚠️ IPINFO_TOKEN not configured - skipping geographic keys');
+          }
+        } catch (geoError) {
+          console.log('⚠️ Geographic key creation failed:', geoError.message);
+        }
+      }
+      
+      const totalKeysCreated = 3 + additionalKeysCreated; // base + ip + session + additional keys
+      
       return {
         statusCode: 200,
         headers: { 'Access-Control-Allow-Origin': '*' },
         body: JSON.stringify({ 
           success: true, 
-          message: 'Attribution data stored successfully',
+          message: 'Enhanced attribution data stored successfully',
           visitor_ip: visitorIP,
-          keys_created: 3,
+          keys_created: totalKeysCreated,
           base_key: baseKey,
-          encoded_ip: encodedIP
+          encoded_ip: encodedIP,
+          enhancements: {
+            fingerprint_keys: additionalKeysCreated > 0,
+            geographic_keys: additionalKeysCreated > 2,
+            cross_device_ready: true,
+            ipv6_ipv4_correlation: true
+          }
         })
       };
       
