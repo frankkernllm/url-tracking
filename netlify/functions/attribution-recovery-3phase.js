@@ -99,42 +99,78 @@ async function redisRequest(command, ...args) {
 }
 
 async function getUnattributedConversions() {
-    // Get all conversion keys
-    const conversionKeys = await redisRequest('keys', 'conversion_*');
-    const unattributed = [];
+    console.log('🔍 Searching for unattributed conversions in Redis...');
     
-    if (!conversionKeys || conversionKeys.length === 0) {
-        console.log('No conversion keys found');
+    // Get all conversion keys
+    let conversionKeys;
+    try {
+        conversionKeys = await redisRequest('keys', 'conversion_*');
+    } catch (error) {
+        console.error('❌ Failed to get conversion keys from Redis:', error);
         return [];
     }
     
+    const unattributed = [];
+    
+    if (!conversionKeys || conversionKeys.length === 0) {
+        console.log('⚠️ No conversion keys found in Redis');
+        return [];
+    }
+    
+    console.log(`📊 Found ${conversionKeys.length} total conversion keys in Redis`);
+    
     // Check each conversion for attribution status
-    for (const key of conversionKeys) {
+    for (let i = 0; i < conversionKeys.length; i++) {
+        const key = conversionKeys[i];
+        
         try {
             const conversionData = await redisRequest('get', key);
-            if (conversionData) {
-                let conversion;
-                try {
-                    conversion = typeof conversionData === 'string' ? JSON.parse(conversionData) : conversionData;
-                } catch (parseError) {
-                    console.log(`Failed to parse conversion data for key ${key}:`, parseError);
-                    continue;
-                }
-                
-                // Check if conversion lacks attribution
-                if (!conversion.attribution_found || conversion.attribution_found === false) {
-                    unattributed.push({
-                        ...conversion,
-                        key: key
-                    });
-                }
+            if (!conversionData) {
+                console.log(`⚠️ No data for conversion key: ${key}`);
+                continue;
             }
+            
+            let conversion;
+            try {
+                conversion = typeof conversionData === 'string' ? JSON.parse(conversionData) : conversionData;
+            } catch (parseError) {
+                console.log(`❌ Failed to parse conversion data for key ${key}:`, parseError.message);
+                continue;
+            }
+            
+            // Check if conversion lacks attribution
+            const hasAttribution = conversion.attribution_found === true;
+            const hasLandingPage = conversion.landing_page && conversion.landing_page !== '';
+            const hasSource = conversion.source && conversion.source !== '' && conversion.source !== 'direct';
+            
+            console.log(`🔍 Conversion ${i + 1}/${conversionKeys.length}: ${conversion.email || 'Unknown'} | Attribution: ${hasAttribution} | Landing Page: ${hasLandingPage} | Source: ${conversion.source || 'None'}`);
+            
+            if (!hasAttribution || (!hasLandingPage && !hasSource)) {
+                unattributed.push({
+                    ...conversion,
+                    key: key
+                });
+                console.log(`   ➕ Added to unattributed list (reason: ${!hasAttribution ? 'no attribution flag' : 'missing landing page/source'})`);
+            } else {
+                console.log(`   ✅ Has attribution - skipping`);
+            }
+            
         } catch (error) {
-            console.log(`Error processing conversion key ${key}:`, error);
+            console.error(`❌ Error processing conversion key ${key}:`, error.message);
+            // Continue processing other conversions
         }
     }
     
-    console.log(`Found ${unattributed.length} unattributed conversions`);
+    console.log(`🎯 Final result: ${unattributed.length} unattributed conversions found out of ${conversionKeys.length} total`);
+    
+    // Log details of unattributed conversions
+    if (unattributed.length > 0) {
+        console.log('📋 Unattributed conversions details:');
+        unattributed.forEach((conv, index) => {
+            console.log(`   ${index + 1}. ${conv.email} | ${conv.ip_address} | ${conv.timestamp} | Source: ${conv.source || 'None'}`);
+        });
+    }
+    
     return unattributed;
 }
 
@@ -156,129 +192,189 @@ async function runThreePhaseRecovery(conversions) {
         }
     };
 
-    for (const conversion of conversions) {
-        console.log(`🔍 Processing: ${conversion.email} (${conversion.ip_address})`);
+    console.log(`🔄 Starting recovery for ${conversions.length} unattributed conversions`);
+
+    // Process each conversion with individual error handling
+    for (let i = 0; i < conversions.length; i++) {
+        const conversion = conversions[i];
         
-        let matched = false;
-        
-        // Try each phase in sequence
-        for (const phase of phases) {
-            if (matched) break;
+        try {
+            console.log(`🔍 Processing conversion ${i + 1}/${conversions.length}: ${conversion.email} (${conversion.ip_address})`);
             
-            results.phases[phase.name].attempts++;
-            console.log(`   ${phase.name}: Searching ${phase.start}-${phase.end} minutes...`);
+            let matched = false;
             
-            const match = await searchPhase(conversion, phase.start, phase.end);
-            
-            if (match && match.score >= 3) {
-                console.log(`   ✅ ${phase.name} match found! Score: ${match.score}`);
+            // Try each phase in sequence
+            for (const phase of phases) {
+                if (matched) break;
                 
-                results.matches.push({
-                    conversion: conversion,
-                    match: match,
-                    phase: phase.name,
-                    confidence: phase.confidence
-                });
-                
-                results.phases[phase.name].matches++;
-                results.recovered++;
-                matched = true;
+                try {
+                    results.phases[phase.name].attempts++;
+                    console.log(`   ${phase.name}: Searching ${phase.start}-${phase.end} minutes...`);
+                    
+                    const match = await searchPhase(conversion, phase.start, phase.end);
+                    
+                    if (match && match.score >= 3) {
+                        console.log(`   ✅ ${phase.name} match found! Score: ${match.score}`);
+                        
+                        results.matches.push({
+                            conversion: conversion,
+                            match: match,
+                            phase: phase.name,
+                            confidence: phase.confidence
+                        });
+                        
+                        results.phases[phase.name].matches++;
+                        results.recovered++;
+                        matched = true;
+                    } else {
+                        console.log(`   ⚪ ${phase.name}: No match found (score: ${match?.score || 'N/A'})`);
+                    }
+                } catch (phaseError) {
+                    console.error(`   ❌ Error in ${phase.name} for ${conversion.email}:`, phaseError.message);
+                    // Continue to next phase despite error
+                }
             }
+            
+            if (!matched) {
+                console.log(`   ❌ No matches found in any phase for ${conversion.email}`);
+            }
+            
+        } catch (conversionError) {
+            console.error(`❌ Error processing conversion ${conversion.email}:`, conversionError.message);
+            // Continue to next conversion despite error
         }
         
-        if (!matched) {
-            console.log(`   ❌ No matches found in any phase`);
+        // Add a small delay between conversions to avoid overwhelming APIs
+        if (i < conversions.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
     }
     
+    console.log(`🏁 Recovery complete: ${results.recovered}/${results.total} conversions recovered`);
     return results;
 }
 
 async function searchPhase(conversion, startMinutes, endMinutes) {
-    const conversionTime = new Date(conversion.timestamp);
-    const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
-    const windowEnd = new Date(conversionTime.getTime() - startMinutes * 60 * 1000);
-    
-    console.log(`   🔍 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
-    
-    // Get all attribution keys (pageviews)
-    const attributionKeys = await redisRequest('keys', 'attribution_*');
-    const candidates = [];
-    
-    if (!attributionKeys || attributionKeys.length === 0) {
-        console.log('   ⚠️ No attribution keys found');
-        return null;
-    }
-    
-    let processedKeys = 0;
-    for (const key of attributionKeys) {
-        // Skip lookup keys - we want the main pageview records
-        if (key.includes('_ip_') || key.includes('_session_') || key.includes('_geo_') || key.includes('_fp_')) {
-            continue;
+    try {
+        const conversionTime = new Date(conversion.timestamp);
+        const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
+        const windowEnd = new Date(conversionTime.getTime() - startMinutes * 60 * 1000);
+        
+        console.log(`   🔍 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
+        
+        // Get all attribution keys (pageviews)
+        let attributionKeys;
+        try {
+            attributionKeys = await redisRequest('keys', 'attribution_*');
+        } catch (redisError) {
+            console.log(`   ⚠️ Redis keys request failed: ${redisError.message}`);
+            return null;
         }
         
-        try {
-            const pageviewData = await redisRequest('get', key);
-            if (!pageviewData) continue;
-            
-            let pageview;
-            try {
-                pageview = typeof pageviewData === 'string' ? JSON.parse(pageviewData) : pageviewData;
-            } catch (parseError) {
-                continue;
-            }
-            
-            // Check if this pageview is in our time window
-            const pageviewTime = new Date(pageview.timestamp);
-            if (pageviewTime < windowStart || pageviewTime > windowEnd) {
-                continue;
-            }
-            
-            // Check if this is an IPv6 pageview (contains colons)
-            if (!pageview.ip_address || !pageview.ip_address.includes(':')) {
-                continue;
-            }
-            
-            console.log(`   📱 Found IPv6 pageview: ${pageview.ip_address} at ${pageview.timestamp}`);
-            
-            // Get geographic data for both IPs
-            const conversionGeo = await getIPLocation(conversion.ip_address);
-            const pageviewGeo = await getIPLocation(pageview.ip_address);
-            
-            const score = calculateGeoScore(conversionGeo, pageviewGeo);
-            
-            if (score >= 3) {
-                const timeDiff = Math.abs(conversionTime - pageviewTime) / 60000; // minutes
-                
-                candidates.push({
-                    pageview: pageview,
-                    score: score,
-                    timeDiff: timeDiff,
-                    conversionGeo: conversionGeo,
-                    pageviewGeo: pageviewGeo
-                });
-                
-                console.log(`   ✅ Candidate found! Score: ${score}, Time diff: ${timeDiff.toFixed(1)} min`);
-            }
-            
-            processedKeys++;
-        } catch (error) {
-            console.log(`   ⚠️ Error processing key ${key}:`, error.message);
+        const candidates = [];
+        
+        if (!attributionKeys || attributionKeys.length === 0) {
+            console.log('   ⚠️ No attribution keys found in Redis');
+            return null;
         }
+        
+        console.log(`   📊 Found ${attributionKeys.length} total attribution keys to check`);
+        
+        let processedKeys = 0;
+        let validPageviews = 0;
+        let ipv6Pageviews = 0;
+        let timeWindowMatches = 0;
+        
+        for (const key of attributionKeys) {
+            // Skip lookup keys - we want the main pageview records
+            if (key.includes('_ip_') || key.includes('_session_') || key.includes('_geo_') || key.includes('_fp_')) {
+                continue;
+            }
+            
+            try {
+                const pageviewData = await redisRequest('get', key);
+                if (!pageviewData) continue;
+                
+                let pageview;
+                try {
+                    pageview = typeof pageviewData === 'string' ? JSON.parse(pageviewData) : pageviewData;
+                } catch (parseError) {
+                    console.log(`   ⚠️ Failed to parse pageview data for key ${key}`);
+                    continue;
+                }
+                
+                processedKeys++;
+                
+                if (!pageview.timestamp || !pageview.ip_address) {
+                    continue;
+                }
+                
+                validPageviews++;
+                
+                // Check if this pageview is in our time window
+                const pageviewTime = new Date(pageview.timestamp);
+                if (pageviewTime < windowStart || pageviewTime > windowEnd) {
+                    continue;
+                }
+                
+                timeWindowMatches++;
+                
+                // Check if this is an IPv6 pageview (contains colons)
+                if (!pageview.ip_address.includes(':')) {
+                    continue;
+                }
+                
+                ipv6Pageviews++;
+                console.log(`   📱 Found IPv6 pageview ${ipv6Pageviews}: ${pageview.ip_address} at ${pageview.timestamp}`);
+                
+                // Get geographic data for both IPs
+                const conversionGeo = await getIPLocation(conversion.ip_address);
+                const pageviewGeo = await getIPLocation(pageview.ip_address);
+                
+                const score = calculateGeoScore(conversionGeo, pageviewGeo);
+                
+                if (score >= 3) {
+                    const timeDiff = Math.abs(conversionTime - pageviewTime) / 60000; // minutes
+                    
+                    candidates.push({
+                        pageview: pageview,
+                        score: score,
+                        timeDiff: timeDiff,
+                        conversionGeo: conversionGeo,
+                        pageviewGeo: pageviewGeo
+                    });
+                    
+                    console.log(`   ✅ Candidate found! Score: ${score}, Time diff: ${timeDiff.toFixed(1)} min`);
+                }
+                
+            } catch (error) {
+                console.log(`   ⚠️ Error processing key ${key}:`, error.message);
+                // Continue processing other keys
+            }
+        }
+        
+        console.log(`   📊 Search summary:`);
+        console.log(`      - Total keys checked: ${attributionKeys.length}`);
+        console.log(`      - Valid pageviews: ${validPageviews}`);
+        console.log(`      - Time window matches: ${timeWindowMatches}`);
+        console.log(`      - IPv6 pageviews: ${ipv6Pageviews}`);
+        console.log(`      - Final candidates: ${candidates.length}`);
+        
+        if (candidates.length === 0) return null;
+        
+        // Return best match (highest score, then closest time)
+        const bestMatch = candidates.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return a.timeDiff - b.timeDiff;
+        })[0];
+        
+        console.log(`   🎯 Best match: Score ${bestMatch.score}, ${bestMatch.timeDiff.toFixed(1)} min gap`);
+        return bestMatch;
+        
+    } catch (error) {
+        console.error(`   ❌ SearchPhase error: ${error.message}`);
+        return null;
     }
-    
-    console.log(`   📊 Processed ${processedKeys} pageview keys, found ${candidates.length} candidates`);
-    
-    if (candidates.length === 0) return null;
-    
-    // Return best match (highest score, then closest time)
-    const bestMatch = candidates.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        return a.timeDiff - b.timeDiff;
-    })[0];
-    
-    console.log(`   🎯 Best match: Score ${bestMatch.score}, ${bestMatch.timeDiff.toFixed(1)} min gap`);
-    return bestMatch;
 }
 
 async function getIPLocation(ip) {
