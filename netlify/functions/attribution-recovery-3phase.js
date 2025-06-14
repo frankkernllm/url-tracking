@@ -1,5 +1,5 @@
 // netlify/functions/attribution-recovery-3phase.js
-// Fixed version using direct HTTP calls to Upstash Redis REST API
+// Complete three-phase attribution recovery system with environment variable API key
 
 exports.handler = async (event, context) => {
     // CORS headers
@@ -14,9 +14,10 @@ exports.handler = async (event, context) => {
         return { statusCode: 200, headers, body: '' };
     }
 
-    // API Key validation
+    // API Key validation using environment variable
     const apiKey = event.headers['x-api-key'];
-    if (apiKey !== 'ojoy_track_2025_secure_key_v1') {
+    const expectedApiKey = process.env.OJOY_API_KEY;
+    if (apiKey !== expectedApiKey) {
         return {
             statusCode: 401,
             headers,
