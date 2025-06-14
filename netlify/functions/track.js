@@ -23,7 +23,7 @@ const handler = async (event, context) => {
 
   // API Key validation
   const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-  const validApiKey = process.env.OJOY_API_KEY; // ojoy_track_2025_secure_key_v1
+  const validApiKey = process.env.OJOY_API_KEY;
 
   const isInternalCall = !apiKey; // Webhook calls typically don't have API key
   const isValidExternalCall = apiKey && apiKey === validApiKey;
@@ -40,7 +40,7 @@ const handler = async (event, context) => {
   console.log('✅ Track function access authorized');
 
   // Redis configuration
-  const redisUrl = process.env.UPSTASH_REDIS_REST_URL; // https://more-maggot-20720.upstash.io
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
 
   const redis = async (command) => {
@@ -54,7 +54,7 @@ const handler = async (event, context) => {
   class IPinfoService {
     constructor() {
       this.baseUrl = 'https://ipinfo.io';
-      this.token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4'; // Robust plan with ISP data
+      this.token = process.env.IPINFO_TOKEN; // Must be set in Netlify environment
       this.cachePrefix = 'geo_cache:';
     }
 
