@@ -1,4 +1,8 @@
 exports.handler = async (event, context) => {
+    // Evergreen attribution recovery function - looks for unattributed conversions 
+    // in the past 24 hours and attempts to recover their attribution.
+    // Can be run daily or scheduled for continuous attribution improvement.
+    
     const headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
@@ -11,9 +15,9 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery with Extended Timeline');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours)');
         
-        // Step 1: Fetch analytics data from June 11-14
+        // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
         
         // Step 2: Find unattributed conversions
@@ -67,12 +71,17 @@ exports.handler = async (event, context) => {
     }
 };
 
-// Step 1: Fetch analytics data from June 11-14
+// Step 1: Fetch analytics data from past 24 hours (evergreen function)
 async function fetchAnalyticsData() {
-    console.log('📊 Fetching analytics data for June 11-14...');
+    console.log('📊 Fetching analytics data for past 24 hours...');
     
-    const startDate = '2025-06-11';
-    const endDate = '2025-06-14';
+    // Calculate past 24 hours dynamically
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0]; // Today's date YYYY-MM-DD
+    const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const startDate = yesterdayDate.toISOString().split('T')[0]; // Yesterday's date YYYY-MM-DD
+    
+    console.log(`📅 Date range: ${startDate} to ${endDate} (past 24 hours)`);
     
     const params = new URLSearchParams();
     params.append('start_date', startDate);
@@ -131,9 +140,9 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (balanced extended timeline)
+// Step 3: Analyze unattributed conversions with FOUR phases (evergreen function for past 24 hours)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
-    console.log('🔬 Analyzing unattributed conversions for IPv6 pageview matches with balanced extended timeline...');
+    console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
         total: unattributedConversions.length,
