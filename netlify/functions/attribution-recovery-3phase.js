@@ -11,7 +11,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Three-Phase Attribution Recovery with Redis Updates');
+        console.log('🎯 Starting Three-Phase Attribution Recovery with Fixed Redis Updates');
         
         // Step 1: Fetch analytics data from June 11-14
         const analyticsData = await fetchAnalyticsData();
@@ -34,10 +34,14 @@ exports.handler = async (event, context) => {
         // Step 3: Analyze unattributed conversions for IPv6 matches
         const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
         
-        // Step 4: Update Redis with recovered attributions
+        // Step 4: Update Redis with recovered attributions (with fixed Redis calls)
         if (recoveryResults.matches.length > 0) {
             console.log(`📝 Updating ${recoveryResults.matches.length} recovered attributions in Redis...`);
-            await updateRecoveredAttributions(recoveryResults.matches);
+            try {
+                await updateRecoveredAttributions(recoveryResults.matches);
+            } catch (redisError) {
+                console.error('❌ Redis update failed but recovery succeeded:', redisError);
+            }
         }
         
         return {
@@ -127,7 +131,7 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with THREE phases (proven working approach + Redis updates)
+// Step 3: Analyze unattributed conversions with THREE phases (working approach + fixed Redis updates)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions for IPv6 pageview matches...');
     
@@ -380,7 +384,7 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
-// Helper function to make Redis HTTP requests
+// Helper function to make Redis HTTP requests (fixed for Upstash format)
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -389,22 +393,43 @@ async function redisRequest(command, ...args) {
         throw new Error('Missing Redis configuration');
     }
     
-    const response = await fetch(`${url}/${command}/${args.join('/')}`, {
-        headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+    // For complex commands like SET with JSON, use POST with body
+    if (command.toLowerCase() === 'set' && args.length === 2) {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify([command, ...args])
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
         }
-    });
-    
-    if (!response.ok) {
-        throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        
+        const data = await response.json();
+        return data.result;
+    } 
+    // For simple commands like GET, KEYS, use URL path
+    else {
+        const response = await fetch(`${url}/${command}/${args.join('/')}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        return data.result;
     }
-    
-    const data = await response.json();
-    return data.result;
 }
 
-// Update recovered attributions in Redis
+// Update recovered attributions in Redis (restored with fixed Redis calls)
 async function updateRecoveredAttributions(matches) {
     console.log(`📝 Updating ${matches.length} recovered attributions in Redis...`);
     
@@ -440,7 +465,7 @@ async function updateRecoveredAttributions(matches) {
                     recovery_ipv6_match: pageview.ip_address
                 };
                 
-                // Save back to Redis
+                // Save back to Redis (using fixed POST method)
                 await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
                 
                 console.log(`✅ Updated ${conversion.email}: ${pageview.landing_page} (${match.phase})`);
@@ -456,17 +481,18 @@ async function updateRecoveredAttributions(matches) {
     console.log(`📝 Redis update complete for ${matches.length} attributions`);
 }
 
-// Find the Redis key for a specific conversion
+// Find the Redis key for a specific conversion (restored)
 async function findConversionKey(conversion) {
     try {
-        // Try different possible key patterns
+        // Try different possible key patterns (including the actual format seen in logs)
         const patterns = [
+            `conversions:*${conversion.email}*`,
+            `conversions:${conversion.timestamp.split('T')[0]}*`,
+            `conversions:*`,
             `conversion_${conversion.email}_*`,
             `conv_${conversion.email}_*`,
             `track_${conversion.email}_*`,
-            `*${conversion.email}*`,
-            `conversion_*${conversion.timestamp}*`,
-            `*conversion*`
+            `*${conversion.email}*`
         ];
         
         for (const pattern of patterns) {
@@ -488,6 +514,7 @@ async function findConversionKey(conversion) {
                 }
             } catch (error) {
                 // Continue trying other patterns
+                console.log(`   ⚠️ Pattern ${pattern} failed: ${error.message}`);
             }
         }
         
