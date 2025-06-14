@@ -154,7 +154,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
             { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
             { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
-            { name: 'Phase 4', start: 120, end: 240, confidence: 'DEEP_HISTORY' }
+            { name: 'Phase 4', start: 120, end: 150, confidence: 'DEEP_HISTORY' }
         ];
         
         let matched = false;
@@ -165,7 +165,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             results.phases[phase.name].attempts++;
             
             if (phase.name === 'Phase 4') {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-4 hours before conversion)`);
+                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-2.5 hours before conversion)`);
             } else {
                 console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             }
