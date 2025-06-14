@@ -11,7 +11,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Five-Phase Attribution Recovery with Extended Timeline');
+        console.log('🎯 Starting Four-Phase Attribution Recovery with Extended Timeline');
         
         // Step 1: Fetch analytics data from June 11-14
         const analyticsData = await fetchAnalyticsData();
@@ -131,9 +131,9 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FIVE phases (extended timeline to catch remaining conversions)
+// Step 3: Analyze unattributed conversions with FOUR phases (balanced extended timeline)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
-    console.log('🔬 Analyzing unattributed conversions for IPv6 pageview matches with extended timeline...');
+    console.log('🔬 Analyzing unattributed conversions for IPv6 pageview matches with balanced extended timeline...');
     
     const results = {
         total: unattributedConversions.length,
@@ -143,8 +143,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             'Phase 1': { attempts: 0, matches: 0 },
             'Phase 2': { attempts: 0, matches: 0 },
             'Phase 3': { attempts: 0, matches: 0 },
-            'Phase 4': { attempts: 0, matches: 0 },
-            'Phase 5': { attempts: 0, matches: 0 }
+            'Phase 4': { attempts: 0, matches: 0 }
         }
     };
     
@@ -154,13 +153,12 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
         console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
         
-        // Try five phases in sequence (extended timeline for remaining conversions)
+        // Try four phases in sequence (balanced timeline for remaining conversions)
         const phases = [
             { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
             { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
             { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
-            { name: 'Phase 4', start: 120, end: 180, confidence: 'DEEP_HISTORY_3H' },
-            { name: 'Phase 5', start: 180, end: 240, confidence: 'DEEP_HISTORY_4H' }
+            { name: 'Phase 4', start: 120, end: 180, confidence: 'DEEP_HISTORY_3H' }
         ];
         
         let matched = false;
@@ -172,8 +170,6 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             if (phase.name === 'Phase 4') {
                 console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-3 hours before conversion)`);
-            } else if (phase.name === 'Phase 5') {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (3-4 hours before conversion)`);
             } else {
                 console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             }
@@ -468,7 +464,7 @@ async function updateRecoveredAttributions(matches) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: 'five_phase_geographic',
+                    recovery_method: 'four_phase_geographic',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
