@@ -11,7 +11,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Extended BEFORE Conversion)');
+        console.log('🎯 Starting Three-Phase Attribution Recovery with Redis Updates');
         
         // Step 1: Fetch analytics data from June 11-14
         const analyticsData = await fetchAnalyticsData();
@@ -127,7 +127,7 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (extended BEFORE conversion)
+// Step 3: Analyze unattributed conversions with THREE phases (proven working approach + Redis updates)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions for IPv6 pageview matches...');
     
@@ -138,8 +138,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         phases: {
             'Phase 1': { attempts: 0, matches: 0 },
             'Phase 2': { attempts: 0, matches: 0 },
-            'Phase 3': { attempts: 0, matches: 0 },
-            'Phase 4': { attempts: 0, matches: 0 }
+            'Phase 3': { attempts: 0, matches: 0 }
         }
     };
     
@@ -149,12 +148,11 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
         console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
         
-        // Try four phases in sequence (extended timeline BEFORE conversion)
+        // Try three phases in sequence (proven working approach)
         const phases = [
             { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
             { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
-            { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
-            { name: 'Phase 4', start: 120, end: 150, confidence: 'DEEP_HISTORY' }
+            { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' }
         ];
         
         let matched = false;
@@ -163,12 +161,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             if (matched) break;
             
             results.phases[phase.name].attempts++;
-            
-            if (phase.name === 'Phase 4') {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-2.5 hours before conversion)`);
-            } else {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
-            }
+            console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             
             // Find IPv6 pageviews in window
             const candidatePageviews = findIPv6PageviewsInWindow(conversion, pageviews, phase.start, phase.end);
@@ -439,7 +432,7 @@ async function updateRecoveredAttributions(matches) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: 'four_phase_geographic',
+                    recovery_method: 'three_phase_geographic',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
