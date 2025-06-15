@@ -1,5 +1,5 @@
 exports.handler = async (event, context) => {
-    // ORIGINAL LOGIC + IP CACHING: Eliminate redundant API calls while keeping exact same analysis
+    // ORIGINAL LOGIC + MINIMAL RATE LIMITING: Just add small delays to prevent API rate limits
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -13,7 +13,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery with IP Caching (Past 24 Hours)');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours)');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -33,12 +33,8 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // NEW STEP 2.5: Pre-cache all IP addresses to eliminate redundant API calls
-        console.log('🚀 Pre-caching IP addresses to eliminate redundant API calls...');
-        const ipCache = await buildIPCache(unattributedConversions, analyticsData.page_views);
-        
-        // Step 3: Analyze unattributed conversions (ORIGINAL LOGIC using cached data)
-        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views, ipCache);
+        // Step 3: Analyze unattributed conversions (ORIGINAL LOGIC with rate limiting)
+        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
         
         // Step 4: Update Redis with recovered attributions
         if (recoveryResults.matches.length > 0) {
@@ -73,76 +69,8 @@ exports.handler = async (event, context) => {
     }
 };
 
-// NEW: Pre-cache all IP addresses that will be needed during analysis
-async function buildIPCache(conversions, pageviews) {
-    const uniqueIPs = new Set();
-    
-    // Add all conversion IP addresses
-    conversions.forEach(conv => {
-        if (conv.ip_address) {
-            // Handle multiple IPs separated by commas
-            const ips = conv.ip_address.split(',').map(ip => ip.trim());
-            ips.forEach(ip => uniqueIPs.add(ip));
-        }
-    });
-    
-    // Add all IPv6 pageview IP addresses that could be relevant
-    const ipv6Pageviews = pageviews.filter(pv => pv.ip_address && pv.ip_address.includes(':'));
-    ipv6Pageviews.forEach(pv => uniqueIPs.add(pv.ip_address));
-    
-    const ipsToCache = Array.from(uniqueIPs);
-    console.log(`🌐 Found ${ipsToCache.length} unique IP addresses to cache`);
-    
-    const ipCache = new Map();
-    
-    // Process IPs in batches to avoid overwhelming the API
-    const batchSize = 15;
-    const totalBatches = Math.ceil(ipsToCache.length / batchSize);
-    
-    for (let i = 0; i < ipsToCache.length; i += batchSize) {
-        const batch = ipsToCache.slice(i, i + batchSize);
-        const batchNum = Math.floor(i / batchSize) + 1;
-        
-        console.log(`🔄 Caching IP batch ${batchNum}/${totalBatches} (${batch.length} IPs)`);
-        
-        // Process batch in parallel with staggered timing
-        const batchPromises = batch.map(async (ip, index) => {
-            // Stagger requests to avoid hitting rate limits
-            await new Promise(resolve => setTimeout(resolve, index * 100));
-            
-            try {
-                const geoData = await getIPLocationData(ip);
-                ipCache.set(ip, geoData);
-                return { ip, success: true };
-            } catch (error) {
-                console.log(`⚠️ Failed to cache ${ip}: ${error.message}`);
-                // Store failed lookup to avoid retrying during analysis
-                ipCache.set(ip, {
-                    ip: ip,
-                    city: 'LOOKUP_FAILED',
-                    region: 'LOOKUP_FAILED',
-                    country: 'LOOKUP_FAILED',
-                    isp: 'LOOKUP_FAILED'
-                });
-                return { ip, success: false };
-            }
-        });
-        
-        await Promise.all(batchPromises);
-        
-        // Brief pause between batches
-        if (i + batchSize < ipsToCache.length) {
-            console.log('⏱️ Pausing 500ms between batches...');
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-    }
-    
-    console.log(`✅ IP caching complete: ${ipCache.size} addresses cached`);
-    return ipCache;
-}
-
-// MODIFIED: Exact same analysis logic but using cached IP data instead of API calls
-async function analyzeUnattributedConversions(unattributedConversions, pageviews, ipCache) {
+// EXACT ORIGINAL LOGIC with rate limiting added
+async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
@@ -194,12 +122,12 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
             
-            // Get geographic data for conversion IP from cache (instead of API call)
-            const conversionGeoData = getGeoDataFromCache(conversion.ip_address, ipCache);
+            // Get geographic data for conversion IP (ORIGINAL LOGIC with rate limiting)
+            const conversionGeoData = await getIPLocationDataWithRateLimit(conversion.ip_address);
             console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
             
-            // Check each IPv6 pageview for geographic match (ORIGINAL LOGIC using cache)
-            const match = await checkIPv6CandidatesWithCache(conversion, candidatePageviews, conversionGeoData, ipCache);
+            // Check each IPv6 pageview for geographic match (ORIGINAL LOGIC with rate limiting)
+            const match = await checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, conversionGeoData);
             
             if (match) {
                 console.log(`   ✅ ${phase.name} MATCH FOUND!`);
@@ -226,39 +154,9 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Helper function to get geo data from cache
-function getGeoDataFromCache(ip, ipCache) {
-    // Handle multiple IPs (like "69.132.92.91, 2603:8000:8ef0:9b00:1d2:28e0:7c12:9a1b, 54.177.244.209")
-    if (ip && ip.includes(',')) {
-        const ips = ip.split(',').map(ip => ip.trim());
-        // Try to find the first IP that's cached
-        for (const singleIp of ips) {
-            if (ipCache.has(singleIp)) {
-                return ipCache.get(singleIp);
-            }
-        }
-        // Use first IP if none are cached
-        ip = ips[0];
-    }
-    
-    if (ipCache.has(ip)) {
-        return ipCache.get(ip);
-    }
-    
-    // This shouldn't happen if caching worked correctly, but provide fallback
-    console.log(`⚠️ IP ${ip} not found in cache, using fallback`);
-    return {
-        ip: ip,
-        city: 'CACHE_MISS',
-        region: 'CACHE_MISS',
-        country: 'CACHE_MISS',
-        isp: 'CACHE_MISS'
-    };
-}
-
-// MODIFIED: Check IPv6 candidates using cached data (no API calls during analysis)
-async function checkIPv6CandidatesWithCache(conversion, candidatePageviews, conversionGeoData, ipCache) {
-    // ORIGINAL LOGIC: Check ALL candidates, no limits
+// ORIGINAL LOGIC with small rate limiting delays
+async function checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, conversionGeoData) {
+    // Check ALL candidates (ORIGINAL LOGIC)
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
@@ -267,8 +165,8 @@ async function checkIPv6CandidatesWithCache(conversion, candidatePageviews, conv
         console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
         console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
         
-        // Get geographic data from cache (NO API CALL!)
-        const pageviewGeoData = getGeoDataFromCache(pageview.ip_address, ipCache);
+        // Get geographic data for IPv6 pageview (with small rate limiting delay)
+        const pageviewGeoData = await getIPLocationDataWithRateLimit(pageview.ip_address);
         console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
         // Compare geographic data (EXACT ORIGINAL LOGIC)
@@ -289,13 +187,18 @@ async function checkIPv6CandidatesWithCache(conversion, candidatePageviews, conv
         } else {
             console.log(`      ❌ No geographic match (${match.confidence})`);
         }
+        
+        // ONLY CHANGE: Small delay between IP lookups to avoid rate limiting
+        if (i < candidatePageviews.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay
+        }
     }
     
     return null;
 }
 
-// ORIGINAL: IP lookup with rate limiting (only used during caching phase)
-async function getIPLocationData(ip) {
+// IP lookup with basic rate limiting
+async function getIPLocationDataWithRateLimit(ip) {
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
     const url = `https://ipinfo.io/${ip}?token=${token}`;
     
@@ -307,8 +210,8 @@ async function getIPLocationData(ip) {
         
         if (response.status === 429) {
             // Rate limited - wait and retry once
-            console.log(`   ⏳ Rate limited on ${ip}, waiting 2 seconds...`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            console.log(`   ⏳ Rate limited on ${ip}, waiting 1 second...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
             
             const retryResponse = await fetch(url, {
                 method: 'GET',
@@ -330,7 +233,14 @@ async function getIPLocationData(ip) {
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (error) {
-        throw new Error(`Failed to lookup ${ip}: ${error.message}`);
+        console.log(`   ⚠️  Failed to lookup ${ip}: ${error.message}`);
+        return {
+            ip: ip,
+            city: 'LOOKUP_FAILED',
+            region: 'LOOKUP_FAILED',
+            country: 'LOOKUP_FAILED',
+            isp: 'LOOKUP_FAILED'
+        };
     }
 }
 
@@ -448,8 +358,7 @@ function extractBestISP(data) {
 }
 
 function compareGeographicData(conversionGeo, pageviewGeo) {
-    if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED' ||
-        conversionGeo.city === 'CACHE_MISS' || pageviewGeo.city === 'CACHE_MISS') {
+    if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -583,7 +492,7 @@ async function updateRecoveredAttributions(matches) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: 'four_phase_geographic_cached',
+                    recovery_method: 'four_phase_geographic_rate_limited',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
