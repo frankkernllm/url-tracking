@@ -47,17 +47,31 @@ exports.handler = async (event, context) => {
                 'Phase 3': { attempts: 0, matches: 0 },
                 'Phase 4': { attempts: 0, matches: 0 }
             },
-            conversions: []
+            conversions: [],
+            timeoutStopped: false,
+            processedCount: 0
         };
         
         console.log(`🔄 Processing ${unattributedConversions.length} conversions individually`);
         
-        // Process each conversion one at a time
+        // Process each conversion one at a time with timeout protection
+        const startTime = Date.now();
+        const maxExecutionTime = 8000; // 8 seconds to leave buffer for response
+        
         for (let i = 0; i < unattributedConversions.length; i++) {
+            // Check if we're approaching timeout
+            const elapsedTime = Date.now() - startTime;
+            if (elapsedTime > maxExecutionTime) {
+                console.log(`⏰ Approaching timeout limit. Processed ${i} conversions. Stopping gracefully.`);
+                allResults.timeoutStopped = true;
+                allResults.processedCount = i;
+                break;
+            }
+            
             const conversion = unattributedConversions[i];
             const conversionNumber = i + 1;
             
-            console.log(`\n🔍 Processing Conversion ${conversionNumber}/${unattributedConversions.length}: ${conversion.email}`);
+            console.log(`\n🔍 Processing Conversion ${conversionNumber}/${unattributedConversions.length}: ${conversion.email} (${elapsedTime}ms elapsed)`);
             console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
             console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
             
@@ -92,12 +106,14 @@ exports.handler = async (event, context) => {
                     success: true
                 });
                 
+                allResults.processedCount = conversionNumber;
+                
                 console.log(`✅ Conversion ${conversionNumber} complete: ${conversionResults.recovered > 0 ? 'RECOVERED' : 'NO MATCH'}`);
                 
-                // Add a small delay between conversions to prevent API rate limiting
+                // Reduced delay due to timeout constraints
                 if (i < unattributedConversions.length - 1) {
-                    console.log('⏱️  Waiting 1 second before next conversion...');
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    console.log('⏱️  Waiting 500ms before next conversion...');
+                    await new Promise(resolve => setTimeout(resolve, 500));
                 }
                 
             } catch (conversionError) {
@@ -111,12 +127,23 @@ exports.handler = async (event, context) => {
                     error: conversionError.message
                 });
                 
+                allResults.processedCount = conversionNumber;
+                
                 // Continue with next conversion instead of failing entirely
                 continue;
             }
         }
         
-        console.log(`\n🏁 All conversions complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
+        // Set final processed count if we completed all conversions
+        if (!allResults.timeoutStopped) {
+            allResults.processedCount = unattributedConversions.length;
+        }
+        
+        const finalMessage = allResults.timeoutStopped 
+            ? `Timeout protection: ${allResults.recovered}/${allResults.processedCount} processed conversions recovered (${unattributedConversions.length - allResults.processedCount} remaining)`
+            : `Individual recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered`;
+        
+        console.log(`\n🏁 ${finalMessage}`);
         
         return {
             statusCode: 200,
@@ -124,7 +151,7 @@ exports.handler = async (event, context) => {
             body: JSON.stringify({
                 success: true,
                 results: allResults,
-                message: `Individual recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered`
+                message: finalMessage
             })
         };
 
