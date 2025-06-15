@@ -37,7 +37,7 @@ exports.handler = async (event, context) => {
         }
         
         // Step 3: Limit conversions to prevent timeout (process most recent first)
-        const maxConversions = 6; // Process max 6 conversions per run to stay under timeout
+        const maxConversions = 3; // Reduced to 3 conversions per run to stay under timeout
         const unattributedConversions = allUnattributedConversions
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
             .slice(0, maxConversions);
@@ -162,9 +162,12 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (ORIGINAL WORKING LOGIC)
+// Step 3: Analyze unattributed conversions with FOUR phases (ORIGINAL WORKING LOGIC + OPTIMIZATIONS)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
+    
+    // IP location cache to avoid duplicate lookups
+    const ipLocationCache = new Map();
     
     const results = {
         total: unattributedConversions.length,
@@ -215,12 +218,12 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
             
-            // Get geographic data for conversion IP
-            const conversionGeoData = await getIPLocationData(conversion.ip_address);
+            // Get geographic data for conversion IP (with caching)
+            const conversionGeoData = await getIPLocationDataCached(conversion.ip_address, ipLocationCache);
             console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
             
-            // Check each IPv6 pageview for geographic match
-            const match = await checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData);
+            // Check IPv6 pageviews for geographic match (with limits)
+            const match = await checkIPv6CandidatesLimited(conversion, candidatePageviews, conversionGeoData, ipLocationCache);
             
             if (match) {
                 console.log(`   ✅ ${phase.name} MATCH FOUND!`);
@@ -244,6 +247,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     }
     
     console.log(`🏁 Recovery complete: ${results.recovered}/${results.total} conversions recovered`);
+    console.log(`📊 IP lookups cached: ${ipLocationCache.size} unique IPs`);
     return results;
 }
 
@@ -265,6 +269,19 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     
     return ipv6Pageviews;
+}
+
+// Get location/ISP data for an IP using IPInfo.io (with caching)
+async function getIPLocationDataCached(ip, cache) {
+    // Check cache first
+    if (cache.has(ip)) {
+        console.log(`   📋 Using cached data for ${ip}`);
+        return cache.get(ip);
+    }
+    
+    const locationData = await getIPLocationData(ip);
+    cache.set(ip, locationData);
+    return locationData;
 }
 
 // Get location/ISP data for an IP using IPInfo.io
@@ -319,7 +336,52 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches
+// Check IPv6 candidates against conversion for geographic matches (with limits and caching)
+async function checkIPv6CandidatesLimited(conversion, candidatePageviews, conversionGeoData, ipLocationCache) {
+    // Limit candidates to prevent timeout (check max 5 per phase)
+    const maxCandidates = 5;
+    const limitedCandidates = candidatePageviews.slice(0, maxCandidates);
+    
+    if (candidatePageviews.length > maxCandidates) {
+        console.log(`   ⚠️  Limiting to ${maxCandidates} candidates (out of ${candidatePageviews.length} found) to prevent timeout`);
+    }
+    
+    for (let i = 0; i < limitedCandidates.length; i++) {
+        const pageview = limitedCandidates[i];
+        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
+        
+        console.log(`   🌈 IPv6 Candidate ${i + 1}/${limitedCandidates.length}: ${pageview.ip_address}`);
+        console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
+        console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
+        
+        // Get geographic data for IPv6 pageview (with caching)
+        const pageviewGeoData = await getIPLocationDataCached(pageview.ip_address, ipLocationCache);
+        console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
+        
+        // Compare geographic data
+        const match = compareGeographicData(conversionGeoData, pageviewGeoData);
+        
+        if (match.isMatch) {
+            console.log(`      ✅ GEOGRAPHIC MATCH FOUND! (${match.confidence})`);
+            console.log(`         🎯 City: ${match.cityMatch ? '✓' : '✗'} | Region: ${match.regionMatch ? '✓' : '✗'} | Country: ${match.countryMatch ? '✓' : '✗'} | ISP: ${match.ispMatch ? '✓' : '✗'}`);
+            
+            return {
+                pageview: pageview,
+                score: match.score,
+                timeDiff: timeDiff,
+                confidence: match.confidence,
+                conversionGeo: conversionGeoData,
+                pageviewGeo: pageviewGeoData
+            };
+        } else {
+            console.log(`      ❌ No geographic match (${match.confidence})`);
+        }
+    }
+    
+    return null;
+}
+
+// Check IPv6 candidates against conversion for geographic matches (original function - kept for reference)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
