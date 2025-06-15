@@ -13,7 +13,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours)');
+        console.log('🎯 Starting Four-Phase Attribution Recovery - Batch Processing (Past 24 Hours)');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -33,10 +33,17 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 3: Analyze unattributed conversions (ORIGINAL LOGIC with rate limiting)
-        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
+        // Step 3: Process in smaller batches to avoid timeout
+        const batchSize = 4; // Process 4 conversions at a time
+        const batch = unattributedConversions.slice(0, batchSize);
+        const remaining = unattributedConversions.length - batch.length;
         
-        // Step 4: Update Redis with recovered attributions
+        console.log(`📦 Processing ${batch.length} conversions (${remaining} remaining for next run)`);
+        
+        // Step 4: Analyze batch of conversions (ORIGINAL LOGIC with rate limiting)
+        const recoveryResults = await analyzeUnattributedConversions(batch, analyticsData.page_views);
+        
+        // Step 5: Update Redis with recovered attributions
         if (recoveryResults.matches.length > 0) {
             console.log(`📝 Updating ${recoveryResults.matches.length} recovered attributions in Redis...`);
             try {
@@ -46,13 +53,24 @@ exports.handler = async (event, context) => {
             }
         }
         
+        // Step 6: Provide clear guidance on remaining conversions
+        let message = `Batch recovery complete: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered`;
+        if (remaining > 0) {
+            message += `. Run the script again to process the remaining ${remaining} conversions.`;
+        }
+        
         return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
                 success: true,
-                results: recoveryResults,
-                message: `Recovery complete: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered`
+                results: {
+                    ...recoveryResults,
+                    batchSize: batch.length,
+                    remainingConversions: remaining,
+                    totalUnattributed: unattributedConversions.length
+                },
+                message: message
             })
         };
 
