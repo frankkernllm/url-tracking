@@ -37,7 +37,7 @@ exports.handler = async (event, context) => {
         }
         
         // Step 3: Limit conversions to prevent timeout (process most recent first)
-        const maxConversions = 3; // Reduced to 3 conversions per run to stay under timeout
+        const maxConversions = 2; // Further reduced to 2 conversions for intensive debugging
         const unattributedConversions = allUnattributedConversions
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
             .slice(0, maxConversions);
@@ -251,7 +251,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window (works across multiple days)
+// Find IPv6 pageviews within time window (works across multiple days) - ENHANCED DEBUGGING
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -259,14 +259,34 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     
     console.log(`   🕐 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
     
+    // Debug: Show total pageviews and IPv6 breakdown
+    const totalPageviews = pageviews.length;
+    const allIPv6Pageviews = pageviews.filter(pv => pv.ip_address && pv.ip_address.includes(':'));
+    
+    console.log(`   🔍 DEBUG: Total pageviews: ${totalPageviews}, Total IPv6 pageviews: ${allIPv6Pageviews.length}`);
+    
     const ipv6Pageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
-        return pvTime >= windowStart && 
-               pvTime <= conversionTime && 
-               pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
+        const inTimeWindow = pvTime >= windowStart && pvTime <= conversionTime;
+        const hasIPv6 = pv.ip_address && pv.ip_address.includes(':');
+        
+        // Debug logging for first few pageviews
+        if (allIPv6Pageviews.indexOf(pv) < 3) {
+            console.log(`   🔍 DEBUG IPv6 pageview: ${pv.ip_address} at ${pv.timestamp} - In window: ${inTimeWindow}`);
+        }
+        
+        return inTimeWindow && hasIPv6;
     });
     
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
+    
+    // Show sample of what we found
+    if (ipv6Pageviews.length > 0) {
+        console.log(`   📋 Sample IPv6 pageviews in window:`);
+        ipv6Pageviews.slice(0, 3).forEach((pv, idx) => {
+            console.log(`      ${idx + 1}. ${pv.ip_address} at ${pv.timestamp}`);
+        });
+    }
     
     return ipv6Pageviews;
 }
@@ -418,9 +438,14 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
     return null;
 }
 
-// Compare geographic data between conversion and pageview
+// Compare geographic data between conversion and pageview - ENHANCED DEBUGGING
 function compareGeographicData(conversionGeo, pageviewGeo) {
+    console.log(`      🔍 DEBUG: Comparing locations:`);
+    console.log(`         Conversion: ${conversionGeo.city}, ${conversionGeo.region}, ${conversionGeo.country} (${conversionGeo.isp})`);
+    console.log(`         Pageview:   ${pageviewGeo.city}, ${pageviewGeo.region}, ${pageviewGeo.country} (${pageviewGeo.isp})`);
+    
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
+        console.log(`      ❌ DEBUG: Lookup failed - skipping geographic comparison`);
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -450,6 +475,9 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         confidence = 'POSSIBLE';
         isMatch = true;
     }
+
+    console.log(`      📊 DEBUG: Geographic score: ${score} (Need ≥3 for match. City: ${cityMatch ? '✓' : '✗'}, Region: ${regionMatch ? '✓' : '✗'}, Country: ${countryMatch ? '✓' : '✗'}, ISP: ${ispMatch ? '✓' : '✗'})`);
+    console.log(`      📊 DEBUG: Match result: ${isMatch ? 'YES' : 'NO'} (${confidence})`);
 
     return {
         isMatch,
