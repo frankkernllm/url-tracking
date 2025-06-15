@@ -1,7 +1,7 @@
 exports.handler = async (event, context) => {
     // Evergreen attribution recovery function - looks for unattributed conversions 
     // in the past 24 hours and attempts to recover their attribution.
-    // Processes conversions in batches of 3 to avoid timeouts.
+    // Processes conversions one at a time to avoid timeouts with large IPv6 datasets.
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -15,7 +15,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Batch Processing');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Individual Processing');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -35,8 +35,8 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 3: Process conversions in batches of 3
-        const batchSize = 3;
+        // Step 3: Process conversions in batches of 1 to avoid timeout with large IPv6 datasets
+        const batchSize = 1;
         const totalBatches = Math.ceil(allUnattributedConversions.length / batchSize);
         
         const allResults = {
@@ -52,7 +52,7 @@ exports.handler = async (event, context) => {
             batches: []
         };
         
-        console.log(`📦 Processing ${allUnattributedConversions.length} conversions in ${totalBatches} batches of ${batchSize}`);
+        console.log(`📦 Processing ${allUnattributedConversions.length} conversions in ${totalBatches} batches of ${batchSize} (one at a time due to large IPv6 dataset)`);
         
         // Process each batch
         for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
@@ -61,19 +61,19 @@ exports.handler = async (event, context) => {
             const batch = allUnattributedConversions.slice(startIndex, endIndex);
             const batchNumber = batchIndex + 1;
             
-            console.log(`\n🔄 Processing Batch ${batchNumber}/${totalBatches} (${batch.length} conversions)`);
+            console.log(`\n🔄 Processing Conversion ${batchNumber}/${totalBatches} (${batch.length} conversion)`);
             
             try {
                 // Analyze this batch using ORIGINAL logic
                 const batchResults = await analyzeUnattributedConversions(batch, analyticsData.page_views);
                 
-                // Update Redis immediately after processing this batch
+                // Update Redis immediately after processing this conversion
                 if (batchResults.matches.length > 0) {
-                    console.log(`📝 Updating ${batchResults.matches.length} recovered attributions from batch ${batchNumber} in Redis...`);
+                    console.log(`📝 Updating ${batchResults.matches.length} recovered attributions from conversion ${batchNumber} in Redis...`);
                     try {
                         await updateRecoveredAttributions(batchResults.matches);
                     } catch (redisError) {
-                        console.error(`❌ Redis update failed for batch ${batchNumber}:`, redisError);
+                        console.error(`❌ Redis update failed for conversion ${batchNumber}:`, redisError);
                     }
                 }
                 
@@ -94,31 +94,31 @@ exports.handler = async (event, context) => {
                     success: true
                 });
                 
-                console.log(`✅ Batch ${batchNumber} complete: ${batchResults.recovered}/${batch.length} conversions recovered`);
+                console.log(`✅ Conversion ${batchNumber} complete: ${batchResults.recovered}/${batch.length} conversion recovered`);
                 
-                // Small delay between batches to prevent API rate limiting
+                // Small delay between individual conversions
                 if (batchIndex < totalBatches - 1) {
-                    console.log('⏱️  Waiting 1 second before next batch...');
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    console.log('⏱️  Waiting 500ms before next conversion...');
+                    await new Promise(resolve => setTimeout(resolve, 500));
                 }
                 
-            } catch (batchError) {
-                console.error(`❌ Batch ${batchNumber} failed:`, batchError.message);
+            } catch (conversionError) {
+                console.error(`❌ Conversion ${batchNumber} failed:`, conversionError.message);
                 
                 allResults.batches.push({
                     batchNumber: batchNumber,
                     conversions: batch.length,
                     recovered: 0,
                     success: false,
-                    error: batchError.message
+                    error: conversionError.message
                 });
                 
-                // Continue with next batch instead of failing entirely
+                // Continue with next conversion instead of failing entirely
                 continue;
             }
         }
         
-        console.log(`\n🏁 All batches complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
+        console.log(`\n🏁 All conversions complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
         
         return {
             statusCode: 200,
@@ -126,7 +126,7 @@ exports.handler = async (event, context) => {
             body: JSON.stringify({
                 success: true,
                 results: allResults,
-                message: `Batch recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered across ${totalBatches} batches`
+                message: `Individual recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered across ${totalBatches} individual runs`
             })
         };
 
