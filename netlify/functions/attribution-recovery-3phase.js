@@ -1,8 +1,7 @@
 exports.handler = async (event, context) => {
     // Evergreen attribution recovery function - looks for unattributed conversions 
     // in the past 24 hours and attempts to recover their attribution.
-    // Can be run daily or scheduled for continuous attribution improvement.
-    // Modified to process limited number of conversions to avoid timeout.
+    // Processes conversions in batches of 3 to avoid timeouts.
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -16,7 +15,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - MINIMAL DEBUG');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Batch Processing');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -36,47 +35,98 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 3: Limit conversions to prevent timeout (process most recent first)
-        const maxConversions = 1; // Process just 1 conversion for targeted debugging
-        const unattributedConversions = allUnattributedConversions
-            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
-            .slice(0, maxConversions);
+        // Step 3: Process conversions in batches of 3
+        const batchSize = 3;
+        const totalBatches = Math.ceil(allUnattributedConversions.length / batchSize);
         
-        console.log(`📦 Processing ${unattributedConversions.length} conversions (out of ${allUnattributedConversions.length} total unattributed)`);
+        const allResults = {
+            total: allUnattributedConversions.length,
+            recovered: 0,
+            matches: [],
+            phases: {
+                'Phase 1': { attempts: 0, matches: 0 },
+                'Phase 2': { attempts: 0, matches: 0 },
+                'Phase 3': { attempts: 0, matches: 0 },
+                'Phase 4': { attempts: 0, matches: 0 }
+            },
+            batches: []
+        };
         
-        if (allUnattributedConversions.length > maxConversions) {
-            console.log(`⚠️  ${allUnattributedConversions.length - maxConversions} conversions will be processed in next run`);
-        }
+        console.log(`📦 Processing ${allUnattributedConversions.length} conversions in ${totalBatches} batches of ${batchSize}`);
         
-        // Step 4: Analyze unattributed conversions for IPv6 matches (ORIGINAL LOGIC)
-        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
-        
-        // Add metadata about remaining conversions
-        recoveryResults.totalUnattributed = allUnattributedConversions.length;
-        recoveryResults.processedThisRun = unattributedConversions.length;
-        recoveryResults.remainingToProcess = allUnattributedConversions.length - unattributedConversions.length;
-        
-        // Step 5: Update Redis with recovered attributions (with fixed Redis calls)
-        if (recoveryResults.matches.length > 0) {
-            console.log(`📝 Updating ${recoveryResults.matches.length} recovered attributions in Redis...`);
+        // Process each batch
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const startIndex = batchIndex * batchSize;
+            const endIndex = Math.min(startIndex + batchSize, allUnattributedConversions.length);
+            const batch = allUnattributedConversions.slice(startIndex, endIndex);
+            const batchNumber = batchIndex + 1;
+            
+            console.log(`\n🔄 Processing Batch ${batchNumber}/${totalBatches} (${batch.length} conversions)`);
+            
             try {
-                await updateRecoveredAttributions(recoveryResults.matches);
-            } catch (redisError) {
-                console.error('❌ Redis update failed but recovery succeeded:', redisError);
+                // Analyze this batch using ORIGINAL logic
+                const batchResults = await analyzeUnattributedConversions(batch, analyticsData.page_views);
+                
+                // Update Redis immediately after processing this batch
+                if (batchResults.matches.length > 0) {
+                    console.log(`📝 Updating ${batchResults.matches.length} recovered attributions from batch ${batchNumber} in Redis...`);
+                    try {
+                        await updateRecoveredAttributions(batchResults.matches);
+                    } catch (redisError) {
+                        console.error(`❌ Redis update failed for batch ${batchNumber}:`, redisError);
+                    }
+                }
+                
+                // Aggregate results
+                allResults.recovered += batchResults.recovered;
+                allResults.matches.push(...batchResults.matches);
+                
+                // Merge phase statistics
+                Object.keys(batchResults.phases).forEach(phase => {
+                    allResults.phases[phase].attempts += batchResults.phases[phase].attempts;
+                    allResults.phases[phase].matches += batchResults.phases[phase].matches;
+                });
+                
+                allResults.batches.push({
+                    batchNumber: batchNumber,
+                    conversions: batch.length,
+                    recovered: batchResults.recovered,
+                    success: true
+                });
+                
+                console.log(`✅ Batch ${batchNumber} complete: ${batchResults.recovered}/${batch.length} conversions recovered`);
+                
+                // Small delay between batches to prevent API rate limiting
+                if (batchIndex < totalBatches - 1) {
+                    console.log('⏱️  Waiting 1 second before next batch...');
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+                
+            } catch (batchError) {
+                console.error(`❌ Batch ${batchNumber} failed:`, batchError.message);
+                
+                allResults.batches.push({
+                    batchNumber: batchNumber,
+                    conversions: batch.length,
+                    recovered: 0,
+                    success: false,
+                    error: batchError.message
+                });
+                
+                // Continue with next batch instead of failing entirely
+                continue;
             }
         }
         
-        const message = recoveryResults.remainingToProcess > 0 
-            ? `Recovery complete: ${recoveryResults.recovered}/${recoveryResults.processedThisRun} conversions recovered this run. ${recoveryResults.remainingToProcess} remaining for next run.`
-            : `Recovery complete: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered. All conversions processed.`;
+        console.log(`\n🏁 All batches complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
         
         return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
                 success: true,
-                results: recoveryResults,
-                message: message
+                results: allResults,
+                message: `Batch recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered across ${totalBatches} batches`
             })
         };
 
@@ -162,12 +212,9 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (ORIGINAL WORKING LOGIC + OPTIMIZATIONS)
+// Step 3: Analyze unattributed conversions with FOUR phases (ORIGINAL WORKING LOGIC RESTORED)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
-    
-    // IP location cache to avoid duplicate lookups
-    const ipLocationCache = new Map();
     
     const results = {
         total: unattributedConversions.length,
@@ -208,7 +255,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
                 console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             }
             
-            // Find IPv6 pageviews in window
+            // Find IPv6 pageviews in window (ORIGINAL LOGIC)
             const candidatePageviews = findIPv6PageviewsInWindow(conversion, pageviews, phase.start, phase.end);
             
             if (candidatePageviews.length === 0) {
@@ -218,12 +265,12 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
             
-            // Get geographic data for conversion IP (with caching)
-            const conversionGeoData = await getIPLocationDataCached(conversion.ip_address, ipLocationCache);
+            // Get geographic data for conversion IP
+            const conversionGeoData = await getIPLocationData(conversion.ip_address);
             console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
             
-            // Check IPv6 pageviews for geographic match (with limits)
-            const match = await checkIPv6CandidatesLimited(conversion, candidatePageviews, conversionGeoData, ipLocationCache);
+            // Check each IPv6 pageview for geographic match (ORIGINAL LOGIC - NO LIMITS)
+            const match = await checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData);
             
             if (match) {
                 console.log(`   ✅ ${phase.name} MATCH FOUND!`);
@@ -247,11 +294,10 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     }
     
     console.log(`🏁 Recovery complete: ${results.recovered}/${results.total} conversions recovered`);
-    console.log(`📊 IP lookups cached: ${ipLocationCache.size} unique IPs`);
     return results;
 }
 
-// Find IPv6 pageviews within time window (MINIMAL DEBUG VERSION)
+// Find IPv6 pageviews within time window (ORIGINAL LOGIC)
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -259,35 +305,19 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     
     console.log(`   🕐 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
     
-    // Quick check: How many total IPv6 pageviews exist?
-    const totalIPv6 = pageviews.filter(pv => pv.ip_address && pv.ip_address.includes(':')).length;
-    
     const ipv6Pageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
         return pvTime >= windowStart && 
                pvTime <= conversionTime && 
-               pv.ip_address && pv.ip_address.includes(':');
+               pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
     });
     
-    console.log(`   📊 SUMMARY: ${ipv6Pageviews.length} IPv6 in window / ${totalIPv6} total IPv6 / ${pageviews.length} total pageviews`);
+    console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     
     return ipv6Pageviews;
 }
 
-// Get location/ISP data for an IP using IPInfo.io (with caching)
-async function getIPLocationDataCached(ip, cache) {
-    // Check cache first
-    if (cache.has(ip)) {
-        console.log(`   📋 Using cached data for ${ip}`);
-        return cache.get(ip);
-    }
-    
-    const locationData = await getIPLocationData(ip);
-    cache.set(ip, locationData);
-    return locationData;
-}
-
-// Get location/ISP data for an IP using IPInfo.io
+// Get location/ISP data for an IP using IPInfo.io (ORIGINAL LOGIC)
 async function getIPLocationData(ip) {
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
     const url = `https://ipinfo.io/${ip}?token=${token}`;
@@ -325,7 +355,7 @@ async function getIPLocationData(ip) {
     }
 }
 
-// Extract best ISP info
+// Extract best ISP info (ORIGINAL LOGIC)
 function extractBestISP(data) {
     if (data.company && data.company.name) {
         return data.company.name;
@@ -339,48 +369,9 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches (with limits and caching)
-async function checkIPv6CandidatesLimited(conversion, candidatePageviews, conversionGeoData, ipLocationCache) {
-    // Limit candidates to prevent timeout (check max 3 for debugging)
-    const maxCandidates = 3;
-    const limitedCandidates = candidatePageviews.slice(0, maxCandidates);
-    
-    if (candidatePageviews.length > maxCandidates) {
-        console.log(`   ⚠️  Testing only ${maxCandidates} candidates (out of ${candidatePageviews.length} found)`);
-    }
-    
-    for (let i = 0; i < limitedCandidates.length; i++) {
-        const pageview = limitedCandidates[i];
-        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
-        
-        console.log(`   🌈 IPv6 Candidate ${i + 1}: ${pageview.ip_address} (${timeDiff.toFixed(1)}min before)`);
-        
-        // Get geographic data for IPv6 pageview (with caching)
-        const pageviewGeoData = await getIPLocationDataCached(pageview.ip_address, ipLocationCache);
-        console.log(`      📍 Locations: ${conversionGeoData.city}→${pageviewGeoData.city}, ${conversionGeoData.country}→${pageviewGeoData.country}`);
-        
-        // Compare geographic data
-        const match = compareGeographicData(conversionGeoData, pageviewGeoData);
-        
-        if (match.isMatch) {
-            console.log(`      ✅ GEOGRAPHIC MATCH FOUND! (${match.confidence})`);
-            
-            return {
-                pageview: pageview,
-                score: match.score,
-                timeDiff: timeDiff,
-                confidence: match.confidence,
-                conversionGeo: conversionGeoData,
-                pageviewGeo: pageviewGeoData
-            };
-        }
-    }
-    
-    return null;
-}
-
-// Check IPv6 candidates against conversion for geographic matches (original function - kept for reference)
+// Check IPv6 candidates against conversion for geographic matches (ORIGINAL LOGIC RESTORED)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
+    // ORIGINAL: Check ALL candidates, no limits
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
@@ -393,7 +384,7 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         const pageviewGeoData = await getIPLocationData(pageview.ip_address);
         console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
-        // Compare geographic data
+        // Compare geographic data (ORIGINAL LOGIC)
         const match = compareGeographicData(conversionGeoData, pageviewGeoData);
         
         if (match.isMatch) {
@@ -416,10 +407,9 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
     return null;
 }
 
-// Compare geographic data between conversion and pageview - MINIMAL DEBUG
+// Compare geographic data between conversion and pageview (ORIGINAL LOGIC)
 function compareGeographicData(conversionGeo, pageviewGeo) {
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
-        console.log(`      ❌ LOOKUP_FAILED - skipping`);
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -428,14 +418,14 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     const countryMatch = conversionGeo.country === pageviewGeo.country;
     const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
 
-    // Scoring system
+    // Scoring system (ORIGINAL)
     let score = 0;
     if (cityMatch) score += 3;
     if (regionMatch) score += 2;
     if (countryMatch) score += 1;
     if (ispMatch) score += 2;
 
-    // Determine confidence level
+    // Determine confidence level (ORIGINAL THRESHOLDS)
     let confidence = 'NO_MATCH';
     let isMatch = false;
 
@@ -450,8 +440,6 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         isMatch = true;
     }
 
-    console.log(`      📊 Score: ${score}/8 (need ≥3) - ${isMatch ? 'MATCH!' : 'no match'} [C:${cityMatch?'✓':'✗'} R:${regionMatch?'✓':'✗'} Co:${countryMatch?'✓':'✗'} I:${ispMatch?'✓':'✗'}]`);
-
     return {
         isMatch,
         confidence,
@@ -463,7 +451,7 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     };
 }
 
-// Compare ISP names
+// Compare ISP names (ORIGINAL LOGIC)
 function compareISPs(isp1, isp2) {
     if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
     
@@ -485,7 +473,7 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
-// Helper function to make Redis HTTP requests (fixed for Upstash format)
+// Helper function to make Redis HTTP requests (ORIGINAL LOGIC)
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -530,7 +518,7 @@ async function redisRequest(command, ...args) {
     }
 }
 
-// Update recovered attributions in Redis (restored with fixed Redis calls)
+// Update recovered attributions in Redis (ORIGINAL LOGIC)
 async function updateRecoveredAttributions(matches) {
     console.log(`📝 Updating ${matches.length} recovered attributions in Redis...`);
     
@@ -582,7 +570,7 @@ async function updateRecoveredAttributions(matches) {
     console.log(`📝 Redis update complete for ${matches.length} attributions`);
 }
 
-// Find the Redis key for a specific conversion (restored)
+// Find the Redis key for a specific conversion (ORIGINAL LOGIC)
 async function findConversionKey(conversion) {
     try {
         // Try different possible key patterns (including the actual format seen in logs)
