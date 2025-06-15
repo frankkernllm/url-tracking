@@ -16,7 +16,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Limited Batch');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - MINIMAL DEBUG');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -37,7 +37,7 @@ exports.handler = async (event, context) => {
         }
         
         // Step 3: Limit conversions to prevent timeout (process most recent first)
-        const maxConversions = 2; // Further reduced to 2 conversions for intensive debugging
+        const maxConversions = 1; // Process just 1 conversion for targeted debugging
         const unattributedConversions = allUnattributedConversions
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
             .slice(0, maxConversions);
@@ -251,7 +251,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window (works across multiple days) - ENHANCED DEBUGGING
+// Find IPv6 pageviews within time window (MINIMAL DEBUG VERSION)
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -259,34 +259,17 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     
     console.log(`   🕐 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
     
-    // Debug: Show total pageviews and IPv6 breakdown
-    const totalPageviews = pageviews.length;
-    const allIPv6Pageviews = pageviews.filter(pv => pv.ip_address && pv.ip_address.includes(':'));
-    
-    console.log(`   🔍 DEBUG: Total pageviews: ${totalPageviews}, Total IPv6 pageviews: ${allIPv6Pageviews.length}`);
+    // Quick check: How many total IPv6 pageviews exist?
+    const totalIPv6 = pageviews.filter(pv => pv.ip_address && pv.ip_address.includes(':')).length;
     
     const ipv6Pageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
-        const inTimeWindow = pvTime >= windowStart && pvTime <= conversionTime;
-        const hasIPv6 = pv.ip_address && pv.ip_address.includes(':');
-        
-        // Debug logging for first few pageviews
-        if (allIPv6Pageviews.indexOf(pv) < 3) {
-            console.log(`   🔍 DEBUG IPv6 pageview: ${pv.ip_address} at ${pv.timestamp} - In window: ${inTimeWindow}`);
-        }
-        
-        return inTimeWindow && hasIPv6;
+        return pvTime >= windowStart && 
+               pvTime <= conversionTime && 
+               pv.ip_address && pv.ip_address.includes(':');
     });
     
-    console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
-    
-    // Show sample of what we found
-    if (ipv6Pageviews.length > 0) {
-        console.log(`   📋 Sample IPv6 pageviews in window:`);
-        ipv6Pageviews.slice(0, 3).forEach((pv, idx) => {
-            console.log(`      ${idx + 1}. ${pv.ip_address} at ${pv.timestamp}`);
-        });
-    }
+    console.log(`   📊 SUMMARY: ${ipv6Pageviews.length} IPv6 in window / ${totalIPv6} total IPv6 / ${pageviews.length} total pageviews`);
     
     return ipv6Pageviews;
 }
@@ -358,32 +341,29 @@ function extractBestISP(data) {
 
 // Check IPv6 candidates against conversion for geographic matches (with limits and caching)
 async function checkIPv6CandidatesLimited(conversion, candidatePageviews, conversionGeoData, ipLocationCache) {
-    // Limit candidates to prevent timeout (check max 5 per phase)
-    const maxCandidates = 5;
+    // Limit candidates to prevent timeout (check max 3 for debugging)
+    const maxCandidates = 3;
     const limitedCandidates = candidatePageviews.slice(0, maxCandidates);
     
     if (candidatePageviews.length > maxCandidates) {
-        console.log(`   ⚠️  Limiting to ${maxCandidates} candidates (out of ${candidatePageviews.length} found) to prevent timeout`);
+        console.log(`   ⚠️  Testing only ${maxCandidates} candidates (out of ${candidatePageviews.length} found)`);
     }
     
     for (let i = 0; i < limitedCandidates.length; i++) {
         const pageview = limitedCandidates[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
         
-        console.log(`   🌈 IPv6 Candidate ${i + 1}/${limitedCandidates.length}: ${pageview.ip_address}`);
-        console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
-        console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
+        console.log(`   🌈 IPv6 Candidate ${i + 1}: ${pageview.ip_address} (${timeDiff.toFixed(1)}min before)`);
         
         // Get geographic data for IPv6 pageview (with caching)
         const pageviewGeoData = await getIPLocationDataCached(pageview.ip_address, ipLocationCache);
-        console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
+        console.log(`      📍 Locations: ${conversionGeoData.city}→${pageviewGeoData.city}, ${conversionGeoData.country}→${pageviewGeoData.country}`);
         
         // Compare geographic data
         const match = compareGeographicData(conversionGeoData, pageviewGeoData);
         
         if (match.isMatch) {
             console.log(`      ✅ GEOGRAPHIC MATCH FOUND! (${match.confidence})`);
-            console.log(`         🎯 City: ${match.cityMatch ? '✓' : '✗'} | Region: ${match.regionMatch ? '✓' : '✗'} | Country: ${match.countryMatch ? '✓' : '✗'} | ISP: ${match.ispMatch ? '✓' : '✗'}`);
             
             return {
                 pageview: pageview,
@@ -393,8 +373,6 @@ async function checkIPv6CandidatesLimited(conversion, candidatePageviews, conver
                 conversionGeo: conversionGeoData,
                 pageviewGeo: pageviewGeoData
             };
-        } else {
-            console.log(`      ❌ No geographic match (${match.confidence})`);
         }
     }
     
@@ -438,14 +416,10 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
     return null;
 }
 
-// Compare geographic data between conversion and pageview - ENHANCED DEBUGGING
+// Compare geographic data between conversion and pageview - MINIMAL DEBUG
 function compareGeographicData(conversionGeo, pageviewGeo) {
-    console.log(`      🔍 DEBUG: Comparing locations:`);
-    console.log(`         Conversion: ${conversionGeo.city}, ${conversionGeo.region}, ${conversionGeo.country} (${conversionGeo.isp})`);
-    console.log(`         Pageview:   ${pageviewGeo.city}, ${pageviewGeo.region}, ${pageviewGeo.country} (${pageviewGeo.isp})`);
-    
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
-        console.log(`      ❌ DEBUG: Lookup failed - skipping geographic comparison`);
+        console.log(`      ❌ LOOKUP_FAILED - skipping`);
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -476,8 +450,7 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         isMatch = true;
     }
 
-    console.log(`      📊 DEBUG: Geographic score: ${score} (Need ≥3 for match. City: ${cityMatch ? '✓' : '✗'}, Region: ${regionMatch ? '✓' : '✗'}, Country: ${countryMatch ? '✓' : '✗'}, ISP: ${ispMatch ? '✓' : '✗'})`);
-    console.log(`      📊 DEBUG: Match result: ${isMatch ? 'YES' : 'NO'} (${confidence})`);
+    console.log(`      📊 Score: ${score}/8 (need ≥3) - ${isMatch ? 'MATCH!' : 'no match'} [C:${cityMatch?'✓':'✗'} R:${regionMatch?'✓':'✗'} Co:${countryMatch?'✓':'✗'} I:${ispMatch?'✓':'✗'}]`);
 
     return {
         isMatch,
