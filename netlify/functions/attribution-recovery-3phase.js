@@ -1,5 +1,5 @@
 exports.handler = async (event, context) => {
-    // BACK TO ORIGINAL LOGIC with only timeout monitoring and API rate limit handling
+    // ORIGINAL LOGIC with ONLY rate limiting protection - no timeout monitoring
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -14,11 +14,6 @@ exports.handler = async (event, context) => {
 
     try {
         console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours)');
-        
-        // Add timeout monitoring
-        const startTime = Date.now();
-        const timeLimit = (context.getRemainingTimeInMillis ? context.getRemainingTimeInMillis() : 300000) - 30000; // 30s buffer
-        console.log(`⏱️ Time limit: ${Math.round(timeLimit/1000)} seconds`);
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
@@ -38,13 +33,8 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 3: Analyze unattributed conversions (ORIGINAL LOGIC with timeout monitoring)
-        const recoveryResults = await analyzeUnattributedConversionsWithTimeout(
-            unattributedConversions, 
-            analyticsData.page_views,
-            startTime,
-            timeLimit
-        );
+        // Step 3: Analyze unattributed conversions (ORIGINAL LOGIC with rate limiting)
+        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
         
         // Step 4: Update Redis with recovered attributions
         if (recoveryResults.matches.length > 0) {
@@ -79,8 +69,8 @@ exports.handler = async (event, context) => {
     }
 };
 
-// MODIFIED: Original analysis logic with timeout monitoring
-async function analyzeUnattributedConversionsWithTimeout(unattributedConversions, pageviews, startTime, timeLimit) {
+// EXACTLY THE SAME as original, but with rate limiting in IP lookups
+async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
@@ -92,29 +82,16 @@ async function analyzeUnattributedConversionsWithTimeout(unattributedConversions
             'Phase 2': { attempts: 0, matches: 0 },
             'Phase 3': { attempts: 0, matches: 0 },
             'Phase 4': { attempts: 0, matches: 0 }
-        },
-        timeouts: 0
+        }
     };
     
     for (let i = 0; i < unattributedConversions.length; i++) {
         const conversion = unattributedConversions[i];
-        
-        // Check if we're running out of time
-        const elapsed = Date.now() - startTime;
-        const remaining = timeLimit - elapsed;
-        
-        if (remaining < 60000) { // Stop if less than 60 seconds remaining
-            console.log(`⏰ Stopping early due to time limit. Processed ${i}/${unattributedConversions.length} conversions`);
-            results.timeouts = unattributedConversions.length - i;
-            break;
-        }
-        
         console.log(`🔍 ANALYZING CONVERSION ${i + 1}/${unattributedConversions.length}: ${conversion.email}`);
         console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
         console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
-        console.log(`   ⏱️ Time remaining: ${Math.round(remaining/1000)}s`);
         
-        // Try four phases in sequence (ORIGINAL LOGIC)
+        // Try four phases in sequence (EXACT ORIGINAL LOGIC)
         const phases = [
             { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
             { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
@@ -135,7 +112,7 @@ async function analyzeUnattributedConversionsWithTimeout(unattributedConversions
                 console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             }
             
-            // Find IPv6 pageviews in window (ORIGINAL LOGIC)
+            // Find IPv6 pageviews in window (EXACT ORIGINAL LOGIC)
             const candidatePageviews = findIPv6PageviewsInWindow(conversion, pageviews, phase.start, phase.end);
             
             if (candidatePageviews.length === 0) {
@@ -145,11 +122,11 @@ async function analyzeUnattributedConversionsWithTimeout(unattributedConversions
             
             console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
             
-            // Get geographic data for conversion IP
-            const conversionGeoData = await getIPLocationDataWithRetry(conversion.ip_address);
+            // Get geographic data for conversion IP (ORIGINAL LOGIC)
+            const conversionGeoData = await getIPLocationDataWithRateLimit(conversion.ip_address);
             console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
             
-            // Check each IPv6 pageview for geographic match (ORIGINAL LOGIC)
+            // Check each IPv6 pageview for geographic match (ORIGINAL LOGIC + rate limiting)
             const match = await checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, conversionGeoData);
             
             if (match) {
@@ -177,68 +154,72 @@ async function analyzeUnattributedConversionsWithTimeout(unattributedConversions
     return results;
 }
 
-// MODIFIED: Add retry logic and rate limit handling to IP lookups
-async function getIPLocationDataWithRetry(ip) {
-    const maxRetries = 3;
-    let attempt = 0;
+// ONLY CHANGE: Add rate limiting to IP lookups to prevent API errors
+async function getIPLocationDataWithRateLimit(ip) {
+    const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
+    const url = `https://ipinfo.io/${ip}?token=${token}`;
     
-    while (attempt < maxRetries) {
-        try {
-            const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
-            const url = `https://ipinfo.io/${ip}?token=${token}`;
+    try {
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+        
+        if (response.status === 429) {
+            // Rate limited - wait a bit longer and retry once
+            console.log(`   ⏳ Rate limited on ${ip}, waiting 2 seconds...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
-            const response = await fetch(url, {
+            const retryResponse = await fetch(url, {
                 method: 'GET',
-                headers: { 'Accept': 'application/json' },
-                timeout: 10000 // 10 second timeout
+                headers: { 'Accept': 'application/json' }
             });
             
-            if (response.status === 429) {
-                // Rate limited - wait and retry
-                const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
-                console.log(`   ⏳ Rate limited, waiting ${delay}ms before retry ${attempt + 1}/${maxRetries}`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                attempt++;
-                continue;
-            }
-            
-            if (response.ok) {
-                const data = await response.json();
-                
-                return {
-                    ip: data.ip,
-                    city: data.city || 'Unknown',
-                    region: data.region || 'Unknown',
-                    country: data.country || 'Unknown',
-                    isp: extractBestISP(data),
-                    timezone: data.timezone || 'Unknown',
-                    location: data.loc || '0,0'
-                };
+            if (retryResponse.ok) {
+                const data = await retryResponse.json();
+                return buildGeoDataResponse(data);
             } else {
-                throw new Error(`HTTP ${response.status}`);
-            }
-        } catch (error) {
-            attempt++;
-            if (attempt >= maxRetries) {
-                console.log(`   ⚠️  Failed to lookup ${ip} after ${maxRetries} attempts: ${error.message}`);
-                return {
-                    ip: ip,
-                    city: 'LOOKUP_FAILED',
-                    region: 'LOOKUP_FAILED',
-                    country: 'LOOKUP_FAILED',
-                    isp: 'LOOKUP_FAILED'
-                };
-            } else {
-                console.log(`   ⚠️  Attempt ${attempt} failed for ${ip}, retrying: ${error.message}`);
-                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                throw new Error(`HTTP ${retryResponse.status} on retry`);
             }
         }
+        
+        if (response.ok) {
+            const data = await response.json();
+            return buildGeoDataResponse(data);
+        } else {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    } catch (error) {
+        console.log(`   ⚠️  Failed to lookup ${ip}: ${error.message}`);
+        return {
+            ip: ip,
+            city: 'LOOKUP_FAILED',
+            region: 'LOOKUP_FAILED',
+            country: 'LOOKUP_FAILED',
+            isp: 'LOOKUP_FAILED'
+        };
     }
 }
 
-// MODIFIED: Add rate limiting between IP lookups
+// Helper function to build geo data response
+function buildGeoDataResponse(data) {
+    return {
+        ip: data.ip,
+        city: data.city || 'Unknown',
+        region: data.region || 'Unknown',
+        country: data.country || 'Unknown',
+        isp: extractBestISP(data),
+        timezone: data.timezone || 'Unknown',
+        location: data.loc || '0,0'
+    };
+}
+
+// ORIGINAL LOGIC with small rate limiting delays
 async function checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, conversionGeoData) {
-    // ORIGINAL LOGIC: Check ALL candidates
+    // Check ALL candidates (ORIGINAL LOGIC)
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
@@ -247,11 +228,11 @@ async function checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, 
         console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
         console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
         
-        // Get geographic data for IPv6 pageview with rate limiting
-        const pageviewGeoData = await getIPLocationDataWithRetry(pageview.ip_address);
+        // Get geographic data for IPv6 pageview (with rate limiting)
+        const pageviewGeoData = await getIPLocationDataWithRateLimit(pageview.ip_address);
         console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
-        // Compare geographic data (ORIGINAL LOGIC)
+        // Compare geographic data (EXACT ORIGINAL LOGIC)
         const match = compareGeographicData(conversionGeoData, pageviewGeoData);
         
         if (match.isMatch) {
@@ -269,25 +250,21 @@ async function checkIPv6CandidatesWithRateLimit(conversion, candidatePageviews, 
         } else {
             console.log(`      ❌ No geographic match (${match.confidence})`);
         }
-        
-        // Small delay between IP lookups to avoid rate limiting
-        if (i < candidatePageviews.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
-        }
     }
     
     return null;
 }
 
-// ALL OTHER FUNCTIONS REMAIN EXACTLY THE SAME AS ORIGINAL
+// ALL REMAINING FUNCTIONS ARE EXACTLY THE SAME AS ORIGINAL
 
 async function fetchAnalyticsData() {
     console.log('📊 Fetching analytics data for past 24 hours...');
     
+    // Calculate past 24 hours dynamically
     const now = new Date();
-    const endDate = now.toISOString().split('T')[0];
+    const endDate = now.toISOString().split('T')[0]; // Today's date YYYY-MM-DD
     const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const startDate = yesterdayDate.toISOString().split('T')[0];
+    const startDate = yesterdayDate.toISOString().split('T')[0]; // Yesterday's date YYYY-MM-DD
     
     console.log(`📅 Date range: ${startDate} to ${endDate} (past 24 hours)`);
     
@@ -358,7 +335,7 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
         const pvTime = new Date(pv.timestamp);
         return pvTime >= windowStart && 
                pvTime <= conversionTime && 
-               pv.ip_address && pv.ip_address.includes(':');
+               pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
     });
     
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
@@ -389,12 +366,14 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     const countryMatch = conversionGeo.country === pageviewGeo.country;
     const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
 
+    // Scoring system
     let score = 0;
     if (cityMatch) score += 3;
     if (regionMatch) score += 2;
     if (countryMatch) score += 1;
     if (ispMatch) score += 2;
 
+    // Determine confidence level
     let confidence = 'NO_MATCH';
     let isMatch = false;
 
@@ -427,9 +406,13 @@ function compareISPs(isp1, isp2) {
     const norm1 = normalize(isp1);
     const norm2 = normalize(isp2);
     
+    // Exact match
     if (norm1 === norm2) return true;
+    
+    // Contains match
     if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
     
+    // ASN match
     const asn1 = isp1.match(/AS(\d+)/);
     const asn2 = isp2.match(/AS(\d+)/);
     if (asn1 && asn2 && asn1[1] === asn2[1]) return true;
@@ -445,6 +428,7 @@ async function redisRequest(command, ...args) {
         throw new Error('Missing Redis configuration');
     }
     
+    // For complex commands like SET with JSON, use POST with body
     if (command.toLowerCase() === 'set' && args.length === 2) {
         const response = await fetch(url, {
             method: 'POST',
@@ -461,7 +445,9 @@ async function redisRequest(command, ...args) {
         
         const data = await response.json();
         return data.result;
-    } else {
+    } 
+    // For simple commands like GET, KEYS, use URL path
+    else {
         const response = await fetch(`${url}/${command}/${args.join('/')}`, {
             headers: {
                 'Authorization': `Bearer ${token}`,
@@ -488,12 +474,15 @@ async function updateRecoveredAttributions(matches) {
         try {
             console.log(`🔄 Updating ${conversion.email}...`);
             
+            // Try to find the conversion record in Redis by searching different key patterns
             const conversionKey = await findConversionKey(conversion);
             
             if (conversionKey) {
+                // Get the existing conversion data
                 const existingData = await redisRequest('get', conversionKey);
                 let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
                 
+                // Update with recovered attribution
                 const updatedConversion = {
                     ...conversionData,
                     attribution_found: true,
@@ -510,6 +499,7 @@ async function updateRecoveredAttributions(matches) {
                     recovery_ipv6_match: pageview.ip_address
                 };
                 
+                // Save back to Redis
                 await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
                 
                 console.log(`✅ Updated ${conversion.email}: ${pageview.landing_page} (${match.phase})`);
@@ -527,6 +517,7 @@ async function updateRecoveredAttributions(matches) {
 
 async function findConversionKey(conversion) {
     try {
+        // Try different possible key patterns
         const patterns = [
             `conversions:*${conversion.email}*`,
             `conversions:${conversion.timestamp.split('T')[0]}*`,
@@ -541,6 +532,7 @@ async function findConversionKey(conversion) {
             try {
                 const keys = await redisRequest('keys', pattern);
                 if (keys && keys.length > 0) {
+                    // If multiple keys, try to find the exact match
                     for (const key of keys) {
                         const data = await redisRequest('get', key);
                         if (data) {
@@ -554,13 +546,16 @@ async function findConversionKey(conversion) {
                     }
                 }
             } catch (error) {
+                // Continue trying other patterns
                 console.log(`   ⚠️ Pattern ${pattern} failed: ${error.message}`);
             }
         }
         
+        // If no existing key found, create a new one
         const newKey = `conversion_${conversion.email}_${Date.now()}`;
         console.log(`🆕 Creating new conversion key: ${newKey}`);
         
+        // Store the conversion data first
         await redisRequest('set', newKey, JSON.stringify(conversion));
         return newKey;
         
