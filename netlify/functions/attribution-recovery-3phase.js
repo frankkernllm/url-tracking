@@ -16,7 +16,17 @@ exports.handler = async (event, context) => {
 
     // API Key validation
     const apiKey = event.headers['x-api-key'];
-    if (apiKey !== 'ojoy_track_2025_secure_key_v1') {
+    const expectedApiKey = process.env.OJOY_API_KEY;
+    
+    if (!expectedApiKey) {
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'Server configuration error: API key not configured' })
+        };
+    }
+    
+    if (apiKey !== expectedApiKey) {
         return {
             statusCode: 401,
             headers,
