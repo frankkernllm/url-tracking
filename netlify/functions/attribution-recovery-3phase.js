@@ -1,8 +1,9 @@
-// netlify/functions/attribution-recovery-5phase.js
-// Fixed version using direct HTTP calls to Upstash Redis REST API with individual processing and 5 phases
-
 exports.handler = async (event, context) => {
-    // CORS headers
+    // Evergreen attribution recovery function - looks for unattributed conversions 
+    // in the past 24 hours and attempts to recover their attribution.
+    // Can be run daily or scheduled for continuous attribution improvement.
+    // Modified to process each conversion individually.
+    
     const headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
@@ -14,31 +15,14 @@ exports.handler = async (event, context) => {
         return { statusCode: 200, headers, body: '' };
     }
 
-    // API Key validation
-    const apiKey = event.headers['x-api-key'];
-    const expectedApiKey = process.env.OJOY_API_KEY;
-    
-    if (!expectedApiKey) {
-        return {
-            statusCode: 500,
-            headers,
-            body: JSON.stringify({ error: 'Server configuration error: API key not configured' })
-        };
-    }
-    
-    if (apiKey !== expectedApiKey) {
-        return {
-            statusCode: 401,
-            headers,
-            body: JSON.stringify({ error: 'Invalid API key' })
-        };
-    }
-
     try {
-        console.log('🎯 Starting Five-Phase Attribution Recovery with Individual Processing');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Individual Processing');
         
-        // Step 1: Get unattributed conversions
-        const unattributedConversions = await getUnattributedConversions();
+        // Step 1: Fetch analytics data from past 24 hours
+        const analyticsData = await fetchAnalyticsData();
+        
+        // Step 2: Find unattributed conversions
+        const unattributedConversions = findUnattributedConversions(analyticsData.conversions);
         
         if (unattributedConversions.length === 0) {
             return {
@@ -51,10 +35,8 @@ exports.handler = async (event, context) => {
                 })
             };
         }
-
-        console.log(`📊 Found ${unattributedConversions.length} unattributed conversions`);
-
-        // Step 2: Process unattributed conversions one at a time
+        
+        // Step 3: Process each conversion individually
         const allResults = {
             total: unattributedConversions.length,
             recovered: 0,
@@ -63,29 +45,34 @@ exports.handler = async (event, context) => {
                 'Phase 1': { attempts: 0, matches: 0 },
                 'Phase 2': { attempts: 0, matches: 0 },
                 'Phase 3': { attempts: 0, matches: 0 },
-                'Phase 4': { attempts: 0, matches: 0 },
-                'Phase 5': { attempts: 0, matches: 0 }
+                'Phase 4': { attempts: 0, matches: 0 }
             },
             conversions: []
         };
         
         console.log(`🔄 Processing ${unattributedConversions.length} conversions individually`);
         
-        // Process each conversion individually
+        // Process each conversion one at a time
         for (let i = 0; i < unattributedConversions.length; i++) {
             const conversion = unattributedConversions[i];
             const conversionNumber = i + 1;
             
             console.log(`\n🔍 Processing Conversion ${conversionNumber}/${unattributedConversions.length}: ${conversion.email}`);
+            console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
+            console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
             
             try {
-                // Run five-phase recovery for this single conversion
-                const conversionResults = await runFivePhaseRecovery([conversion]);
+                // Analyze this single conversion for IPv6 matches
+                const conversionResults = await analyzeUnattributedConversions([conversion], analyticsData.page_views);
                 
                 // Update Redis immediately after processing this conversion
                 if (conversionResults.matches.length > 0) {
                     console.log(`📝 Updating recovered attribution for ${conversion.email} in Redis...`);
-                    await updateRecoveredAttributions(conversionResults.matches);
+                    try {
+                        await updateRecoveredAttributions(conversionResults.matches);
+                    } catch (redisError) {
+                        console.error(`❌ Redis update failed for ${conversion.email}:`, redisError.message);
+                    }
                 }
                 
                 // Aggregate results
@@ -130,7 +117,7 @@ exports.handler = async (event, context) => {
         }
         
         console.log(`\n🏁 All conversions complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
-
+        
         return {
             statusCode: 200,
             headers,
@@ -154,108 +141,134 @@ exports.handler = async (event, context) => {
     }
 };
 
-// Helper function to make Redis HTTP requests
-async function redisRequest(command, ...args) {
-    const url = process.env.UPSTASH_REDIS_REST_URL;
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+// Step 1: Fetch analytics data from past 24 hours (evergreen function)
+async function fetchAnalyticsData() {
+    console.log('📊 Fetching analytics data for past 24 hours...');
     
-    if (!url || !token) {
-        throw new Error('Missing Redis configuration');
-    }
+    // Calculate past 24 hours dynamically
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0]; // Today's date YYYY-MM-DD
+    const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const startDate = yesterdayDate.toISOString().split('T')[0]; // Yesterday's date YYYY-MM-DD
     
-    const response = await fetch(`${url}/${command}/${args.join('/')}`, {
+    console.log(`📅 Date range: ${startDate} to ${endDate} (past 24 hours)`);
+    
+    const params = new URLSearchParams();
+    params.append('start_date', startDate);
+    params.append('end_date', endDate);
+    
+    const apiUrl = `https://trackingojoy.netlify.app/.netlify/functions/analytics?${params}`;
+    
+    console.log(`📡 API Request URL: ${apiUrl}`);
+    
+    const response = await fetch(apiUrl, {
         headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+            'X-API-Key': process.env.OJOY_API_KEY
         }
     });
     
     if (!response.ok) {
-        throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        throw new Error(`Analytics API failed: ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
-    return data.result;
+    console.log(`✅ Analytics data loaded for ${startDate} to ${endDate}:`);
+    console.log(`   📊 Total conversions: ${data.conversions?.length || 0}`);
+    console.log(`   📊 Total pageviews: ${data.page_views?.length || 0}`);
+    
+    if (data.page_views && data.page_views.length > 0) {
+        const ipv4Count = data.page_views.filter(pv => pv.ip_address && !pv.ip_address.includes(':')).length;
+        const ipv6Count = data.page_views.filter(pv => pv.ip_address && pv.ip_address.includes(':')).length;
+        console.log(`🌐 IP Address breakdown - IPv4: ${ipv4Count}, IPv6: ${ipv6Count}`);
+    }
+    
+    return data;
 }
 
-async function getUnattributedConversions() {
-    // Get all conversion keys
-    const conversionKeys = await redisRequest('keys', 'conversion_*');
-    const unattributed = [];
-    
-    if (!conversionKeys || conversionKeys.length === 0) {
-        console.log('No conversion keys found');
+// Step 2: Find unattributed conversions
+function findUnattributedConversions(conversions) {
+    if (!conversions || conversions.length === 0) {
+        console.log('❌ No conversions found in analytics data');
         return [];
     }
     
-    // Check each conversion for attribution status
-    for (const key of conversionKeys) {
-        try {
-            const conversionData = await redisRequest('get', key);
-            if (conversionData) {
-                let conversion;
-                try {
-                    conversion = typeof conversionData === 'string' ? JSON.parse(conversionData) : conversionData;
-                } catch (parseError) {
-                    console.log(`Failed to parse conversion data for key ${key}:`, parseError);
-                    continue;
-                }
-                
-                // Check if conversion lacks attribution
-                if (!conversion.attribution_found || conversion.attribution_found === false) {
-                    unattributed.push({
-                        ...conversion,
-                        key: key
-                    });
-                }
-            }
-        } catch (error) {
-            console.log(`Error processing conversion key ${key}:`, error);
-        }
+    const unattributed = conversions.filter(conv => 
+        conv.attribution_found === false || 
+        !conv.landing_page || 
+        conv.landing_page === ''
+    );
+    
+    console.log(`🚨 Found ${unattributed.length} unattributed conversions out of ${conversions.length} total`);
+    
+    if (unattributed.length > 0) {
+        console.log('📋 Unattributed conversions:');
+        unattributed.forEach((conv, index) => {
+            console.log(`   ${index + 1}. ${conv.email} | ${conv.ip_address} | ${conv.timestamp}`);
+        });
     }
     
-    console.log(`Found ${unattributed.length} unattributed conversions`);
     return unattributed;
 }
 
-async function runFivePhaseRecovery(conversions) {
-    const phases = [
-        { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
-        { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
-        { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
-        { name: 'Phase 4', start: 120, end: 180, confidence: 'DEEP_SEARCH' },
-        { name: 'Phase 5', start: 180, end: 240, confidence: 'MAXIMUM_SEARCH' }
-    ];
+// Step 3: Analyze unattributed conversions with FOUR phases (now handles single conversion)
+async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
+    console.log(`🔬 Analyzing ${unattributedConversions.length} conversion(s) for IPv6 pageview matches...`);
     
     const results = {
-        total: conversions.length,
+        total: unattributedConversions.length,
         recovered: 0,
         matches: [],
         phases: {
             'Phase 1': { attempts: 0, matches: 0 },
             'Phase 2': { attempts: 0, matches: 0 },
             'Phase 3': { attempts: 0, matches: 0 },
-            'Phase 4': { attempts: 0, matches: 0 },
-            'Phase 5': { attempts: 0, matches: 0 }
+            'Phase 4': { attempts: 0, matches: 0 }
         }
     };
-
-    for (const conversion of conversions) {
-        console.log(`🔍 Processing: ${conversion.email} (${conversion.ip_address})`);
+    
+    for (let i = 0; i < unattributedConversions.length; i++) {
+        const conversion = unattributedConversions[i];
+        
+        // Try four phases in sequence (balanced timeline for remaining conversions)
+        const phases = [
+            { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
+            { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
+            { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
+            { name: 'Phase 4', start: 120, end: 180, confidence: 'DEEP_HISTORY_3H' }
+        ];
         
         let matched = false;
         
-        // Try each phase in sequence - stop when match found
         for (const phase of phases) {
             if (matched) break;
             
             results.phases[phase.name].attempts++;
-            console.log(`   ${phase.name}: Searching ${phase.start}-${phase.end} minutes before conversion...`);
             
-            const match = await searchPhase(conversion, phase.start, phase.end);
+            if (phase.name === 'Phase 4') {
+                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-3 hours before conversion)`);
+            } else {
+                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
+            }
             
-            if (match && match.score >= 3) {
-                console.log(`   ✅ ${phase.name} match found! Score: ${match.score}`);
+            // Find IPv6 pageviews in window
+            const candidatePageviews = findIPv6PageviewsInWindow(conversion, pageviews, phase.start, phase.end);
+            
+            if (candidatePageviews.length === 0) {
+                console.log(`   ❌ No IPv6 pageviews found in ${phase.name} window`);
+                continue;
+            }
+            
+            console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
+            
+            // Get geographic data for conversion IP
+            const conversionGeoData = await getIPLocationData(conversion.ip_address);
+            console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
+            
+            // Check each IPv6 pageview for geographic match
+            const match = await checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData);
+            
+            if (match) {
+                console.log(`   ✅ ${phase.name} MATCH FOUND!`);
                 
                 results.matches.push({
                     conversion: conversion,
@@ -267,111 +280,44 @@ async function runFivePhaseRecovery(conversions) {
                 results.phases[phase.name].matches++;
                 results.recovered++;
                 matched = true;
-            } else {
-                console.log(`   ❌ No match found in ${phase.name}`);
             }
         }
         
         if (!matched) {
-            console.log(`   ❌ No matches found in any of the 5 phases`);
+            console.log('   ❌ No matches found in any phase');
         }
     }
     
     return results;
 }
 
-async function searchPhase(conversion, startMinutes, endMinutes) {
+// Find IPv6 pageviews within time window (works across multiple days)
+function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
     const windowEnd = new Date(conversionTime.getTime() - startMinutes * 60 * 1000);
     
-    console.log(`   🔍 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
+    console.log(`   🕐 Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
     
-    // Get all attribution keys (pageviews)
-    const attributionKeys = await redisRequest('keys', 'attribution_*');
-    const candidates = [];
+    const ipv6Pageviews = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        return pvTime >= windowStart && 
+               pvTime <= conversionTime && 
+               pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
+    });
     
-    if (!attributionKeys || attributionKeys.length === 0) {
-        console.log('   ⚠️ No attribution keys found');
-        return null;
-    }
+    console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     
-    let processedKeys = 0;
-    for (const key of attributionKeys) {
-        // Skip lookup keys - we want the main pageview records
-        if (key.includes('_ip_') || key.includes('_session_') || key.includes('_geo_') || key.includes('_fp_')) {
-            continue;
-        }
-        
-        try {
-            const pageviewData = await redisRequest('get', key);
-            if (!pageviewData) continue;
-            
-            let pageview;
-            try {
-                pageview = typeof pageviewData === 'string' ? JSON.parse(pageviewData) : pageviewData;
-            } catch (parseError) {
-                continue;
-            }
-            
-            // Check if this pageview is in our time window
-            const pageviewTime = new Date(pageview.timestamp);
-            if (pageviewTime < windowStart || pageviewTime > windowEnd) {
-                continue;
-            }
-            
-            // Check if this is an IPv6 pageview (contains colons)
-            if (!pageview.ip_address || !pageview.ip_address.includes(':')) {
-                continue;
-            }
-            
-            console.log(`   📱 Found IPv6 pageview: ${pageview.ip_address} at ${pageview.timestamp}`);
-            
-            // Get geographic data for both IPs
-            const conversionGeo = await getIPLocation(conversion.ip_address);
-            const pageviewGeo = await getIPLocation(pageview.ip_address);
-            
-            const score = calculateGeoScore(conversionGeo, pageviewGeo);
-            
-            if (score >= 3) {
-                const timeDiff = Math.abs(conversionTime - pageviewTime) / 60000; // minutes
-                
-                candidates.push({
-                    pageview: pageview,
-                    score: score,
-                    timeDiff: timeDiff,
-                    conversionGeo: conversionGeo,
-                    pageviewGeo: pageviewGeo
-                });
-                
-                console.log(`   ✅ Candidate found! Score: ${score}, Time diff: ${timeDiff.toFixed(1)} min`);
-            }
-            
-            processedKeys++;
-        } catch (error) {
-            console.log(`   ⚠️ Error processing key ${key}:`, error.message);
-        }
-    }
-    
-    console.log(`   📊 Processed ${processedKeys} pageview keys, found ${candidates.length} candidates`);
-    
-    if (candidates.length === 0) return null;
-    
-    // Return best match (highest score, then closest time)
-    const bestMatch = candidates.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        return a.timeDiff - b.timeDiff;
-    })[0];
-    
-    console.log(`   🎯 Best match: Score ${bestMatch.score}, ${bestMatch.timeDiff.toFixed(1)} min gap`);
-    return bestMatch;
+    return ipv6Pageviews;
 }
 
-async function getIPLocation(ip) {
+// Get location/ISP data for an IP using IPInfo.io
+async function getIPLocationData(ip) {
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
+    const url = `https://ipinfo.io/${ip}?token=${token}`;
     
     try {
-        const response = await fetch(`https://ipinfo.io/${ip}?token=${token}`, {
+        const response = await fetch(url, {
             method: 'GET',
             headers: { 'Accept': 'application/json' }
         });
@@ -380,18 +326,21 @@ async function getIPLocation(ip) {
             const data = await response.json();
             
             return {
+                ip: data.ip,
                 city: data.city || 'Unknown',
                 region: data.region || 'Unknown',
                 country: data.country || 'Unknown',
                 isp: extractBestISP(data),
-                timezone: data.timezone || 'Unknown'
+                timezone: data.timezone || 'Unknown',
+                location: data.loc || '0,0'
             };
         } else {
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (error) {
-        console.log(`   ⚠️ IP lookup failed for ${ip}: ${error.message}`);
+        console.log(`   ⚠️  Failed to lookup ${ip}: ${error.message}`);
         return {
+            ip: ip,
             city: 'LOOKUP_FAILED',
             region: 'LOOKUP_FAILED',
             country: 'LOOKUP_FAILED',
@@ -400,31 +349,106 @@ async function getIPLocation(ip) {
     }
 }
 
+// Extract best ISP info
 function extractBestISP(data) {
-    if (data.company?.name) return data.company.name;
-    if (data.asn?.name) return data.asn.name;
-    if (data.org) return data.org;
-    if (data.carrier?.name) return data.carrier.name;
+    if (data.company && data.company.name) {
+        return data.company.name;
+    } else if (data.asn && data.asn.name) {
+        return data.asn.name;
+    } else if (data.org) {
+        return data.org;
+    } else if (data.carrier && data.carrier.name) {
+        return data.carrier.name;
+    }
     return 'Unknown';
 }
 
-function calculateGeoScore(conversionGeo, pageviewGeo) {
-    let score = 0;
+// Check IPv6 candidates against conversion for geographic matches
+async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
+    for (let i = 0; i < candidatePageviews.length; i++) {
+        const pageview = candidatePageviews[i];
+        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
+        
+        console.log(`   🌈 IPv6 Candidate ${i + 1}: ${pageview.ip_address}`);
+        console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
+        console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
+        
+        // Get geographic data for IPv6 pageview
+        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
+        console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
+        
+        // Compare geographic data
+        const match = compareGeographicData(conversionGeoData, pageviewGeoData);
+        
+        if (match.isMatch) {
+            console.log(`      ✅ GEOGRAPHIC MATCH FOUND! (${match.confidence})`);
+            console.log(`         🎯 City: ${match.cityMatch ? '✓' : '✗'} | Region: ${match.regionMatch ? '✓' : '✗'} | Country: ${match.countryMatch ? '✓' : '✗'} | ISP: ${match.ispMatch ? '✓' : '✗'}`);
+            
+            return {
+                pageview: pageview,
+                score: match.score,
+                timeDiff: timeDiff,
+                confidence: match.confidence,
+                conversionGeo: conversionGeoData,
+                pageviewGeo: pageviewGeoData
+            };
+        } else {
+            console.log(`      ❌ No geographic match (${match.confidence})`);
+        }
+    }
     
-    if (conversionGeo.city === pageviewGeo.city) score += 3;
-    if (conversionGeo.region === pageviewGeo.region) score += 2;
-    if (conversionGeo.country === pageviewGeo.country) score += 1;
-    if (compareISPs(conversionGeo.isp, pageviewGeo.isp)) score += 2;
-    
-    console.log(`   📊 Geographic score: ${score} (City: ${conversionGeo.city === pageviewGeo.city ? '✓' : '✗'}, Region: ${conversionGeo.region === pageviewGeo.region ? '✓' : '✗'}, Country: ${conversionGeo.country === pageviewGeo.country ? '✓' : '✗'}, ISP: ${compareISPs(conversionGeo.isp, pageviewGeo.isp) ? '✓' : '✗'})`);
-    
-    return score;
+    return null;
 }
 
+// Compare geographic data between conversion and pageview
+function compareGeographicData(conversionGeo, pageviewGeo) {
+    if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
+        return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
+    }
+
+    const cityMatch = conversionGeo.city === pageviewGeo.city;
+    const regionMatch = conversionGeo.region === pageviewGeo.region;
+    const countryMatch = conversionGeo.country === pageviewGeo.country;
+    const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
+
+    // Scoring system
+    let score = 0;
+    if (cityMatch) score += 3;
+    if (regionMatch) score += 2;
+    if (countryMatch) score += 1;
+    if (ispMatch) score += 2;
+
+    // Determine confidence level
+    let confidence = 'NO_MATCH';
+    let isMatch = false;
+
+    if (score >= 5) {
+        confidence = 'DEFINITE';
+        isMatch = true;
+    } else if (score >= 4) {
+        confidence = 'STRONG';
+        isMatch = true;
+    } else if (score >= 3) {
+        confidence = 'POSSIBLE';
+        isMatch = true;
+    }
+
+    return {
+        isMatch,
+        confidence,
+        score,
+        cityMatch,
+        regionMatch, 
+        countryMatch,
+        ispMatch
+    };
+}
+
+// Compare ISP names
 function compareISPs(isp1, isp2) {
     if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
     
-    const normalize = str => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
     const norm1 = normalize(isp1);
     const norm2 = normalize(isp2);
     
@@ -434,7 +458,7 @@ function compareISPs(isp1, isp2) {
     // Contains match
     if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
     
-    // ASN matching
+    // ASN match
     const asn1 = isp1.match(/AS(\d+)/);
     const asn2 = isp2.match(/AS(\d+)/);
     if (asn1 && asn2 && asn1[1] === asn2[1]) return true;
@@ -442,33 +466,150 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
+// Helper function to make Redis HTTP requests (fixed for Upstash format)
+async function redisRequest(command, ...args) {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    
+    if (!url || !token) {
+        throw new Error('Missing Redis configuration');
+    }
+    
+    // For complex commands like SET with JSON, use POST with body
+    if (command.toLowerCase() === 'set' && args.length === 2) {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify([command, ...args])
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        return data.result;
+    } 
+    // For simple commands like GET, KEYS, use URL path
+    else {
+        const response = await fetch(`${url}/${command}/${args.join('/')}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        return data.result;
+    }
+}
+
+// Update recovered attributions in Redis (restored with fixed Redis calls)
 async function updateRecoveredAttributions(matches) {
-    console.log(`📝 Updating ${matches.length} recovered attributions in Redis`);
+    console.log(`📝 Updating ${matches.length} recovered attributions in Redis...`);
     
     for (const match of matches) {
         const conversion = match.conversion;
         const pageview = match.match.pageview;
         
         try {
-            // Update conversion record with attribution
-            const updatedConversion = {
-                ...conversion,
-                attribution_found: true,
-                landing_page: pageview.landing_page || pageview.url,
-                source: pageview.source || 'recovered',
-                recovery_method: 'five_phase_geographic',
-                recovery_phase: match.phase,
-                recovery_confidence: match.confidence,
-                recovery_score: match.match.score,
-                recovery_timestamp: new Date().toISOString()
-            };
+            console.log(`🔄 Updating ${conversion.email}...`);
             
-            // Update the conversion in Redis
-            await redisRequest('set', conversion.key, JSON.stringify(updatedConversion));
+            // Try to find the conversion record in Redis by searching different key patterns
+            const conversionKey = await findConversionKey(conversion);
             
-            console.log(`✅ Updated ${conversion.email}: ${pageview.landing_page} (${match.phase})`);
+            if (conversionKey) {
+                // Get the existing conversion data
+                const existingData = await redisRequest('get', conversionKey);
+                let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
+                
+                // Update with recovered attribution
+                const updatedConversion = {
+                    ...conversionData,
+                    attribution_found: true,
+                    landing_page: pageview.landing_page || pageview.url,
+                    source: pageview.source || 'recovered',
+                    utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
+                    utm_medium: pageview.utm_medium || conversionData.utm_medium,
+                    referrer_url: pageview.referrer_url || conversionData.referrer_url,
+                    recovery_method: 'four_phase_geographic',
+                    recovery_phase: match.phase,
+                    recovery_confidence: match.confidence,
+                    recovery_score: match.match.score,
+                    recovery_timestamp: new Date().toISOString(),
+                    recovery_ipv6_match: pageview.ip_address
+                };
+                
+                // Save back to Redis (using fixed POST method)
+                await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
+                
+                console.log(`✅ Updated ${conversion.email}: ${pageview.landing_page} (${match.phase})`);
+            } else {
+                console.log(`⚠️ Could not find Redis key for ${conversion.email}`);
+            }
+            
         } catch (error) {
             console.log(`❌ Failed to update ${conversion.email}: ${error.message}`);
         }
+    }
+    
+    console.log(`📝 Redis update complete for ${matches.length} attributions`);
+}
+
+// Find the Redis key for a specific conversion (restored)
+async function findConversionKey(conversion) {
+    try {
+        // Try different possible key patterns (including the actual format seen in logs)
+        const patterns = [
+            `conversions:*${conversion.email}*`,
+            `conversions:${conversion.timestamp.split('T')[0]}*`,
+            `conversions:*`,
+            `conversion_${conversion.email}_*`,
+            `conv_${conversion.email}_*`,
+            `track_${conversion.email}_*`,
+            `*${conversion.email}*`
+        ];
+        
+        for (const pattern of patterns) {
+            try {
+                const keys = await redisRequest('keys', pattern);
+                if (keys && keys.length > 0) {
+                    // If multiple keys, try to find the exact match
+                    for (const key of keys) {
+                        const data = await redisRequest('get', key);
+                        if (data) {
+                            const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+                            if (parsed.email === conversion.email && 
+                                Math.abs(new Date(parsed.timestamp) - new Date(conversion.timestamp)) < 60000) {
+                                console.log(`🔍 Found conversion key: ${key}`);
+                                return key;
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                // Continue trying other patterns
+                console.log(`   ⚠️ Pattern ${pattern} failed: ${error.message}`);
+            }
+        }
+        
+        // If no existing key found, create a new one
+        const newKey = `conversion_${conversion.email}_${Date.now()}`;
+        console.log(`🆕 Creating new conversion key: ${newKey}`);
+        
+        // Store the conversion data first
+        await redisRequest('set', newKey, JSON.stringify(conversion));
+        return newKey;
+        
+    } catch (error) {
+        console.error(`❌ Error finding conversion key for ${conversion.email}:`, error);
+        return null;
     }
 }
