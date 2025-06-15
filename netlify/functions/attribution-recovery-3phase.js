@@ -2,7 +2,7 @@ exports.handler = async (event, context) => {
     // Evergreen attribution recovery function - looks for unattributed conversions 
     // in the past 24 hours and attempts to recover their attribution.
     // Can be run daily or scheduled for continuous attribution improvement.
-    // Modified to process each conversion individually.
+    // Modified to process limited number of conversions to avoid timeout.
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -16,15 +16,15 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Individual Processing');
+        console.log('🎯 Starting Four-Phase Attribution Recovery (Past 24 Hours) - Limited Batch');
         
         // Step 1: Fetch analytics data from past 24 hours
         const analyticsData = await fetchAnalyticsData();
         
         // Step 2: Find unattributed conversions
-        const unattributedConversions = findUnattributedConversions(analyticsData.conversions);
+        const allUnattributedConversions = findUnattributedConversions(analyticsData.conversions);
         
-        if (unattributedConversions.length === 0) {
+        if (allUnattributedConversions.length === 0) {
             return {
                 statusCode: 200,
                 headers,
@@ -36,95 +36,47 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 3: Process each conversion individually
-        const allResults = {
-            total: unattributedConversions.length,
-            recovered: 0,
-            matches: [],
-            phases: {
-                'Phase 1': { attempts: 0, matches: 0 },
-                'Phase 2': { attempts: 0, matches: 0 },
-                'Phase 3': { attempts: 0, matches: 0 },
-                'Phase 4': { attempts: 0, matches: 0 }
-            },
-            conversions: []
-        };
+        // Step 3: Limit conversions to prevent timeout (process most recent first)
+        const maxConversions = 6; // Process max 6 conversions per run to stay under timeout
+        const unattributedConversions = allUnattributedConversions
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
+            .slice(0, maxConversions);
         
-        console.log(`🔄 Processing ${unattributedConversions.length} conversions individually`);
+        console.log(`📦 Processing ${unattributedConversions.length} conversions (out of ${allUnattributedConversions.length} total unattributed)`);
         
-        // Process each conversion one at a time
-        for (let i = 0; i < unattributedConversions.length; i++) {
-            const conversion = unattributedConversions[i];
-            const conversionNumber = i + 1;
-            
-            console.log(`\n🔍 Processing Conversion ${conversionNumber}/${unattributedConversions.length}: ${conversion.email}`);
-            console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
-            console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
-            
+        if (allUnattributedConversions.length > maxConversions) {
+            console.log(`⚠️  ${allUnattributedConversions.length - maxConversions} conversions will be processed in next run`);
+        }
+        
+        // Step 4: Analyze unattributed conversions for IPv6 matches (ORIGINAL LOGIC)
+        const recoveryResults = await analyzeUnattributedConversions(unattributedConversions, analyticsData.page_views);
+        
+        // Add metadata about remaining conversions
+        recoveryResults.totalUnattributed = allUnattributedConversions.length;
+        recoveryResults.processedThisRun = unattributedConversions.length;
+        recoveryResults.remainingToProcess = allUnattributedConversions.length - unattributedConversions.length;
+        
+        // Step 5: Update Redis with recovered attributions (with fixed Redis calls)
+        if (recoveryResults.matches.length > 0) {
+            console.log(`📝 Updating ${recoveryResults.matches.length} recovered attributions in Redis...`);
             try {
-                // Analyze this single conversion for IPv6 matches
-                const conversionResults = await analyzeUnattributedConversions([conversion], analyticsData.page_views);
-                
-                // Update Redis immediately after processing this conversion
-                if (conversionResults.matches.length > 0) {
-                    console.log(`📝 Updating recovered attribution for ${conversion.email} in Redis...`);
-                    try {
-                        await updateRecoveredAttributions(conversionResults.matches);
-                    } catch (redisError) {
-                        console.error(`❌ Redis update failed for ${conversion.email}:`, redisError.message);
-                    }
-                }
-                
-                // Aggregate results
-                allResults.recovered += conversionResults.recovered;
-                allResults.matches.push(...conversionResults.matches);
-                
-                // Merge phase statistics
-                Object.keys(conversionResults.phases).forEach(phase => {
-                    allResults.phases[phase].attempts += conversionResults.phases[phase].attempts;
-                    allResults.phases[phase].matches += conversionResults.phases[phase].matches;
-                });
-                
-                allResults.conversions.push({
-                    conversionNumber: conversionNumber,
-                    email: conversion.email,
-                    recovered: conversionResults.recovered,
-                    success: true
-                });
-                
-                console.log(`✅ Conversion ${conversionNumber} complete: ${conversionResults.recovered > 0 ? 'RECOVERED' : 'NO MATCH'}`);
-                
-                // Add a small delay between conversions to prevent API rate limiting
-                if (i < unattributedConversions.length - 1) {
-                    console.log('⏱️  Waiting 1 second before next conversion...');
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
-                
-            } catch (conversionError) {
-                console.error(`❌ Conversion ${conversionNumber} (${conversion.email}) failed:`, conversionError.message);
-                
-                allResults.conversions.push({
-                    conversionNumber: conversionNumber,
-                    email: conversion.email,
-                    recovered: 0,
-                    success: false,
-                    error: conversionError.message
-                });
-                
-                // Continue with next conversion instead of failing entirely
-                continue;
+                await updateRecoveredAttributions(recoveryResults.matches);
+            } catch (redisError) {
+                console.error('❌ Redis update failed but recovery succeeded:', redisError);
             }
         }
         
-        console.log(`\n🏁 All conversions complete: ${allResults.recovered}/${allResults.total} total conversions recovered`);
+        const message = recoveryResults.remainingToProcess > 0 
+            ? `Recovery complete: ${recoveryResults.recovered}/${recoveryResults.processedThisRun} conversions recovered this run. ${recoveryResults.remainingToProcess} remaining for next run.`
+            : `Recovery complete: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered. All conversions processed.`;
         
         return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
                 success: true,
-                results: allResults,
-                message: `Individual recovery complete: ${allResults.recovered}/${allResults.total} conversions recovered`
+                results: recoveryResults,
+                message: message
             })
         };
 
@@ -210,9 +162,9 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (now handles single conversion)
+// Step 3: Analyze unattributed conversions with FOUR phases (ORIGINAL WORKING LOGIC)
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
-    console.log(`🔬 Analyzing ${unattributedConversions.length} conversion(s) for IPv6 pageview matches...`);
+    console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
         total: unattributedConversions.length,
@@ -228,6 +180,9 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     
     for (let i = 0; i < unattributedConversions.length; i++) {
         const conversion = unattributedConversions[i];
+        console.log(`🔍 ANALYZING CONVERSION ${i + 1}/${unattributedConversions.length}: ${conversion.email}`);
+        console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
+        console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
         
         // Try four phases in sequence (balanced timeline for remaining conversions)
         const phases = [
@@ -288,6 +243,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         }
     }
     
+    console.log(`🏁 Recovery complete: ${results.recovered}/${results.total} conversions recovered`);
     return results;
 }
 
