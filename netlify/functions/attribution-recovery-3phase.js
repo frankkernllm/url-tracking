@@ -70,7 +70,7 @@ exports.handler = async (event, context) => {
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed, ${unprocessedConversions.length} unprocessed`);
         
         // Step 3: Analyze conversions in this batch (IDENTICAL logic to original)
-        const recoveryResults = await analyzeUnattributedConversions(conversionsToProcess, analyticsData.page_views);
+        const recoveryResults = await analyzeUnattributedConversions(conversionsToProcess, analyticsData.page_views, DEBUG_MODE);
         
         // Step 4: Update Redis with recovered attributions (unchanged)
         if (recoveryResults.matches.length > 0) {
@@ -338,7 +338,7 @@ function findUnattributedConversions(conversions) {
 }
 
 // Step 3: Analyze unattributed conversions with FOUR phases (UNCHANGED - identical to original)
-async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
+async function analyzeUnattributedConversions(unattributedConversions, pageviews, debugMode = false) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
@@ -417,7 +417,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             console.log('   ❌ No matches found in any phase');
             
             // DEBUG: Show summary of why no matches were found
-            if (DEBUG_MODE) {
+            if (debugMode) {
                 let totalCandidates = 0;
                 const phaseSummary = [];
                 
