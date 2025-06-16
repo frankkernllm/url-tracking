@@ -19,7 +19,6 @@ exports.handler = async (event, context) => {
         
         // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
         const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
-        const DEBUG_MODE = true; // Set to true for detailed matching analysis
         
         // Step 1: Fetch analytics data from past 24 hours (unchanged)
         const analyticsData = await fetchAnalyticsData();
@@ -70,7 +69,7 @@ exports.handler = async (event, context) => {
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed, ${unprocessedConversions.length} unprocessed`);
         
         // Step 3: Analyze conversions in this batch (IDENTICAL logic to original)
-        const recoveryResults = await analyzeUnattributedConversions(conversionsToProcess, analyticsData.page_views, DEBUG_MODE);
+        const recoveryResults = await analyzeUnattributedConversions(conversionsToProcess, analyticsData.page_views);
         
         // Step 4: Update Redis with recovered attributions (unchanged)
         if (recoveryResults.matches.length > 0) {
@@ -82,31 +81,13 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 5: Mark ONLY successful attributions as processed to prevent re-processing
-        // Failed conversions should be retried in future runs
-        const successfulConversions = recoveryResults.matches.map(match => match.conversion);
-        const failedConversions = conversionsToProcess.filter(conv => 
-            !successfulConversions.some(success => success.email === conv.email)
-        );
-        
-        if (successfulConversions.length > 0) {
-            console.log(`✅ Marking ${successfulConversions.length} successful conversions as processed`);
-            await markConversionsAsProcessed(successfulConversions);
-        }
-        
-        if (failedConversions.length > 0) {
-            console.log(`🔄 ${failedConversions.length} conversions found no attribution - will retry in future runs`);
-            failedConversions.forEach(conv => {
-                console.log(`   🔄 Will retry: ${conv.email}`);
-            });
-        }
+        // Step 5: Mark processed conversions to prevent re-processing
+        await markConversionsAsProcessed(conversionsToProcess);
         
         // Step 6: Return batch processing status
-        const batchComplete = remainingAfterBatch === 0 && failedConversions.length === 0;
+        const batchComplete = remainingAfterBatch === 0;
         const statusMessage = batchComplete ? 
             `Batch processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final batch` :
-            failedConversions.length > 0 ?
-            `Batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${failedConversions.length} failed (will retry), ${remainingAfterBatch} remaining - run again to continue.` :
             `Batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
@@ -119,14 +100,10 @@ exports.handler = async (event, context) => {
                 batch_info: {
                     processed_this_batch: conversionsToProcess.length,
                     recovered_this_batch: recoveryResults.recovered,
-                    failed_this_batch: failedConversions.length,
                     remaining_conversions: remainingAfterBatch,
                     batch_size: BATCH_SIZE,
                     status: batchComplete ? 'COMPLETE' : 'CONTINUE',
-                    next_action: batchComplete ? 'All done!' : 
-                        failedConversions.length > 0 ? 
-                        `Run again to retry ${failedConversions.length} failed conversions and process ${remainingAfterBatch} remaining` :
-                        'Run the function again to process remaining conversions'
+                    next_action: batchComplete ? 'All done!' : 'Run the function again to process remaining conversions'
                 }
             })
         };
@@ -175,9 +152,9 @@ async function isConversionProcessed(conversion) {
     }
 }
 
-// NEW: Mark conversions as processed to prevent re-processing (ONLY successful ones)
+// NEW: Mark conversions as processed to prevent re-processing
 async function markConversionsAsProcessed(conversions) {
-    console.log(`📝 Marking ${conversions.length} successful conversions as processed...`);
+    console.log(`📝 Marking ${conversions.length} conversions as processed...`);
     
     for (const conversion of conversions) {
         try {
@@ -186,86 +163,16 @@ async function markConversionsAsProcessed(conversions) {
                 email: conversion.email,
                 timestamp: conversion.timestamp,
                 processed_at: new Date().toISOString(),
-                batch_id: Date.now(),
-                status: 'SUCCESS' // Only successful conversions get marked as processed
+                batch_id: Date.now()
             };
             
             // Set with 7-day expiration to prevent Redis bloat
             await redisRequest('setex', processedKey, 604800, JSON.stringify(processedData)); // 7 days = 604800 seconds
-            console.log(`✅ Marked as successfully processed: ${conversion.email}`);
+            console.log(`✅ Marked as processed: ${conversion.email}`);
         } catch (error) {
             console.log(`⚠️ Could not mark ${conversion.email} as processed: ${error.message}`);
         }
     }
-}
-
-// NEW: Clear processed status (utility function for resetting state if needed)
-async function clearProcessedStatus(email, timestamp) {
-    try {
-        const processedKey = `processed_conversion:${email}:${timestamp}`;
-        await redisRequest('del', processedKey);
-        console.log(`🗑️ Cleared processed status for: ${email}`);
-        return true;
-    } catch (error) {
-        console.log(`⚠️ Could not clear processed status for ${email}: ${error.message}`);
-        return false;
-    }
-}
-
-// NEW: Clear all processed conversion status (for resetting the entire state)
-async function clearAllProcessedStatus() {
-    try {
-        console.log('🗑️ Finding all processed conversion keys...');
-        const processedKeys = await redisRequest('keys', 'processed_conversion:*');
-        
-        if (!processedKeys || processedKeys.length === 0) {
-            console.log('✅ No processed conversions found to clear');
-            return true;
-        }
-        
-        console.log(`🗑️ Clearing ${processedKeys.length} processed conversion records...`);
-        
-        for (const key of processedKeys) {
-            try {
-                await redisRequest('del', key);
-                console.log(`🗑️ Cleared: ${key}`);
-            } catch (error) {
-                console.log(`⚠️ Failed to clear ${key}: ${error.message}`);
-            }
-        }
-        
-        console.log('✅ All processed conversion status cleared');
-        return true;
-    } catch (error) {
-        console.log(`❌ Error clearing all processed status: ${error.message}`);
-        return false;
-    }
-}
-
-// NEW: Clear processed status for specific emails
-async function clearProcessedStatusForEmails(emails) {
-    console.log(`🗑️ Clearing processed status for ${emails.length} specific emails...`);
-    
-    for (const email of emails) {
-        try {
-            // Find all processed keys for this email (there might be multiple with different timestamps)
-            const pattern = `processed_conversion:${email}:*`;
-            const keys = await redisRequest('keys', pattern);
-            
-            if (keys && keys.length > 0) {
-                for (const key of keys) {
-                    await redisRequest('del', key);
-                    console.log(`🗑️ Cleared processed status: ${key}`);
-                }
-            } else {
-                console.log(`ℹ️ No processed status found for: ${email}`);
-            }
-        } catch (error) {
-            console.log(`⚠️ Error clearing processed status for ${email}: ${error.message}`);
-        }
-    }
-    
-    console.log('✅ Finished clearing processed status for specific emails');
 }
 
 // Step 1: Fetch analytics data from past 24 hours (UNCHANGED - identical to original)
@@ -338,7 +245,7 @@ function findUnattributedConversions(conversions) {
 }
 
 // Step 3: Analyze unattributed conversions with FOUR phases (UNCHANGED - identical to original)
-async function analyzeUnattributedConversions(unattributedConversions, pageviews, debugMode = false) {
+async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
     
     const results = {
@@ -415,28 +322,6 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         
         if (!matched) {
             console.log('   ❌ No matches found in any phase');
-            
-            // DEBUG: Show summary of why no matches were found
-            if (debugMode) {
-                let totalCandidates = 0;
-                const phaseSummary = [];
-                
-                for (const phase of phases) {
-                    const candidatePageviews = findIPv6PageviewsInWindow(conversion, analyticsData.page_views, phase.start, phase.end);
-                    totalCandidates += candidatePageviews.length;
-                    phaseSummary.push(`${phase.name}: ${candidatePageviews.length} candidates`);
-                }
-                
-                console.log(`   📊 DEBUG SUMMARY for ${conversion.email}:`);
-                console.log(`      🔍 Total IPv6 candidates across all phases: ${totalCandidates}`);
-                console.log(`      📈 Phase breakdown: ${phaseSummary.join(', ')}`);
-                
-                if (totalCandidates === 0) {
-                    console.log(`      💡 ISSUE: No IPv6 pageviews found in any time window - user may have used IPv4 only`);
-                } else {
-                    console.log(`      💡 ISSUE: Geographic/ISP mismatch - check the detailed comparisons above for scoring details`);
-                }
-            }
         }
     }
     
@@ -553,10 +438,9 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
     return null;
 }
 
-// Compare geographic data between conversion and pageview (ENHANCED LOGGING)
+// Compare geographic data between conversion and pageview (UNCHANGED - identical to original)
 function compareGeographicData(conversionGeo, pageviewGeo) {
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
-        console.log(`         🚫 LOOKUP_FAILED - Conv: ${conversionGeo.city}, PV: ${pageviewGeo.city}`);
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -565,20 +449,12 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     const countryMatch = conversionGeo.country === pageviewGeo.country;
     const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
 
-    // ENHANCED LOGGING: Show detailed comparison
-    console.log(`         🏙️  City Match: ${cityMatch ? '✅' : '❌'} | Conv: "${conversionGeo.city}" vs PV: "${pageviewGeo.city}"`);
-    console.log(`         🗺️  Region Match: ${regionMatch ? '✅' : '❌'} | Conv: "${conversionGeo.region}" vs PV: "${pageviewGeo.region}"`);
-    console.log(`         🌍 Country Match: ${countryMatch ? '✅' : '❌'} | Conv: "${conversionGeo.country}" vs PV: "${pageviewGeo.country}"`);
-    console.log(`         🌐 ISP Match: ${ispMatch ? '✅' : '❌'} | Conv: "${conversionGeo.isp}" vs PV: "${pageviewGeo.isp}"`);
-
     // Scoring system
     let score = 0;
     if (cityMatch) score += 3;
     if (regionMatch) score += 2;
     if (countryMatch) score += 1;
     if (ispMatch) score += 2;
-
-    console.log(`         📊 SCORING: City(${cityMatch ? 3 : 0}) + Region(${regionMatch ? 2 : 0}) + Country(${countryMatch ? 1 : 0}) + ISP(${ispMatch ? 2 : 0}) = ${score} points`);
 
     // Determine confidence level
     let confidence = 'NO_MATCH';
@@ -595,8 +471,6 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         isMatch = true;
     }
 
-    console.log(`         🎯 RESULT: ${score} points = ${confidence} (${isMatch ? 'MATCH' : 'NO MATCH'})`);
-
     return {
         isMatch,
         confidence,
@@ -608,45 +482,29 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     };
 }
 
-// Compare ISP names (ENHANCED LOGGING)
+// Compare ISP names (UNCHANGED - identical to original)
 function compareISPs(isp1, isp2) {
-    if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') {
-        console.log(`            🌐 ISP Comparison: SKIPPED (${isp1 || 'null'} vs ${isp2 || 'null'})`);
-        return false;
-    }
+    if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
     
     const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
     const norm1 = normalize(isp1);
     const norm2 = normalize(isp2);
     
-    console.log(`            🌐 ISP Comparison: "${isp1}" vs "${isp2}"`);
-    console.log(`            🌐 Normalized: "${norm1}" vs "${norm2}"`);
-    
     // Exact match
-    if (norm1 === norm2) {
-        console.log(`            ✅ ISP EXACT MATCH: "${norm1}"`);
-        return true;
-    }
+    if (norm1 === norm2) return true;
     
     // Contains match
-    if (norm1.includes(norm2) || norm2.includes(norm1)) {
-        console.log(`            ✅ ISP CONTAINS MATCH: "${norm1}" contains "${norm2}" or vice versa`);
-        return true;
-    }
+    if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
     
     // ASN match
     const asn1 = isp1.match(/AS(\d+)/);
     const asn2 = isp2.match(/AS(\d+)/);
-    if (asn1 && asn2 && asn1[1] === asn2[1]) {
-        console.log(`            ✅ ISP ASN MATCH: AS${asn1[1]}`);
-        return true;
-    }
+    if (asn1 && asn2 && asn1[1] === asn2[1]) return true;
     
-    console.log(`            ❌ ISP NO MATCH: No exact, contains, or ASN match found`);
     return false;
 }
 
-// Helper function to make Redis HTTP requests (ENHANCED - added SETEX and DEL support)
+// Helper function to make Redis HTTP requests (ENHANCED - added SETEX support for expiration)
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -655,8 +513,8 @@ async function redisRequest(command, ...args) {
         throw new Error('Missing Redis configuration');
     }
     
-    // For complex commands like SET, SETEX, DEL with JSON, use POST with body
-    if (['set', 'setex', 'del'].includes(command.toLowerCase()) && args.length >= 1) {
+    // For complex commands like SET with JSON, use POST with body
+    if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
         const response = await fetch(url, {
             method: 'POST',
             headers: {
