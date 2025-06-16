@@ -17,6 +17,24 @@ exports.handler = async (event, context) => {
     try {
         console.log('🎯 Starting Batch Attribution Recovery (Past 24 Hours)');
         
+        // Check for reset parameter to clear all processed status
+        const requestBody = event.body ? JSON.parse(event.body) : {};
+        const queryParams = event.queryStringParameters || {};
+        
+        if (requestBody.reset_processed === true || queryParams.reset_processed === 'true') {
+            console.log('🗑️ RESET MODE: Clearing all processed conversion status...');
+            await clearAllProcessedStatus();
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'All processed conversion status cleared. Run again to reprocess all conversions.',
+                    reset_complete: true
+                })
+            };
+        }
+        
         // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
         const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
         const DEBUG_MODE = true; // Set to true for detailed matching analysis
@@ -82,13 +100,31 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 5: Mark processed conversions to prevent re-processing
-        await markConversionsAsProcessed(conversionsToProcess);
+        // Step 5: Mark ONLY successful attributions as processed to prevent re-processing
+        // Failed conversions should be retried in future runs
+        const successfulConversions = recoveryResults.matches.map(match => match.conversion);
+        const failedConversions = conversionsToProcess.filter(conv => 
+            !successfulConversions.some(success => success.email === conv.email)
+        );
+        
+        if (successfulConversions.length > 0) {
+            console.log(`✅ Marking ${successfulConversions.length} successful conversions as processed`);
+            await markConversionsAsProcessed(successfulConversions);
+        }
+        
+        if (failedConversions.length > 0) {
+            console.log(`🔄 ${failedConversions.length} conversions found no attribution - will retry in future runs`);
+            failedConversions.forEach(conv => {
+                console.log(`   🔄 Will retry: ${conv.email}`);
+            });
+        }
         
         // Step 6: Return batch processing status
-        const batchComplete = remainingAfterBatch === 0;
+        const batchComplete = remainingAfterBatch === 0 && failedConversions.length === 0;
         const statusMessage = batchComplete ? 
             `Batch processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final batch` :
+            failedConversions.length > 0 ?
+            `Batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${failedConversions.length} failed (will retry), ${remainingAfterBatch} remaining - run again to continue.` :
             `Batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
@@ -101,10 +137,14 @@ exports.handler = async (event, context) => {
                 batch_info: {
                     processed_this_batch: conversionsToProcess.length,
                     recovered_this_batch: recoveryResults.recovered,
+                    failed_this_batch: failedConversions.length,
                     remaining_conversions: remainingAfterBatch,
                     batch_size: BATCH_SIZE,
                     status: batchComplete ? 'COMPLETE' : 'CONTINUE',
-                    next_action: batchComplete ? 'All done!' : 'Run the function again to process remaining conversions'
+                    next_action: batchComplete ? 'All done!' : 
+                        failedConversions.length > 0 ? 
+                        `Run again to retry ${failedConversions.length} failed conversions and process ${remainingAfterBatch} remaining` :
+                        'Run the function again to process remaining conversions'
                 }
             })
         };
@@ -153,9 +193,9 @@ async function isConversionProcessed(conversion) {
     }
 }
 
-// NEW: Mark conversions as processed to prevent re-processing
+// NEW: Mark conversions as processed to prevent re-processing (ONLY successful ones)
 async function markConversionsAsProcessed(conversions) {
-    console.log(`📝 Marking ${conversions.length} conversions as processed...`);
+    console.log(`📝 Marking ${conversions.length} successful conversions as processed...`);
     
     for (const conversion of conversions) {
         try {
@@ -164,15 +204,59 @@ async function markConversionsAsProcessed(conversions) {
                 email: conversion.email,
                 timestamp: conversion.timestamp,
                 processed_at: new Date().toISOString(),
-                batch_id: Date.now()
+                batch_id: Date.now(),
+                status: 'SUCCESS' // Only successful conversions get marked as processed
             };
             
             // Set with 7-day expiration to prevent Redis bloat
             await redisRequest('setex', processedKey, 604800, JSON.stringify(processedData)); // 7 days = 604800 seconds
-            console.log(`✅ Marked as processed: ${conversion.email}`);
+            console.log(`✅ Marked as successfully processed: ${conversion.email}`);
         } catch (error) {
             console.log(`⚠️ Could not mark ${conversion.email} as processed: ${error.message}`);
         }
+    }
+}
+
+// NEW: Clear processed status (utility function for resetting state if needed)
+async function clearProcessedStatus(email, timestamp) {
+    try {
+        const processedKey = `processed_conversion:${email}:${timestamp}`;
+        await redisRequest('del', processedKey);
+        console.log(`🗑️ Cleared processed status for: ${email}`);
+        return true;
+    } catch (error) {
+        console.log(`⚠️ Could not clear processed status for ${email}: ${error.message}`);
+        return false;
+    }
+}
+
+// NEW: Clear all processed conversion status (for resetting the entire state)
+async function clearAllProcessedStatus() {
+    try {
+        console.log('🗑️ Finding all processed conversion keys...');
+        const processedKeys = await redisRequest('keys', 'processed_conversion:*');
+        
+        if (!processedKeys || processedKeys.length === 0) {
+            console.log('✅ No processed conversions found to clear');
+            return true;
+        }
+        
+        console.log(`🗑️ Clearing ${processedKeys.length} processed conversion records...`);
+        
+        for (const key of processedKeys) {
+            try {
+                await redisRequest('del', key);
+                console.log(`🗑️ Cleared: ${key}`);
+            } catch (error) {
+                console.log(`⚠️ Failed to clear ${key}: ${error.message}`);
+            }
+        }
+        
+        console.log('✅ All processed conversion status cleared');
+        return true;
+    } catch (error) {
+        console.log(`❌ Error clearing all processed status: ${error.message}`);
+        return false;
     }
 }
 
@@ -554,7 +638,7 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
-// Helper function to make Redis HTTP requests (ENHANCED - added SETEX support for expiration)
+// Helper function to make Redis HTTP requests (ENHANCED - added SETEX and DEL support)
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -563,8 +647,8 @@ async function redisRequest(command, ...args) {
         throw new Error('Missing Redis configuration');
     }
     
-    // For complex commands like SET with JSON, use POST with body
-    if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
+    // For complex commands like SET, SETEX, DEL with JSON, use POST with body
+    if (['set', 'setex', 'del'].includes(command.toLowerCase()) && args.length >= 1) {
         const response = await fetch(url, {
             method: 'POST',
             headers: {
