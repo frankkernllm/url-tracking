@@ -17,23 +17,31 @@ exports.handler = async (event, context) => {
     try {
         console.log('🎯 Starting Batch Attribution Recovery (Past 24 Hours)');
         
-        // Check for reset parameter to clear all processed status
-        const requestBody = event.body ? JSON.parse(event.body) : {};
-        const queryParams = event.queryStringParameters || {};
-        
-        if (requestBody.reset_processed === true || queryParams.reset_processed === 'true') {
-            console.log('🗑️ RESET MODE: Clearing all processed conversion status...');
-            await clearAllProcessedStatus();
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    success: true,
-                    message: 'All processed conversion status cleared. Run again to reprocess all conversions.',
-                    reset_complete: true
-                })
-            };
-        }
+        // TEMPORARY: Reset the 9 stuck conversions - REMOVE THIS AFTER RUNNING ONCE
+        console.log('🗑️ TEMPORARY RESET: Clearing processed status for the 9 stuck conversions...');
+        const stuckEmails = [
+            'sarecyclebiz@gmail.com',
+            'team@synergybulgaria.com', 
+            'info@synergybulgaria.com',
+            'synergy.trainings.bulgaria@gmail.com',
+            'prod@lemayconsulting.com',
+            'erwin@thegrowforce.com',
+            'thedotcomdollars@gmail.com',
+            'alex@alexvangalen.com',
+            'jack@zenvarodigital.com.au'
+        ];
+        await clearProcessedStatusForEmails(stuckEmails);
+        return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({
+                success: true,
+                message: `✅ RESET COMPLETE! Cleared processed status for ${stuckEmails.length} stuck conversions. Now remove this temporary code and run again to retry them.`,
+                reset_emails: stuckEmails,
+                next_step: "Remove the temporary reset code and run the function again"
+            })
+        };
+        // END TEMPORARY CODE - REMOVE EVERYTHING ABOVE THIS LINE AFTER RUNNING ONCE
         
         // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
         const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
@@ -258,6 +266,32 @@ async function clearAllProcessedStatus() {
         console.log(`❌ Error clearing all processed status: ${error.message}`);
         return false;
     }
+}
+
+// NEW: Clear processed status for specific emails
+async function clearProcessedStatusForEmails(emails) {
+    console.log(`🗑️ Clearing processed status for ${emails.length} specific emails...`);
+    
+    for (const email of emails) {
+        try {
+            // Find all processed keys for this email (there might be multiple with different timestamps)
+            const pattern = `processed_conversion:${email}:*`;
+            const keys = await redisRequest('keys', pattern);
+            
+            if (keys && keys.length > 0) {
+                for (const key of keys) {
+                    await redisRequest('del', key);
+                    console.log(`🗑️ Cleared processed status: ${key}`);
+                }
+            } else {
+                console.log(`ℹ️ No processed status found for: ${email}`);
+            }
+        } catch (error) {
+            console.log(`⚠️ Error clearing processed status for ${email}: ${error.message}`);
+        }
+    }
+    
+    console.log('✅ Finished clearing processed status for specific emails');
 }
 
 // Step 1: Fetch analytics data from past 24 hours (UNCHANGED - identical to original)
