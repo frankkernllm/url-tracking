@@ -17,32 +17,6 @@ exports.handler = async (event, context) => {
     try {
         console.log('🎯 Starting Batch Attribution Recovery (Past 24 Hours)');
         
-        // TEMPORARY: Reset the 9 stuck conversions - REMOVE THIS AFTER RUNNING ONCE
-        console.log('🗑️ TEMPORARY RESET: Clearing processed status for the 9 stuck conversions...');
-        const stuckEmails = [
-            'sarecyclebiz@gmail.com',
-            'team@synergybulgaria.com', 
-            'info@synergybulgaria.com',
-            'synergy.trainings.bulgaria@gmail.com',
-            'prod@lemayconsulting.com',
-            'erwin@thegrowforce.com',
-            'thedotcomdollars@gmail.com',
-            'alex@alexvangalen.com',
-            'jack@zenvarodigital.com.au'
-        ];
-        await clearProcessedStatusForEmails(stuckEmails);
-        return {
-            statusCode: 200,
-            headers,
-            body: JSON.stringify({
-                success: true,
-                message: `✅ RESET COMPLETE! Cleared processed status for ${stuckEmails.length} stuck conversions. Now remove this temporary code and run again to retry them.`,
-                reset_emails: stuckEmails,
-                next_step: "Remove the temporary reset code and run the function again"
-            })
-        };
-        // END TEMPORARY CODE - REMOVE EVERYTHING ABOVE THIS LINE AFTER RUNNING ONCE
-        
         // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
         const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
         const DEBUG_MODE = true; // Set to true for detailed matching analysis
