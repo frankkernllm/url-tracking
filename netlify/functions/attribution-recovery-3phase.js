@@ -19,6 +19,7 @@ exports.handler = async (event, context) => {
         
         // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
         const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
+        const DEBUG_MODE = true; // Set to true for detailed matching analysis
         
         // Step 1: Fetch analytics data from past 24 hours (unchanged)
         const analyticsData = await fetchAnalyticsData();
@@ -322,6 +323,28 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         
         if (!matched) {
             console.log('   ❌ No matches found in any phase');
+            
+            // DEBUG: Show summary of why no matches were found
+            if (DEBUG_MODE) {
+                let totalCandidates = 0;
+                const phaseSummary = [];
+                
+                for (const phase of phases) {
+                    const candidatePageviews = findIPv6PageviewsInWindow(conversion, analyticsData.page_views, phase.start, phase.end);
+                    totalCandidates += candidatePageviews.length;
+                    phaseSummary.push(`${phase.name}: ${candidatePageviews.length} candidates`);
+                }
+                
+                console.log(`   📊 DEBUG SUMMARY for ${conversion.email}:`);
+                console.log(`      🔍 Total IPv6 candidates across all phases: ${totalCandidates}`);
+                console.log(`      📈 Phase breakdown: ${phaseSummary.join(', ')}`);
+                
+                if (totalCandidates === 0) {
+                    console.log(`      💡 ISSUE: No IPv6 pageviews found in any time window - user may have used IPv4 only`);
+                } else {
+                    console.log(`      💡 ISSUE: Geographic/ISP mismatch - check the detailed comparisons above for scoring details`);
+                }
+            }
         }
     }
     
@@ -438,9 +461,10 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
     return null;
 }
 
-// Compare geographic data between conversion and pageview (UNCHANGED - identical to original)
+// Compare geographic data between conversion and pageview (ENHANCED LOGGING)
 function compareGeographicData(conversionGeo, pageviewGeo) {
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
+        console.log(`         🚫 LOOKUP_FAILED - Conv: ${conversionGeo.city}, PV: ${pageviewGeo.city}`);
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
     }
 
@@ -449,12 +473,20 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     const countryMatch = conversionGeo.country === pageviewGeo.country;
     const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
 
+    // ENHANCED LOGGING: Show detailed comparison
+    console.log(`         🏙️  City Match: ${cityMatch ? '✅' : '❌'} | Conv: "${conversionGeo.city}" vs PV: "${pageviewGeo.city}"`);
+    console.log(`         🗺️  Region Match: ${regionMatch ? '✅' : '❌'} | Conv: "${conversionGeo.region}" vs PV: "${pageviewGeo.region}"`);
+    console.log(`         🌍 Country Match: ${countryMatch ? '✅' : '❌'} | Conv: "${conversionGeo.country}" vs PV: "${pageviewGeo.country}"`);
+    console.log(`         🌐 ISP Match: ${ispMatch ? '✅' : '❌'} | Conv: "${conversionGeo.isp}" vs PV: "${pageviewGeo.isp}"`);
+
     // Scoring system
     let score = 0;
     if (cityMatch) score += 3;
     if (regionMatch) score += 2;
     if (countryMatch) score += 1;
     if (ispMatch) score += 2;
+
+    console.log(`         📊 SCORING: City(${cityMatch ? 3 : 0}) + Region(${regionMatch ? 2 : 0}) + Country(${countryMatch ? 1 : 0}) + ISP(${ispMatch ? 2 : 0}) = ${score} points`);
 
     // Determine confidence level
     let confidence = 'NO_MATCH';
@@ -471,6 +503,8 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         isMatch = true;
     }
 
+    console.log(`         🎯 RESULT: ${score} points = ${confidence} (${isMatch ? 'MATCH' : 'NO MATCH'})`);
+
     return {
         isMatch,
         confidence,
@@ -482,25 +516,41 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     };
 }
 
-// Compare ISP names (UNCHANGED - identical to original)
+// Compare ISP names (ENHANCED LOGGING)
 function compareISPs(isp1, isp2) {
-    if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
+    if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') {
+        console.log(`            🌐 ISP Comparison: SKIPPED (${isp1 || 'null'} vs ${isp2 || 'null'})`);
+        return false;
+    }
     
     const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
     const norm1 = normalize(isp1);
     const norm2 = normalize(isp2);
     
+    console.log(`            🌐 ISP Comparison: "${isp1}" vs "${isp2}"`);
+    console.log(`            🌐 Normalized: "${norm1}" vs "${norm2}"`);
+    
     // Exact match
-    if (norm1 === norm2) return true;
+    if (norm1 === norm2) {
+        console.log(`            ✅ ISP EXACT MATCH: "${norm1}"`);
+        return true;
+    }
     
     // Contains match
-    if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
+    if (norm1.includes(norm2) || norm2.includes(norm1)) {
+        console.log(`            ✅ ISP CONTAINS MATCH: "${norm1}" contains "${norm2}" or vice versa`);
+        return true;
+    }
     
     // ASN match
     const asn1 = isp1.match(/AS(\d+)/);
     const asn2 = isp2.match(/AS(\d+)/);
-    if (asn1 && asn2 && asn1[1] === asn2[1]) return true;
+    if (asn1 && asn2 && asn1[1] === asn2[1]) {
+        console.log(`            ✅ ISP ASN MATCH: AS${asn1[1]}`);
+        return true;
+    }
     
+    console.log(`            ❌ ISP NO MATCH: No exact, contains, or ASN match found`);
     return false;
 }
 
