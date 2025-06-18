@@ -423,6 +423,61 @@ function shouldUpdateAttribution(conversion, newMatch) {
     }
 }
 
+// Update conversion attribution in Redis
+async function updateConversionAttribution(conversion, improvementResults) {
+    try {
+        // Find the conversion record in Redis
+        const conversionKey = await findConversionKey(conversion);
+        
+        if (conversionKey) {
+            // Get existing data
+            const existingData = await redisRequest('get', conversionKey);
+            let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
+            
+            // Update with improved attribution
+            const updatedConversion = {
+                ...conversionData,
+                attribution_found: true,
+                landing_page: improvementResults.newAttribution,
+                source: improvementResults.match.pageview.source || 'improved',
+                utm_campaign: improvementResults.match.pageview.utm_campaign || conversionData.utm_campaign,
+                utm_medium: improvementResults.match.pageview.utm_medium || conversionData.utm_medium,
+                referrer_url: improvementResults.match.pageview.referrer_url || conversionData.referrer_url,
+                // Attribution improvement metadata
+                attribution_improvement: {
+                    method: 'stricter_geographic_criteria',
+                    improvement_type: improvementResults.improvementType,
+                    confidence: improvementResults.match.confidence,
+                    score: improvementResults.match.score,
+                    time_difference_minutes: improvementResults.match.timeDiff,
+                    improved_at: new Date().toISOString(),
+                    pageview_ip: improvementResults.match.pageview.ip_address,
+                    pageview_timestamp: improvementResults.match.pageview.timestamp
+                },
+                // Store previous attribution if it existed
+                previous_attribution: conversionData.landing_page || null,
+                attributed_pageview_timestamp: improvementResults.match.pageview.timestamp
+            };
+            
+            // Save back to Redis
+            await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
+            
+            return {
+                success: true,
+                updated_attribution: improvementResults.newAttribution,
+                previous_attribution: conversionData.landing_page || null,
+                improvement_type: improvementResults.improvementType
+            };
+            
+        } else {
+            return { success: false, error: 'Conversion not found in Redis' };
+        }
+        
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
 // Check if conversion has POSSIBLE attribution confidence
 async function checkForPossibleAttribution(conversion) {
     try {
