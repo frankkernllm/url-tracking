@@ -1,7 +1,7 @@
 exports.handler = async (event, context) => {
-    // SPECIAL BATCH: June 12-18 Attribution Recovery - BYPASS PROCESSED CHECK
+    // SPECIAL BATCH: June 12-18 Attribution Recovery - PROGRESSIVE BATCHING
     // This version specifically targets older unattributed conversions from June 12-18
-    // and bypasses the "processed" check to reprocess all unattributed conversions
+    // and processes them in batches while properly tracking processed conversions
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -40,18 +40,34 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Step 2.5: BYPASS PROCESSED CHECK - Process ALL unattributed conversions
-        console.log('🔄 BYPASSING processed check - reprocessing ALL unattributed conversions from June 12-18');
-        const unprocessedConversions = allUnattributedConversions; // Process all, ignore processed status
+        // Step 2.5: CHECK FOR PROCESSED CONVERSIONS and filter them out
+        console.log('🔍 Checking for already processed conversions...');
+        const unprocessedConversions = await filterUnprocessedConversions(allUnattributedConversions);
         
-        // Clear any existing processed markers for these conversions
-        await clearProcessedMarkers(unprocessedConversions);
+        if (unprocessedConversions.length === 0) {
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'All June 12-18 unattributed conversions have already been processed!',
+                    results: { total: allUnattributedConversions.length, recovered: 0, phases: {} },
+                    batch_info: { 
+                        processed: allUnattributedConversions.length, 
+                        remaining: 0, 
+                        batch_size: BATCH_SIZE,
+                        status: 'COMPLETE',
+                        next_action: 'All conversions from June 12-18 have been processed'
+                    }
+                })
+            };
+        }
         
         // Step 2.6: Take batch from unprocessed conversions
         const conversionsToProcess = unprocessedConversions.slice(0, BATCH_SIZE);
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
-        console.log(`📦 JUNE 12-18 OPTIMIZED PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
+        console.log(`📦 JUNE 12-18 PROGRESSIVE PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed, ${unprocessedConversions.length} unprocessed from June 12-18 period`);
         console.log(`🚀 Note: Processing ${conversionsToProcess.length} conversions at a time with 70%+ cache hit rate`);
         
@@ -74,14 +90,14 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 5: Mark processed conversions to prevent re-processing (re-enable for future)
+        // Step 5: Mark processed conversions to prevent re-processing
         await markConversionsAsProcessed(conversionsToProcess);
         
         // Step 6: Return batch processing status
         const batchComplete = remainingAfterBatch === 0;
         const statusMessage = batchComplete ? 
-            `June 12-18 optimized processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final run` :
-            `June 12-18 optimized batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
+            `June 12-18 progressive processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final batch` :
+            `June 12-18 progressive batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
             statusCode: 200,
@@ -91,11 +107,12 @@ exports.handler = async (event, context) => {
                 results: recoveryResults,
                 message: statusMessage,
                 date_range: 'June 12-18, 2025',
-                processed_check_bypassed: true,
                 batch_info: {
                     processed_this_batch: conversionsToProcess.length,
                     recovered_this_batch: recoveryResults.recovered,
                     remaining_conversions: remainingAfterBatch,
+                    total_unattributed: allUnattributedConversions.length,
+                    total_unprocessed: unprocessedConversions.length,
                     batch_size: BATCH_SIZE,
                     status: batchComplete ? 'COMPLETE' : 'CONTINUE',
                     next_action: batchComplete ? 'June 12-18 recovery complete!' : 'Run the function again to process remaining conversions'
@@ -115,6 +132,37 @@ exports.handler = async (event, context) => {
         };
     }
 };
+
+// NEW: Filter out conversions that have already been processed
+async function filterUnprocessedConversions(allConversions) {
+    console.log(`🔍 Checking processed status for ${allConversions.length} conversions...`);
+    
+    const unprocessedConversions = [];
+    let processedCount = 0;
+    
+    for (const conversion of allConversions) {
+        const processedKey = `processed_conversion:${conversion.email}:${conversion.timestamp}`;
+        
+        try {
+            const processedData = await redisRequest('get', processedKey);
+            
+            if (processedData) {
+                processedCount++;
+                console.log(`✅ Already processed: ${conversion.email}`);
+            } else {
+                unprocessedConversions.push(conversion);
+                console.log(`🔄 Needs processing: ${conversion.email}`);
+            }
+        } catch (error) {
+            // If we can't check processed status, assume unprocessed
+            console.log(`⚠️ Could not check processed status for ${conversion.email}, assuming unprocessed`);
+            unprocessedConversions.push(conversion);
+        }
+    }
+    
+    console.log(`📊 Processed check complete: ${processedCount} already processed, ${unprocessedConversions.length} need processing`);
+    return unprocessedConversions;
+}
 
 // Global counters for cache statistics
 let cacheStats = {
@@ -180,7 +228,7 @@ async function markConversionsAsProcessed(conversions) {
             
             // Set with 7-day expiration to prevent Redis bloat
             await redisRequest('setex', processedKey, 604800, JSON.stringify(processedData)); // 7 days = 604800 seconds
-            console.log(`✅ Re-marked as processed: ${conversion.email}`);
+            console.log(`✅ Marked as processed: ${conversion.email}`);
         } catch (error) {
             console.log(`⚠️ Could not mark ${conversion.email} as processed: ${error.message}`);
         }
