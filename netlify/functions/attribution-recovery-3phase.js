@@ -18,8 +18,8 @@ exports.handler = async (event, context) => {
         console.log('🎯 Starting JUNE 12-18 Batch Attribution Recovery (SPECIAL RUN)');
         console.log('⚠️  BYPASSING processed check - will reprocess ALL unattributed conversions');
         
-        // SPECIAL CONFIGURATION for June 12-18 batch
-        const BATCH_SIZE = 13; // Process all 13 at once
+        // SPECIAL CONFIGURATION for June 12-18 batch - MICRO-BATCHES
+        const BATCH_SIZE = 2; // Process only 2 conversions at a time to prevent timeout
         
         // Step 1: Fetch analytics data from June 12-18 (FIXED DATE RANGE)
         const analyticsData = await fetchAnalyticsDataJune1218();
@@ -51,8 +51,9 @@ exports.handler = async (event, context) => {
         const conversionsToProcess = unprocessedConversions.slice(0, BATCH_SIZE);
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
-        console.log(`📦 JUNE 12-18 BATCH PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
+        console.log(`📦 JUNE 12-18 MICRO-BATCH PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed from June 12-18 period`);
+        console.log(`🔄 Note: Processing in micro-batches of 2 to prevent timeout - run multiple times to complete all conversions`);
         
         // Log the conversions we're about to process
         console.log('📋 Conversions to process:');
@@ -79,8 +80,8 @@ exports.handler = async (event, context) => {
         // Step 6: Return batch processing status
         const batchComplete = remainingAfterBatch === 0;
         const statusMessage = batchComplete ? 
-            `June 12-18 batch processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered` :
-            `June 12-18 batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
+            `June 12-18 micro-batch processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final batch` :
+            `June 12-18 micro-batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
             statusCode: 200,
@@ -454,10 +455,9 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching and API limits)
+// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching - NO ARTIFICIAL LIMITS)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
     let freshApiCallCount = 0;
-    const MAX_FRESH_CALLS = 10; // Limit fresh API calls to prevent timeout
     
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
@@ -474,13 +474,7 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         if (cachedGeo) {
             pageviewGeoData = cachedGeo;
         } else {
-            // Check API call limit
-            if (freshApiCallCount >= MAX_FRESH_CALLS) {
-                console.log(`      ⏭️  Skipping ${pageview.ip_address} - reached max ${MAX_FRESH_CALLS} fresh API calls`);
-                continue;
-            }
-            
-            console.log(`      🌍 Making fresh API call (${freshApiCallCount + 1}/${MAX_FRESH_CALLS})`);
+            console.log(`      🌍 Making fresh API call (${freshApiCallCount + 1} total)`);
             pageviewGeoData = await getIPLocationDataFresh(pageview.ip_address);
             freshApiCallCount++;
         }
@@ -507,7 +501,7 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         }
     }
     
-    console.log(`   📊 Fresh API calls used: ${freshApiCallCount}/${MAX_FRESH_CALLS}`);
+    console.log(`   📊 Total fresh API calls used: ${freshApiCallCount}`);
     return null;
 }
 
