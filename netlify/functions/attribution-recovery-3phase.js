@@ -131,52 +131,54 @@ async function clearProcessedMarkers(conversions) {
     }
 }
 
-// NEW: Get cached geographic data from attribution records (major optimization)
+// Global counters for cache statistics
+let cacheStats = {
+    hits: 0,
+    misses: 0,
+    errors: 0
+};
+
+// NEW: Get cached geographic data from attribution records (with proper error handling and logging)
 async function getCachedGeoData(ip) {
     try {
         // Check if we already have geo data for this IP from pageview attribution
         const encodedIP = ip.replace(/:/g, '_');
         const ipKey = `attribution_ip_${encodedIP}`;
+        
+        console.log(`   🔍 Checking cache for key: ${ipKey}`);
         const attrKeyResult = await redisRequest('get', ipKey);
         
+        if (attrKeyResult === null || attrKeyResult === undefined) {
+            console.log(`   📭 Cache miss: No IP key found for ${ip}`);
+            cacheStats.misses++;
+            return null;
+        }
+        
         if (attrKeyResult) {
+            console.log(`   🔗 Found IP key pointing to: ${attrKeyResult}`);
             // Get the main attribution record
             const attrResult = await redisRequest('get', attrKeyResult);
             if (attrResult) {
                 const attrData = JSON.parse(attrResult);
                 if (attrData.geographic_data) {
-                    console.log(`   💾 Using cached geo data for ${ip}: ${attrData.geographic_data.city}, ${attrData.geographic_data.region} (${attrData.geographic_data.isp})`);
+                    console.log(`   💾 Cache HIT for ${ip}: ${attrData.geographic_data.city}, ${attrData.geographic_data.region} (${attrData.geographic_data.isp})`);
+                    cacheStats.hits++;
                     return attrData.geographic_data;
+                } else {
+                    console.log(`   📝 Attribution data found but no geographic_data field`);
                 }
+            } else {
+                console.log(`   ❌ IP key points to non-existent attribution record: ${attrKeyResult}`);
             }
         }
         
-        // Also try to find geo data in any recent attribution record with this IP
-        const geoKeys = await redisRequest('keys', 'attribution_geo_*');
-        if (geoKeys && geoKeys.length > 0) {
-            for (const geoKey of geoKeys.slice(-20)) { // Check last 20 geo keys
-                try {
-                    const mainKeyResult = await redisRequest('get', geoKey);
-                    if (mainKeyResult) {
-                        const mainKey = mainKeyResult;
-                        const attrResult = await redisRequest('get', mainKey);
-                        if (attrResult) {
-                            const attrData = JSON.parse(attrResult);
-                            if (attrData.ip_address === ip && attrData.geographic_data) {
-                                console.log(`   💾 Found cached geo data via geo key for ${ip}`);
-                                return attrData.geographic_data;
-                            }
-                        }
-                    }
-                } catch (geoError) {
-                    continue; // Skip invalid geo keys
-                }
-            }
-        }
-        
+        console.log(`   📭 Cache miss: No usable geo data for ${ip}`);
+        cacheStats.misses++;
         return null;
+        
     } catch (error) {
-        console.log(`   ⚠️ Cached geo lookup failed for ${ip}: ${error.message}`);
+        console.log(`   ❌ Cache lookup ERROR for ${ip}: ${error.message}`);
+        cacheStats.errors++;
         return null;
     }
 }
@@ -276,6 +278,9 @@ function findUnattributedConversions(conversions) {
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
     console.log('🔬 Analyzing June 12-18 unattributed conversions with OPTIMIZED geographic correlation...');
     
+    // Reset cache statistics for this run
+    cacheStats = { hits: 0, misses: 0, errors: 0 };
+    
     const results = {
         total: unattributedConversions.length,
         recovered: 0,
@@ -345,7 +350,21 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         if (!matched) {
             console.log('   ❌ No matches found in any phase');
         }
+        
+        // Log cache stats for this conversion
+        console.log(`   📊 Cache stats so far: ${cacheStats.hits} hits, ${cacheStats.misses} misses, ${cacheStats.errors} errors`);
     }
+    
+    // Final cache statistics
+    const totalCacheLookups = cacheStats.hits + cacheStats.misses + cacheStats.errors;
+    const cacheHitRate = totalCacheLookups > 0 ? ((cacheStats.hits / totalCacheLookups) * 100).toFixed(1) : 0;
+    
+    console.log(`📈 FINAL CACHE STATISTICS:`);
+    console.log(`   💾 Cache hits: ${cacheStats.hits}`);
+    console.log(`   📭 Cache misses: ${cacheStats.misses}`);
+    console.log(`   ❌ Cache errors: ${cacheStats.errors}`);
+    console.log(`   📊 Cache hit rate: ${cacheHitRate}%`);
+    console.log(`   🌍 Fresh API calls needed: ${cacheStats.misses}`);
     
     console.log(`🏁 June 12-18 Recovery complete: ${results.recovered}/${results.total} conversions recovered`);
     return results;
@@ -435,8 +454,11 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching)
+// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching and API limits)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
+    let freshApiCallCount = 0;
+    const MAX_FRESH_CALLS = 10; // Limit fresh API calls to prevent timeout
+    
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
@@ -445,8 +467,24 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
         console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
         
-        // OPTIMIZED: Get geographic data for IPv6 pageview (check cache first)
-        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
+        // Check if geo data is cached first
+        const cachedGeo = await getCachedGeoData(pageview.ip_address);
+        let pageviewGeoData;
+        
+        if (cachedGeo) {
+            pageviewGeoData = cachedGeo;
+        } else {
+            // Check API call limit
+            if (freshApiCallCount >= MAX_FRESH_CALLS) {
+                console.log(`      ⏭️  Skipping ${pageview.ip_address} - reached max ${MAX_FRESH_CALLS} fresh API calls`);
+                continue;
+            }
+            
+            console.log(`      🌍 Making fresh API call (${freshApiCallCount + 1}/${MAX_FRESH_CALLS})`);
+            pageviewGeoData = await getIPLocationDataFresh(pageview.ip_address);
+            freshApiCallCount++;
+        }
+        
         console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
         // Compare geographic data
@@ -469,7 +507,48 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         }
     }
     
+    console.log(`   📊 Fresh API calls used: ${freshApiCallCount}/${MAX_FRESH_CALLS}`);
     return null;
+}
+
+// Fresh API call function (bypasses cache entirely)
+async function getIPLocationDataFresh(ip) {
+    const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
+    const url = `https://ipinfo.io/${ip}?token=${token}`;
+    
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            
+            const result = {
+                ip: data.ip,
+                city: data.city || 'Unknown',
+                region: data.region || 'Unknown',
+                country: data.country || 'Unknown',
+                isp: extractBestISP(data),
+                timezone: data.timezone || 'Unknown',
+                location: data.loc || '0,0'
+            };
+            
+            return result;
+        } else {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    } catch (error) {
+        console.log(`      ⚠️  Failed to lookup ${ip}: ${error.message}`);
+        return {
+            ip: ip,
+            city: 'LOOKUP_FAILED',
+            region: 'LOOKUP_FAILED',
+            country: 'LOOKUP_FAILED',
+            isp: 'LOOKUP_FAILED'
+        };
+    }
 }
 
 // Compare geographic data between conversion and pageview (UNCHANGED - identical to original)
@@ -538,7 +617,7 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
-// Helper function to make Redis HTTP requests (ENHANCED - added SETEX support for expiration)
+// Helper function to make Redis HTTP requests (FIXED - proper error handling for missing keys)
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -547,39 +626,49 @@ async function redisRequest(command, ...args) {
         throw new Error('Missing Redis configuration');
     }
     
-    // For complex commands like SET with JSON, use POST with body
-    if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify([command, ...args])
-        });
-        
-        if (!response.ok) {
-            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+    let response;
+    
+    try {
+        // For complex commands like SET with JSON, use POST with body
+        if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
+            response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify([command, ...args])
+            });
+        } 
+        // For simple commands like GET, KEYS, DEL, use URL path
+        else {
+            // Properly encode Redis key for URL
+            const encodedArgs = args.map(arg => encodeURIComponent(arg));
+            const requestUrl = `${url}/${command}/${encodedArgs.join('/')}`;
+            
+            response = await fetch(requestUrl, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
         }
         
-        const data = await response.json();
-        return data.result;
-    } 
-    // For simple commands like GET, KEYS, DEL, use URL path
-    else {
-        const response = await fetch(`${url}/${command}/${args.join('/')}`, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+        if (!response.ok) {
+            // Don't throw for 404-like responses - Redis returns these for missing keys
+            if (response.status === 404) {
+                return null;
             }
-        });
-        
-        if (!response.ok) {
             throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
         }
         
         const data = await response.json();
         return data.result;
+        
+    } catch (error) {
+        // Log the actual request details for debugging
+        console.log(`   🔧 Redis request debug: ${command} ${args.join(' ')} -> Error: ${error.message}`);
+        throw error;
     }
 }
 
