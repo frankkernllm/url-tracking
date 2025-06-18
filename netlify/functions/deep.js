@@ -25,9 +25,9 @@ exports.handler = async (event, context) => {
         const unattributedConversions = getUnattributedConversions(allConversions);
         
         // Step 3: Filter out conversions already processed with 24-hour window
-        const alreadydeep = await alreadydeep(unattributedConversions);
+        const unprocessed24HourConversions = await alreadydeep(unattributedConversions);
         
-        if (alreadydeep.length === 0) {
+        if (unprocessed24HourConversions.length === 0) {
             if (unattributedConversions.length > 0) {
                 return {
                     statusCode: 200,
@@ -64,11 +64,11 @@ exports.handler = async (event, context) => {
         }
         
         console.log(`📋 Found ${unattributedConversions.length} unattributed conversions`);
-        console.log(`🎯 Found ${alreadydeep.length} not yet processed with 24-hour window`);
+        console.log(`🎯 Found ${unprocessed24HourConversions.length} not yet processed with 24-hour window`);
         console.log(`🔍 Processing the first unprocessed conversion...`);
         
         // Step 4: Process the FIRST unprocessed conversion
-        const conversionToProcess = alreadydeep[0];
+        const conversionToProcess = unprocessed24HourConversions[0];
         
         console.log(`\n🔬 DEEP DIVE ANALYSIS: [PRIVACY PROTECTED]`);
         console.log(`   📍 IP: ${conversionToProcess.ip_address}`);
@@ -95,7 +95,7 @@ exports.handler = async (event, context) => {
         
         // Step 8: Generate response
         const remainingUnattributed = unattributedConversions.length - 1;
-        const remainingUnprocessed24H = alreadydeep.length - 1;
+        const remainingUnprocessed24H = unprocessed24HourConversions.length - 1;
         const wasSuccessful = improvementResults.matchFound;
         
         let summaryMessage;
