@@ -18,8 +18,8 @@ exports.handler = async (event, context) => {
         console.log('🎯 Starting JUNE 12-18 Batch Attribution Recovery (SPECIAL RUN)');
         console.log('⚠️  BYPASSING processed check - will reprocess ALL unattributed conversions');
         
-        // SPECIAL CONFIGURATION for June 12-18 batch - MICRO-BATCHES
-        const BATCH_SIZE = 2; // Process only 2 conversions at a time to prevent timeout
+        // ULTRA-CONSERVATIVE CONFIGURATION - 1 conversion at a time to prevent timeout
+        const BATCH_SIZE = 1; // Process only 1 conversion at a time
         
         // Step 1: Fetch analytics data from June 12-18 (FIXED DATE RANGE)
         const analyticsData = await fetchAnalyticsDataJune1218();
@@ -51,9 +51,9 @@ exports.handler = async (event, context) => {
         const conversionsToProcess = unprocessedConversions.slice(0, BATCH_SIZE);
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
-        console.log(`📦 JUNE 12-18 MICRO-BATCH PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
+        console.log(`📦 JUNE 12-18 SINGLE-CONVERSION PROCESSING: Processing ${conversionsToProcess.length} conversion (${remainingAfterBatch} remaining)`);
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed from June 12-18 period`);
-        console.log(`🔄 Note: Processing in micro-batches of 2 to prevent timeout - run multiple times to complete all conversions`);
+        console.log(`🔄 Note: Processing 1 conversion at a time with max 8 candidates per phase to prevent timeout`);
         
         // Log the conversions we're about to process
         console.log('📋 Conversions to process:');
@@ -80,8 +80,8 @@ exports.handler = async (event, context) => {
         // Step 6: Return batch processing status
         const batchComplete = remainingAfterBatch === 0;
         const statusMessage = batchComplete ? 
-            `June 12-18 micro-batch processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final batch` :
-            `June 12-18 micro-batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
+            `June 12-18 single-conversion processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final run` :
+            `June 12-18 single-conversion ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
             statusCode: 200,
@@ -139,37 +139,32 @@ let cacheStats = {
     errors: 0
 };
 
-// NEW: Get cached geographic data from attribution records (with proper error handling and logging)
+// NEW: Get cached geographic data using SAME cache structure as track.js
 async function getCachedGeoData(ip) {
     try {
-        // Check if we already have geo data for this IP from pageview attribution
-        const encodedIP = ip.replace(/:/g, '_');
-        const ipKey = `attribution_ip_${encodedIP}`;
+        // Use SAME cache key format as track.js IPinfoService
+        const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
         
-        console.log(`   🔍 Checking cache for key: ${ipKey}`);
-        const attrKeyResult = await redisRequest('get', ipKey);
+        console.log(`   🔍 Checking track.js style cache for key: ${cacheKey}`);
+        const cachedResult = await redisRequest('get', cacheKey);
         
-        if (attrKeyResult === null || attrKeyResult === undefined) {
-            console.log(`   📭 Cache miss: No IP key found for ${ip}`);
+        if (cachedResult === null || cachedResult === undefined) {
+            console.log(`   📭 Cache miss: No geo_cache key found for ${ip}`);
             cacheStats.misses++;
             return null;
         }
         
-        if (attrKeyResult) {
-            console.log(`   🔗 Found IP key pointing to: ${attrKeyResult}`);
-            // Get the main attribution record
-            const attrResult = await redisRequest('get', attrKeyResult);
-            if (attrResult) {
-                const attrData = JSON.parse(attrResult);
-                if (attrData.geographic_data) {
-                    console.log(`   💾 Cache HIT for ${ip}: ${attrData.geographic_data.city}, ${attrData.geographic_data.region} (${attrData.geographic_data.isp})`);
-                    cacheStats.hits++;
-                    return attrData.geographic_data;
-                } else {
-                    console.log(`   📝 Attribution data found but no geographic_data field`);
-                }
-            } else {
-                console.log(`   ❌ IP key points to non-existent attribution record: ${attrKeyResult}`);
+        if (cachedResult) {
+            try {
+                // Decode the cached data (track.js uses encodeURIComponent)
+                const cachedData = JSON.parse(decodeURIComponent(cachedResult));
+                console.log(`   💾 Cache HIT for ${ip}: ${cachedData.city}, ${cachedData.region} (${cachedData.isp})`);
+                cacheStats.hits++;
+                return cachedData;
+            } catch (parseError) {
+                console.log(`   ❌ Cache parse error for ${ip}: ${parseError.message}`);
+                cacheStats.errors++;
+                return null;
             }
         }
         
@@ -371,7 +366,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window - OPTIMIZED with timestamp sorting
+// Find IPv6 pageviews within time window - OPTIMIZED with timestamp sorting AND candidate limiting
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -389,43 +384,60 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     // SORT BY TIMESTAMP - NEWEST FIRST (most recent pageviews checked first)
     ipv6Pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
+    // LIMIT to first 8 candidates per phase to prevent timeout
+    const limitedPageviews = ipv6Pageviews.slice(0, 8);
+    
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     console.log(`   🕐 Sorted by timestamp (newest first) - will check most recent matches first`);
+    if (ipv6Pageviews.length > 8) {
+        console.log(`   ⚡ Limited to ${limitedPageviews.length} most recent candidates to prevent timeout (${ipv6Pageviews.length - limitedPageviews.length} skipped)`);
+    }
     
-    return ipv6Pageviews;
+    return limitedPageviews;
 }
 
-// OPTIMIZED: Get location/ISP data with caching support
+// OPTIMIZED: Get location/ISP data using SAME cache structure as track.js
 async function getIPLocationData(ip) {
-    // Check cache first (major optimization)
+    // Check cache first using SAME logic as track.js
     const cached = await getCachedGeoData(ip);
     if (cached) return cached;
     
-    // Only make API call if not cached
+    // Make fresh API call and cache using SAME format as track.js
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
     const url = `https://ipinfo.io/${ip}?token=${token}`;
     
     try {
         const response = await fetch(url, {
             method: 'GET',
-            headers: { 'Accept': 'application/json' }
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(2000) // 2 second timeout like track.js
         });
         
         if (response.ok) {
             const data = await response.json();
             
-            const result = {
+            const geoData = {
                 ip: data.ip,
                 city: data.city || 'Unknown',
                 region: data.region || 'Unknown',
                 country: data.country || 'Unknown',
                 isp: extractBestISP(data),
+                coordinates: data.loc || '0,0',
                 timezone: data.timezone || 'Unknown',
-                location: data.loc || '0,0'
+                lookup_timestamp: new Date().toISOString()
             };
             
-            console.log(`   🌍 Fresh geo lookup for ${ip}: ${result.city}, ${result.region} (${result.isp})`);
-            return result;
+            // Cache using SAME format as track.js (24 hours = 86400 seconds)
+            try {
+                const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
+                const encodedData = encodeURIComponent(JSON.stringify(geoData));
+                await redisRequest('setex', cacheKey, 86400, encodedData);
+                console.log(`   🌍 Fresh lookup + cached for ${ip}: ${geoData.city}, ${geoData.region} (${geoData.isp})`);
+            } catch (cacheError) {
+                console.log(`   ⚠️ Failed to cache geo data for ${ip}: ${cacheError.message}`);
+            }
+            
+            return geoData;
         } else {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -441,21 +453,17 @@ async function getIPLocationData(ip) {
     }
 }
 
-// Extract best ISP info (UNCHANGED - identical to original)
+// Extract best ISP info using SAME logic as track.js
 function extractBestISP(data) {
-    if (data.company && data.company.name) {
-        return data.company.name;
-    } else if (data.asn && data.asn.name) {
-        return data.asn.name;
-    } else if (data.org) {
-        return data.org;
-    } else if (data.carrier && data.carrier.name) {
-        return data.carrier.name;
-    }
+    // Priority hierarchy for ISP identification (same as track.js)
+    if (data.company?.name) return data.company.name;
+    if (data.asn?.name) return data.asn.name;
+    if (data.org) return data.org;
+    if (data.carrier?.name) return data.carrier.name;
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching - NO ARTIFICIAL LIMITS)
+// Check IPv6 candidates against conversion for geographic matches (USING SAME CACHE AS TRACK.JS)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
     let freshApiCallCount = 0;
     
@@ -467,15 +475,13 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
         console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
         
-        // Check if geo data is cached first
-        const cachedGeo = await getCachedGeoData(pageview.ip_address);
-        let pageviewGeoData;
+        // Use unified cache/fresh lookup (same as track.js)
+        const startTime = Date.now();
+        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
+        const lookupTime = Date.now() - startTime;
         
-        if (cachedGeo) {
-            pageviewGeoData = cachedGeo;
-        } else {
-            console.log(`      🌍 Making fresh API call (${freshApiCallCount + 1} total)`);
-            pageviewGeoData = await getIPLocationDataFresh(pageview.ip_address);
+        // Count fresh API calls for statistics
+        if (lookupTime > 100) { // Likely a fresh API call if it took >100ms
             freshApiCallCount++;
         }
         
@@ -501,48 +507,8 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         }
     }
     
-    console.log(`   📊 Total fresh API calls used: ${freshApiCallCount}`);
+    console.log(`   📊 Estimated fresh API calls: ${freshApiCallCount}`);
     return null;
-}
-
-// Fresh API call function (bypasses cache entirely)
-async function getIPLocationDataFresh(ip) {
-    const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
-    const url = `https://ipinfo.io/${ip}?token=${token}`;
-    
-    try {
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' }
-        });
-        
-        if (response.ok) {
-            const data = await response.json();
-            
-            const result = {
-                ip: data.ip,
-                city: data.city || 'Unknown',
-                region: data.region || 'Unknown',
-                country: data.country || 'Unknown',
-                isp: extractBestISP(data),
-                timezone: data.timezone || 'Unknown',
-                location: data.loc || '0,0'
-            };
-            
-            return result;
-        } else {
-            throw new Error(`HTTP ${response.status}`);
-        }
-    } catch (error) {
-        console.log(`      ⚠️  Failed to lookup ${ip}: ${error.message}`);
-        return {
-            ip: ip,
-            city: 'LOOKUP_FAILED',
-            region: 'LOOKUP_FAILED',
-            country: 'LOOKUP_FAILED',
-            isp: 'LOOKUP_FAILED'
-        };
-    }
 }
 
 // Compare geographic data between conversion and pageview (UNCHANGED - identical to original)
