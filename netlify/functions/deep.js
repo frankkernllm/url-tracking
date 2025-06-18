@@ -24,42 +24,65 @@ exports.handler = async (event, context) => {
         const allConversions = getAllConversions(analyticsData.conversions);
         const unattributedConversions = getUnattributedConversions(allConversions);
         
-        if (unattributedConversions.length === 0) {
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    success: true,
-                    message: '🎉 All conversions have attribution! No unattributed conversions found.',
-                    results: { 
-                        total_conversions: allConversions.length,
-                        unattributed: 0,
-                        processed_this_run: 0,
-                        status: 'ALL_ATTRIBUTED'
-                    }
-                })
-            };
+        // Step 3: Filter out conversions already processed with 24-hour window
+        const unprocessed24HourConversions = await filterOut24HourProcessed(unattributedConversions);
+        
+        if (unprocessed24HourConversions.length === 0) {
+            if (unattributedConversions.length > 0) {
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        success: true,
+                        message: `🎯 All ${unattributedConversions.length} unattributed conversions have been processed with 24-hour window. No more to process.`,
+                        results: { 
+                            total_conversions: allConversions.length,
+                            unattributed: unattributedConversions.length,
+                            unprocessed_24h: 0,
+                            processed_this_run: 0,
+                            status: 'ALL_24H_PROCESSED'
+                        }
+                    })
+                };
+            } else {
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        success: true,
+                        message: '🎉 All conversions have attribution! No unattributed conversions found.',
+                        results: { 
+                            total_conversions: allConversions.length,
+                            unattributed: 0,
+                            unprocessed_24h: 0,
+                            processed_this_run: 0,
+                            status: 'ALL_ATTRIBUTED'
+                        }
+                    })
+                };
+            }
         }
         
         console.log(`📋 Found ${unattributedConversions.length} unattributed conversions`);
-        console.log(`🎯 Processing the first unattributed conversion...`);
+        console.log(`🎯 Found ${unprocessed24HourConversions.length} not yet processed with 24-hour window`);
+        console.log(`🔍 Processing the first unprocessed conversion...`);
         
-        // Step 3: Process the FIRST unattributed conversion
-        const conversionToProcess = unattributedConversions[0];
+        // Step 4: Process the FIRST unprocessed conversion
+        const conversionToProcess = unprocessed24HourConversions[0];
         
-        console.log(`\n🔬 DEEP DIVE ANALYSIS: ${conversionToProcess.email}`);
+        console.log(`\n🔬 DEEP DIVE ANALYSIS: [PRIVACY PROTECTED]`);
         console.log(`   📍 IP: ${conversionToProcess.ip_address}`);
         console.log(`   ⏰ Time: ${conversionToProcess.timestamp}`);
         console.log(`   📊 Current: NO ATTRIBUTION`);
         console.log(`   🔍 Using 24-hour window for maximum coverage`);
         
-        // Step 4: Analyze this conversion with 24-hour window
+        // Step 5: Analyze this conversion with 24-hour window
         const improvementResults = await analyzeConversionForAttribution24Hour(conversionToProcess, analyticsData.page_views);
         
-        // Step 5: Update Redis if needed
+        // Step 6: Update Redis if needed
         let updateResult = null;
         if (improvementResults.shouldUpdate) {
-            console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
+            console.log(`📝 Updating attribution for conversion...`);
             try {
                 updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
             } catch (redisError) {
@@ -67,24 +90,25 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 6: Mark as processed with 24-hour flag
+        // Step 7: Mark as processed with 24-hour flag
         await markConversionAs24HourProcessed(conversionToProcess);
         
-        // Step 7: Generate response
+        // Step 8: Generate response
         const remainingUnattributed = unattributedConversions.length - 1;
+        const remainingUnprocessed24H = unprocessed24HourConversions.length - 1;
         const wasSuccessful = improvementResults.matchFound;
         
         let summaryMessage;
         if (wasSuccessful) {
-            summaryMessage = `✅ Found attribution for ${conversionToProcess.email}! ${remainingUnattributed} unattributed conversions remaining.`;
+            summaryMessage = `✅ Found attribution for conversion! ${remainingUnprocessed24H} unattributed conversions remaining to process with 24-hour window.`;
         } else {
-            summaryMessage = `❌ No attribution found for ${conversionToProcess.email} even with 24-hour window. ${remainingUnattributed} unattributed conversions remaining.`;
+            summaryMessage = `❌ No attribution found even with 24-hour window. ${remainingUnprocessed24H} unattributed conversions remaining to process.`;
         }
         
         console.log(`\n🏁 DEEP DIVE COMPLETE:`);
-        console.log(`   📧 Processed: ${conversionToProcess.email}`);
+        console.log(`   📧 Processed: [PRIVACY PROTECTED]`);
         console.log(`   ✅ Success: ${wasSuccessful ? 'YES' : 'NO'}`);
-        console.log(`   🔄 Remaining unattributed: ${remainingUnattributed}`);
+        console.log(`   🔄 Remaining unprocessed (24h): ${remainingUnprocessed24H}`);
         
         return {
             statusCode: 200,
@@ -92,7 +116,7 @@ exports.handler = async (event, context) => {
             body: JSON.stringify({
                 success: true,
                 processed_conversion: {
-                    email: conversionToProcess.email,
+                    email: '[PRIVACY_PROTECTED]', // Don't expose email in response
                     timestamp: conversionToProcess.timestamp,
                     match_found: wasSuccessful,
                     improvement_type: improvementResults.improvementType,
@@ -104,10 +128,11 @@ exports.handler = async (event, context) => {
                 message: summaryMessage,
                 progress: {
                     total_conversions: allConversions.length,
-                    unattributed_remaining: remainingUnattributed,
+                    unattributed_total: unattributedConversions.length,
+                    unattributed_remaining_24h: remainingUnprocessed24H,
                     processed_this_run: 1,
-                    status: remainingUnattributed > 0 ? 'MORE_TO_PROCESS' : 'ALL_ATTRIBUTED',
-                    next_action: remainingUnattributed > 0 ? 'Press button again to process next conversion' : 'All conversions now have attribution!'
+                    status: remainingUnprocessed24H > 0 ? 'MORE_TO_PROCESS' : 'ALL_24H_PROCESSED',
+                    next_action: remainingUnprocessed24H > 0 ? 'Press button again to process next conversion' : 'All unattributed conversions have been processed with 24-hour window'
                 },
                 analysis: improvementResults.analysis,
                 processing_method: '24hour_deep_dive'
@@ -206,7 +231,7 @@ function getUnattributedConversions(allConversions) {
     if (unattributed.length > 0) {
         console.log('📋 Unattributed conversions:');
         unattributed.slice(0, 5).forEach((conv, index) => {
-            console.log(`   ${index + 1}. ${conv.email} | ${conv.timestamp}`);
+            console.log(`   ${index + 1}. [PRIVACY PROTECTED] | ${conv.timestamp}`);
         });
         if (unattributed.length > 5) {
             console.log(`   ... and ${unattributed.length - 5} more`);
@@ -214,6 +239,33 @@ function getUnattributedConversions(allConversions) {
     }
     
     return unattributed;
+}
+
+// Filter out conversions that have already been processed with 24-hour window
+async function filterOut24HourProcessed(unattributedConversions) {
+    const unprocessedConversions = [];
+    let alreadyProcessed24HCount = 0;
+    
+    for (const conversion of unattributedConversions) {
+        const key24Hour = `24hour_processed:${conversion.email}:${conversion.timestamp}`;
+        
+        try {
+            const processedData = await redisRequest('get', key24Hour);
+            
+            if (processedData) {
+                alreadyProcessed24HCount++;
+                console.log(`   ⏭️ Skipping [PRIVACY PROTECTED] - already processed with 24-hour window`);
+            } else {
+                unprocessedConversions.push(conversion);
+            }
+        } catch (error) {
+            // If we can't check status, assume unprocessed
+            unprocessedConversions.push(conversion);
+        }
+    }
+    
+    console.log(`📊 Filtered out ${alreadyProcessed24HCount} already processed with 24-hour window`);
+    return unprocessedConversions;
 }
 
 // Analyze single conversion for attribution improvement with 24-hour window
@@ -355,9 +407,9 @@ async function markConversionAs24HourProcessed(conversion) {
         
         // Set with 30-day expiration
         await redisRequest('setex', key24Hour, 2592000, JSON.stringify(processedData)); // 30 days
-        console.log(`   ✅ Marked ${conversion.email} as 24-hour processed`);
+        console.log(`   ✅ Marked conversion as 24-hour processed`);
     } catch (error) {
-        console.log(`   ⚠️ Could not mark ${conversion.email} as 24-hour processed: ${error.message}`);
+        console.log(`   ⚠️ Could not mark conversion as 24-hour processed: ${error.message}`);
     }
 }
 
@@ -659,7 +711,7 @@ async function findConversionKey(conversion) {
         return newKey;
         
     } catch (error) {
-        console.error(`❌ Error finding conversion key for ${conversion.email}:`, error);
+        console.error(`❌ Error finding conversion key for conversion:`, error);
         return null;
     }
 }
