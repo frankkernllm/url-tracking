@@ -60,13 +60,12 @@ exports.handler = async (event, context) => {
         
         // Step 4: Take the first unprocessed conversion
         const conversionToProcess = unprocessedConversions[0];
-        const remainingAfterThis = unprocessedConversions.length - 1;
         
         console.log(`🎯 PROCESSING CONVERSION: ${conversionToProcess.email}`);
         console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
         console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
         console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
-        console.log(`   📈 Progress: 1 of ${unprocessedConversions.length} remaining conversions`);
+        console.log(`   📈 Progress: Processing 1 of ${unprocessedConversions.length} remaining conversions`);
         
         // Step 5: Analyze this conversion with 24-hour attribution improvement
         const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
@@ -106,8 +105,9 @@ exports.handler = async (event, context) => {
                 message: statusMessage,
                 progress: {
                     total_conversions: allConversions.length,
-                    already_processed: allConversions.length - unprocessedConversions.length,
-                    remaining_conversions: remainingAfterThis,
+                    already_processed: totalProcessedAfterThis - 1, // -1 because we added the current one above
+                    just_processed: conversionToProcess.email,
+                    remaining_conversions: totalRemainingAfterThis,
                     status: isComplete ? 'COMPLETE' : 'CONTINUE',
                     next_action: isComplete ? 'All conversions optimized!' : 'Run again to process next conversion'
                 },
@@ -195,11 +195,11 @@ function getAllConversions(conversions) {
         return [];
     }
     
-    // Sort by timestamp (oldest first for systematic processing)
-    const sortedConversions = conversions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    // Sort by timestamp DESCENDING (newest first for priority processing)
+    const sortedConversions = conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
     console.log(`📊 Found ${sortedConversions.length} total conversions for attribution improvement`);
-    console.log('📋 All conversions (oldest first):');
+    console.log('📋 All conversions (newest first):');;
     sortedConversions.slice(0, 5).forEach((conv, index) => {
         const attribution = conv.landing_page ? `${conv.landing_page}` : 'NO ATTRIBUTION';
         console.log(`   ${index + 1}. ${conv.email} | ${conv.timestamp} | ${attribution}`);
@@ -454,7 +454,7 @@ async function markConversionAsNewlyUpdated(conversion) {
 }
 
 // Generate status message
-function generateStatusMessage(conversion, results, remaining, isComplete) {
+function generateStatusMessage(conversion, results, remainingCount, isComplete) {
     const email = conversion.email;
     
     if (isComplete) {
@@ -463,11 +463,11 @@ function generateStatusMessage(conversion, results, remaining, isComplete) {
     
     if (results.shouldUpdate) {
         const type = results.improvementType === 'NEW_ATTRIBUTION' ? 'NEW attribution created' : 'Attribution IMPROVED';
-        return `${type} for ${email}: ${results.newAttribution}. ${remaining} conversions remaining - run again to continue.`;
+        return `${type} for ${email}: ${results.newAttribution}. ${remainingCount} conversions remaining - run again to continue.`;
     } else if (results.matchFound) {
-        return `Analyzed ${email}: Current attribution is already optimal. ${remaining} conversions remaining - run again to continue.`;
+        return `Analyzed ${email}: Current attribution is already optimal. ${remainingCount} conversions remaining - run again to continue.`;
     } else {
-        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remaining} conversions remaining - run again to continue.`;
+        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remainingCount} conversions remaining - run again to continue.`;
     }
 }
 
