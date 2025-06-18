@@ -15,7 +15,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM');
+        console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - VERSION FIXED');
         console.log('📋 Processing single conversion with comprehensive 24-hour attribution analysis');
         
         // Step 1: Fetch analytics data from past 7 days (safe date range)
@@ -84,9 +84,19 @@ exports.handler = async (event, context) => {
         // Step 7: Mark conversion as "newly updated"
         await markConversionAsNewlyUpdated(conversionToProcess);
         
-        // Step 8: Return processing status
-        const isComplete = remainingAfterThis === 0;
-        const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, remainingAfterThis, isComplete);
+        // Step 8: Calculate completion status more accurately - FIXED VARIABLES
+        const totalProcessedAfterThis = allConversions.length - unprocessedConversions.length + 1;
+        const totalRemainingAfterThis = allConversions.length - totalProcessedAfterThis;
+        const isComplete = totalRemainingAfterThis === 0;
+        
+        console.log(`📊 PROGRESS UPDATE:`);
+        console.log(`   📈 Total conversions: ${allConversions.length}`);
+        console.log(`   ✅ Processed (including current): ${totalProcessedAfterThis}`);
+        console.log(`   🔄 Remaining to process: ${totalRemainingAfterThis}`);
+        console.log(`   🏁 Status: ${isComplete ? 'COMPLETE' : 'CONTINUE'}`);
+        
+        // Step 9: Return processing status - FIXED VARIABLES
+        const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, isComplete);
         
         return {
             statusCode: 200,
@@ -105,7 +115,7 @@ exports.handler = async (event, context) => {
                 message: statusMessage,
                 progress: {
                     total_conversions: allConversions.length,
-                    already_processed: totalProcessedAfterThis - 1, // -1 because we added the current one above
+                    already_processed: totalProcessedAfterThis - 1,
                     just_processed: conversionToProcess.email,
                     remaining_conversions: totalRemainingAfterThis,
                     status: isComplete ? 'COMPLETE' : 'CONTINUE',
@@ -199,7 +209,7 @@ function getAllConversions(conversions) {
     const sortedConversions = conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
     console.log(`📊 Found ${sortedConversions.length} total conversions for attribution improvement`);
-    console.log('📋 All conversions (newest first):');;
+    console.log('📋 All conversions (newest first):');
     sortedConversions.slice(0, 5).forEach((conv, index) => {
         const attribution = conv.landing_page ? `${conv.landing_page}` : 'NO ATTRIBUTION';
         console.log(`   ${index + 1}. ${conv.email} | ${conv.timestamp} | ${attribution}`);
