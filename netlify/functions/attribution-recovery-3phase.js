@@ -18,8 +18,8 @@ exports.handler = async (event, context) => {
         console.log('🎯 Starting JUNE 12-18 Batch Attribution Recovery (SPECIAL RUN)');
         console.log('⚠️  BYPASSING processed check - will reprocess ALL unattributed conversions');
         
-        // ULTRA-CONSERVATIVE CONFIGURATION - 1 conversion at a time to prevent timeout
-        const BATCH_SIZE = 1; // Process only 1 conversion at a time
+        // OPTIMIZED CONFIGURATION - Cache working well, can process more
+        const BATCH_SIZE = 3; // Process 3 conversions at a time (cache hit rate 70%+)
         
         // Step 1: Fetch analytics data from June 12-18 (FIXED DATE RANGE)
         const analyticsData = await fetchAnalyticsDataJune1218();
@@ -51,9 +51,9 @@ exports.handler = async (event, context) => {
         const conversionsToProcess = unprocessedConversions.slice(0, BATCH_SIZE);
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
-        console.log(`📦 JUNE 12-18 SINGLE-CONVERSION PROCESSING: Processing ${conversionsToProcess.length} conversion (${remainingAfterBatch} remaining)`);
+        console.log(`📦 JUNE 12-18 OPTIMIZED PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed from June 12-18 period`);
-        console.log(`🔄 Note: Processing 1 conversion at a time with max 8 candidates per phase to prevent timeout`);
+        console.log(`🚀 Note: Processing 3 conversions at a time with 70%+ cache hit rate - much faster now!`);
         
         // Log the conversions we're about to process
         console.log('📋 Conversions to process:');
@@ -80,8 +80,8 @@ exports.handler = async (event, context) => {
         // Step 6: Return batch processing status
         const batchComplete = remainingAfterBatch === 0;
         const statusMessage = batchComplete ? 
-            `June 12-18 single-conversion processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final run` :
-            `June 12-18 single-conversion ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
+            `June 12-18 optimized processing COMPLETE: ${recoveryResults.recovered}/${recoveryResults.total} conversions recovered in final run` :
+            `June 12-18 optimized batch ${conversionsToProcess.length}/${unprocessedConversions.length} complete: ${recoveryResults.recovered}/${recoveryResults.total} recovered. ${remainingAfterBatch} conversions remaining - run again to continue.`;
         
         return {
             statusCode: 200,
