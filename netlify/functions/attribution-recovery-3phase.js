@@ -366,7 +366,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window - OPTIMIZED with timestamp sorting AND candidate limiting
+// Find IPv6 pageviews within time window - OPTIMIZED with timestamp sorting (NO LIMITS)
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -384,16 +384,11 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     // SORT BY TIMESTAMP - NEWEST FIRST (most recent pageviews checked first)
     ipv6Pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    // LIMIT to first 8 candidates per phase to prevent timeout
-    const limitedPageviews = ipv6Pageviews.slice(0, 8);
-    
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
     console.log(`   🕐 Sorted by timestamp (newest first) - will check most recent matches first`);
-    if (ipv6Pageviews.length > 8) {
-        console.log(`   ⚡ Limited to ${limitedPageviews.length} most recent candidates to prevent timeout (${ipv6Pageviews.length - limitedPageviews.length} skipped)`);
-    }
+    console.log(`   🚀 No artificial limits - checking all candidates with 70%+ cache hit rate`);
     
-    return limitedPageviews;
+    return ipv6Pageviews;
 }
 
 // OPTIMIZED: Get location/ISP data using SAME cache structure as track.js
