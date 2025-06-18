@@ -52,8 +52,8 @@ exports.handler = async (event, context) => {
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
         console.log(`📦 JUNE 12-18 OPTIMIZED PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
-        console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed from June 12-18 period`);
-        console.log(`🚀 Note: Processing 3 conversions at a time with 70%+ cache hit rate - much faster now!`);
+        console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed, ${unprocessedConversions.length} unprocessed from June 12-18 period`);
+        console.log(`🚀 Note: Processing ${conversionsToProcess.length} conversions at a time with 70%+ cache hit rate`);
         
         // Log the conversions we're about to process
         console.log('📋 Conversions to process:');
