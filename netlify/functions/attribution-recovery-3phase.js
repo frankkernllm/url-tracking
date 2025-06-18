@@ -18,8 +18,8 @@ exports.handler = async (event, context) => {
         console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM');
         console.log('📋 Processing single conversion with comprehensive 24-hour attribution analysis');
         
-        // Step 1: Fetch analytics data from past 10 days (dynamic date range)
-        const analyticsData = await fetchAnalyticsDataPast10Days();
+        // Step 1: Fetch analytics data from past 7 days (safe date range)
+        const analyticsData = await fetchAnalyticsDataPast7Days();
         
         // Step 2: Find all conversions (not just unattributed)
         const allConversions = getAllConversions(analyticsData.conversions);
@@ -30,7 +30,7 @@ exports.handler = async (event, context) => {
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'No conversions found in past 10 days',
+                    message: 'No conversions found in past 7 days',
                     results: { total: 0, processed: 0, remaining: 0 }
                 })
             };
@@ -46,7 +46,7 @@ exports.handler = async (event, context) => {
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'All conversions from past 10 days have been processed!',
+                    message: 'All conversions from past 7 days have been processed!',
                     results: { 
                         total: allConversions.length, 
                         processed: allConversions.length, 
@@ -111,7 +111,7 @@ exports.handler = async (event, context) => {
                     status: isComplete ? 'COMPLETE' : 'CONTINUE',
                     next_action: isComplete ? 'All conversions optimized!' : 'Run again to process next conversion'
                 },
-                date_range: 'Past 10 days (dynamic)',
+                date_range: 'Past 7 days (safe range)',
                 update_result: updateResult
             })
         };
@@ -136,19 +136,25 @@ let cacheStats = {
     errors: 0
 };
 
-// Fetch analytics data for past 10 days (dynamic date range)
-async function fetchAnalyticsDataPast10Days() {
-    console.log('📊 Fetching analytics data for past 10 days...');
+// Fetch analytics data for past 7 days (dynamic date range)
+async function fetchAnalyticsDataPast7Days() {
+    console.log('📊 Fetching analytics data for past 7 days...');
     
-    // Calculate dynamic date range
+    // Calculate dynamic date range - using 7 days to stay within available data
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setDate(endDate.getDate() - 10);
+    startDate.setDate(endDate.getDate() - 7);
+    
+    // Ensure we don't go before June 11, 2025 (when data starts)
+    const earliestDate = new Date('2025-06-11');
+    if (startDate < earliestDate) {
+        startDate.setTime(earliestDate.getTime());
+    }
     
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
     
-    console.log(`📅 Dynamic date range: ${startDateStr} to ${endDateStr} (past 10 days)`);
+    console.log(`📅 Safe date range: ${startDateStr} to ${endDateStr} (respecting data availability)`);
     
     const params = new URLSearchParams();
     params.append('start_date', startDateStr);
