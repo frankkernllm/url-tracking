@@ -1,7 +1,6 @@
 exports.handler = async (event, context) => {
-    // Batch Processing Attribution Recovery Function - processes conversions in small batches
-    // to avoid timeout issues with larger datasets while maintaining identical attribution quality.
-    // Run multiple times until all conversions are processed.
+    // Batch Processing Attribution Recovery Function - OPTIMIZED VERSION
+    // Key improvements: 1) Geographic data caching, 2) Larger batch sizes, 3) Optimized time windows
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -15,10 +14,10 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting Batch Attribution Recovery (Past 24 Hours)');
+        console.log('🎯 Starting Optimized Batch Attribution Recovery (Past 24 Hours)');
         
-        // BATCH CONFIGURATION - Start with 1 conversion, increase after testing
-        const BATCH_SIZE = 1; // TODO: Test with 1, then try 2, 3 to find optimal size
+        // OPTIMIZED BATCH CONFIGURATION - Larger batch size since track.js now works better
+        const BATCH_SIZE = 5; // Increased from 1 to 5 (can test up to 10-15)
         
         // Step 1: Fetch analytics data from past 24 hours (unchanged)
         const analyticsData = await fetchAnalyticsData();
@@ -65,10 +64,10 @@ exports.handler = async (event, context) => {
         const conversionsToProcess = unprocessedConversions.slice(0, BATCH_SIZE);
         const remainingAfterBatch = unprocessedConversions.length - conversionsToProcess.length;
         
-        console.log(`📦 BATCH PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
+        console.log(`📦 OPTIMIZED BATCH PROCESSING: Processing ${conversionsToProcess.length} conversions (${remainingAfterBatch} remaining)`);
         console.log(`📊 Total Status: ${allUnattributedConversions.length} total unattributed, ${unprocessedConversions.length} unprocessed`);
         
-        // Step 3: Analyze conversions in this batch (IDENTICAL logic to original)
+        // Step 3: Analyze conversions in this batch (OPTIMIZED with caching)
         const recoveryResults = await analyzeUnattributedConversions(conversionsToProcess, analyticsData.page_views);
         
         // Step 4: Update Redis with recovered attributions (unchanged)
@@ -120,6 +119,56 @@ exports.handler = async (event, context) => {
         };
     }
 };
+
+// NEW: Get cached geographic data from attribution records (major optimization)
+async function getCachedGeoData(ip) {
+    try {
+        // Check if we already have geo data for this IP from pageview attribution
+        const encodedIP = ip.replace(/:/g, '_');
+        const ipKey = `attribution_ip_${encodedIP}`;
+        const attrKeyResult = await redisRequest('get', ipKey);
+        
+        if (attrKeyResult) {
+            // Get the main attribution record
+            const attrResult = await redisRequest('get', attrKeyResult);
+            if (attrResult) {
+                const attrData = JSON.parse(attrResult);
+                if (attrData.geographic_data) {
+                    console.log(`   💾 Using cached geo data for ${ip}: ${attrData.geographic_data.city}, ${attrData.geographic_data.region} (${attrData.geographic_data.isp})`);
+                    return attrData.geographic_data;
+                }
+            }
+        }
+        
+        // Also try to find geo data in any recent attribution record with this IP
+        const geoKeys = await redisRequest('keys', 'attribution_geo_*');
+        if (geoKeys && geoKeys.length > 0) {
+            for (const geoKey of geoKeys.slice(-20)) { // Check last 20 geo keys
+                try {
+                    const mainKeyResult = await redisRequest('get', geoKey);
+                    if (mainKeyResult) {
+                        const mainKey = mainKeyResult;
+                        const attrResult = await redisRequest('get', mainKey);
+                        if (attrResult) {
+                            const attrData = JSON.parse(attrResult);
+                            if (attrData.ip_address === ip && attrData.geographic_data) {
+                                console.log(`   💾 Found cached geo data via geo key for ${ip}`);
+                                return attrData.geographic_data;
+                            }
+                        }
+                    }
+                } catch (geoError) {
+                    continue; // Skip invalid geo keys
+                }
+            }
+        }
+        
+        return null;
+    } catch (error) {
+        console.log(`   ⚠️ Cached geo lookup failed for ${ip}: ${error.message}`);
+        return null;
+    }
+}
 
 // NEW: Filter out conversions that have already been processed
 async function filterUnprocessedConversions(conversions) {
@@ -244,9 +293,9 @@ function findUnattributedConversions(conversions) {
     return unattributed;
 }
 
-// Step 3: Analyze unattributed conversions with FOUR phases (UNCHANGED - identical to original)
+// Step 3: Analyze unattributed conversions with OPTIMIZED phases
 async function analyzeUnattributedConversions(unattributedConversions, pageviews) {
-    console.log('🔬 Analyzing unattributed conversions from past 24 hours for IPv6 pageview matches...');
+    console.log('🔬 Analyzing unattributed conversions with OPTIMIZED geographic correlation...');
     
     const results = {
         total: unattributedConversions.length,
@@ -255,8 +304,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         phases: {
             'Phase 1': { attempts: 0, matches: 0 },
             'Phase 2': { attempts: 0, matches: 0 },
-            'Phase 3': { attempts: 0, matches: 0 },
-            'Phase 4': { attempts: 0, matches: 0 }
+            'Phase 3': { attempts: 0, matches: 0 }
         }
     };
     
@@ -266,12 +314,11 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
         console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
         console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
         
-        // Try four phases in sequence (balanced timeline for remaining conversions)
+        // OPTIMIZED phases - reduced from 4 to 3 phases since track.js now catches more in real-time
         const phases = [
-            { name: 'Phase 1', start: 0, end: 15, confidence: 'HIGH' },
-            { name: 'Phase 2', start: 15, end: 45, confidence: 'MEDIUM' },
-            { name: 'Phase 3', start: 45, end: 120, confidence: 'EXTENDED' },
-            { name: 'Phase 4', start: 120, end: 180, confidence: 'DEEP_HISTORY_3H' }
+            { name: 'Phase 1', start: 0, end: 30, confidence: 'HIGH' },        // 0-30 min
+            { name: 'Phase 2', start: 30, end: 120, confidence: 'MEDIUM' },    // 30min-2h
+            { name: 'Phase 3', start: 120, end: 240, confidence: 'EXTENDED' }  // 2-4 hours
         ];
         
         let matched = false;
@@ -281,11 +328,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             results.phases[phase.name].attempts++;
             
-            if (phase.name === 'Phase 4') {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minutes (2-3 hours before conversion)`);
-            } else {
-                console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
-            }
+            console.log(`   🕐 ${phase.name}: Searching ${phase.start}-${phase.end} minute window`);
             
             // Find IPv6 pageviews in window
             const candidatePageviews = findIPv6PageviewsInWindow(conversion, pageviews, phase.start, phase.end);
@@ -297,7 +340,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
             
             console.log(`   📱 Found ${candidatePageviews.length} IPv6 pageviews in ${phase.name} window`);
             
-            // Get geographic data for conversion IP
+            // Get geographic data for conversion IP (OPTIMIZED - check cache first)
             const conversionGeoData = await getIPLocationData(conversion.ip_address);
             console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
             
@@ -349,8 +392,13 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
     return ipv6Pageviews;
 }
 
-// Get location/ISP data for an IP using IPInfo.io (UNCHANGED - identical to original)
+// OPTIMIZED: Get location/ISP data with caching support
 async function getIPLocationData(ip) {
+    // Check cache first (major optimization)
+    const cached = await getCachedGeoData(ip);
+    if (cached) return cached;
+    
+    // Only make API call if not cached
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
     const url = `https://ipinfo.io/${ip}?token=${token}`;
     
@@ -363,7 +411,7 @@ async function getIPLocationData(ip) {
         if (response.ok) {
             const data = await response.json();
             
-            return {
+            const result = {
                 ip: data.ip,
                 city: data.city || 'Unknown',
                 region: data.region || 'Unknown',
@@ -372,6 +420,9 @@ async function getIPLocationData(ip) {
                 timezone: data.timezone || 'Unknown',
                 location: data.loc || '0,0'
             };
+            
+            console.log(`   🌍 Fresh geo lookup for ${ip}: ${result.city}, ${result.region} (${result.isp})`);
+            return result;
         } else {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -401,7 +452,7 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Check IPv6 candidates against conversion for geographic matches (UNCHANGED - identical to original)
+// Check IPv6 candidates against conversion for geographic matches (OPTIMIZED with caching)
 async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeoData) {
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
@@ -411,7 +462,7 @@ async function checkIPv6Candidates(conversion, candidatePageviews, conversionGeo
         console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
         console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
         
-        // Get geographic data for IPv6 pageview
+        // OPTIMIZED: Get geographic data for IPv6 pageview (check cache first)
         const pageviewGeoData = await getIPLocationData(pageview.ip_address);
         console.log(`      📍 IPv6 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
@@ -577,7 +628,7 @@ async function updateRecoveredAttributions(matches) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: 'four_phase_geographic',
+                    recovery_method: 'optimized_geographic',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
