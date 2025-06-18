@@ -1,11 +1,11 @@
 exports.handler = async (event, context) => {
-    // ATTRIBUTION IMPROVEMENT SYSTEM: Single Conversion Processing
-    // Processes one conversion at a time with comprehensive 24-hour attribution analysis
-    // Improves existing attribution by finding temporally closer matches
+    // ATTRIBUTION IMPROVEMENT SYSTEM: Auto-Continue with Safety Mechanisms
+    // Processes one conversion at a time with automatic continuation
+    // Includes safety limits and error recovery
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Auto-Run-Count',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Content-Type': 'application/json'
     };
@@ -15,8 +15,30 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - VERSION FIXED');
-        console.log('📋 Processing single conversion with comprehensive 24-hour attribution analysis');
+        // Safety mechanism: Track auto-run count to prevent infinite loops
+        const currentRunCount = parseInt(event.headers['x-auto-run-count'] || '0');
+        const MAX_AUTO_RUNS = 250; // Safety limit (should cover all conversions + buffer)
+        const isManualRun = currentRunCount === 0;
+        
+        console.log(`🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - AUTO-CONTINUE v2.0`);
+        console.log(`📊 Run Info: ${isManualRun ? 'MANUAL START' : `AUTO-RUN #${currentRunCount}`}`);
+        console.log(`🛡️ Safety: ${currentRunCount}/${MAX_AUTO_RUNS} runs used`);
+        
+        // Safety check: Prevent infinite loops
+        if (currentRunCount >= MAX_AUTO_RUNS) {
+            console.log('🚨 SAFETY LIMIT REACHED - Stopping auto-continuation');
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: false,
+                    error: 'AUTO_RUN_LIMIT_REACHED',
+                    message: `Safety limit of ${MAX_AUTO_RUNS} auto-runs reached. Manual intervention required.`,
+                    runs_completed: currentRunCount,
+                    manual_override_needed: true
+                })
+            };
+        }
         
         // Step 1: Fetch analytics data from past 7 days (safe date range)
         const analyticsData = await fetchAnalyticsDataPast7Days();
@@ -31,7 +53,8 @@ exports.handler = async (event, context) => {
                 body: JSON.stringify({
                     success: true,
                     message: 'No conversions found in past 7 days',
-                    results: { total: 0, processed: 0, remaining: 0 }
+                    results: { total: 0, processed: 0, remaining: 0 },
+                    auto_continue: false
                 })
             };
         }
@@ -41,19 +64,22 @@ exports.handler = async (event, context) => {
         const unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
         
         if (unprocessedConversions.length === 0) {
+            console.log('🎉 ALL CONVERSIONS COMPLETED! Auto-continuation stopping.');
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'All conversions from past 7 days have been processed!',
+                    message: 'ALL CONVERSIONS COMPLETED! Attribution improvement finished.',
                     results: { 
                         total: allConversions.length, 
                         processed: allConversions.length, 
                         remaining: 0 
                     },
                     status: 'COMPLETE',
-                    next_action: 'All recent conversions have been optimized'
+                    auto_continue: false,
+                    total_runs: currentRunCount + 1,
+                    completion_message: `Successfully processed all ${allConversions.length} conversions across ${currentRunCount + 1} automatic runs.`
                 })
             };
         }
@@ -84,7 +110,7 @@ exports.handler = async (event, context) => {
         // Step 7: Mark conversion as "newly updated"
         await markConversionAsNewlyUpdated(conversionToProcess);
         
-        // Step 8: Calculate completion status more accurately - FIXED VARIABLES
+        // Step 8: Calculate completion status
         const totalProcessedAfterThis = allConversions.length - unprocessedConversions.length + 1;
         const totalRemainingAfterThis = allConversions.length - totalProcessedAfterThis;
         const isComplete = totalRemainingAfterThis === 0;
@@ -95,7 +121,86 @@ exports.handler = async (event, context) => {
         console.log(`   🔄 Remaining to process: ${totalRemainingAfterThis}`);
         console.log(`   🏁 Status: ${isComplete ? 'COMPLETE' : 'CONTINUE'}`);
         
-        // Step 9: Return processing status - FIXED VARIABLES
+        // Step 9: Auto-continue if more conversions remain
+        if (!isComplete && totalRemainingAfterThis > 0) {
+            console.log(`🔄 AUTO-CONTINUE: ${totalRemainingAfterThis} conversions remaining`);
+            console.log(`   ⏱️  Adding 2-second delay before next run...`);
+            
+            // Add delay between calls to prevent overwhelming the system
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+            
+            try {
+                // Self-trigger the function for next conversion
+                await triggerNextRun(event, currentRunCount + 1, totalRemainingAfterThis);
+                
+                // Return immediate response indicating auto-continuation
+                const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, false);
+                
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        success: true,
+                        auto_continued: true,
+                        processed_conversion: {
+                            email: conversionToProcess.email,
+                            timestamp: conversionToProcess.timestamp,
+                            original_attribution: conversionToProcess.landing_page || null,
+                            improvement_found: improvementResults.matchFound,
+                            new_attribution: improvementResults.newAttribution || null,
+                            improvement_type: improvementResults.improvementType
+                        },
+                        results: improvementResults,
+                        message: statusMessage + ' (AUTO-CONTINUING...)',
+                        progress: {
+                            total_conversions: allConversions.length,
+                            just_processed: conversionToProcess.email,
+                            remaining_conversions: totalRemainingAfterThis,
+                            current_run: currentRunCount + 1,
+                            status: 'AUTO_CONTINUING',
+                            next_action: 'Processing continues automatically...'
+                        },
+                        date_range: 'Past 7 days (safe range)',
+                        update_result: updateResult,
+                        auto_continue_info: {
+                            triggered_next_run: true,
+                            run_count: currentRunCount + 1,
+                            estimated_runs_remaining: Math.ceil(totalRemainingAfterThis),
+                            safety_limit: MAX_AUTO_RUNS
+                        }
+                    })
+                };
+                
+            } catch (autoError) {
+                console.error('❌ Auto-continuation failed:', autoError);
+                
+                // Fall back to manual continuation message
+                const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, false);
+                
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        success: true,
+                        auto_continue_failed: true,
+                        processed_conversion: {
+                            email: conversionToProcess.email,
+                            improvement_type: improvementResults.improvementType
+                        },
+                        message: statusMessage + ' (AUTO-CONTINUE FAILED - Manual run needed)',
+                        progress: {
+                            total_conversions: allConversions.length,
+                            remaining_conversions: totalRemainingAfterThis,
+                            status: 'MANUAL_INTERVENTION_NEEDED',
+                            next_action: 'Run the function again manually to continue'
+                        },
+                        error_details: autoError.message
+                    })
+                };
+            }
+        }
+        
+        // Step 10: Return final completion status (if complete)
         const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, isComplete);
         
         return {
@@ -122,7 +227,9 @@ exports.handler = async (event, context) => {
                     next_action: isComplete ? 'All conversions optimized!' : 'Run again to process next conversion'
                 },
                 date_range: 'Past 7 days (safe range)',
-                update_result: updateResult
+                update_result: updateResult,
+                auto_continue: false,
+                final_completion: isComplete
             })
         };
 
@@ -133,11 +240,77 @@ exports.handler = async (event, context) => {
             headers,
             body: JSON.stringify({
                 error: 'Attribution improvement system failed',
-                details: error.message
+                details: error.message,
+                auto_continue: false
             })
         };
     }
 };
+
+// Self-trigger function for auto-continuation
+async function triggerNextRun(originalEvent, nextRunCount, remainingConversions) {
+    console.log(`🚀 TRIGGERING NEXT RUN: #${nextRunCount} (${remainingConversions} conversions remaining)`);
+    
+    // Construct the function URL
+    const functionUrl = constructFunctionUrl(originalEvent);
+    
+    try {
+        const response = await fetch(functionUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': process.env.OJOY_API_KEY,
+                'X-Auto-Run-Count': nextRunCount.toString(),
+                'User-Agent': 'Attribution-Auto-Continue/1.0'
+            },
+            body: JSON.stringify({
+                auto_continue: true,
+                triggered_by_run: nextRunCount - 1,
+                remaining_conversions: remainingConversions
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        console.log(`✅ Successfully triggered next run #${nextRunCount}`);
+        
+    } catch (error) {
+        console.error(`❌ Failed to trigger next run: ${error.message}`);
+        throw error;
+    }
+}
+
+// Construct function URL for self-invocation
+function constructFunctionUrl(event) {
+    // Try to get the function URL from various sources
+    let baseUrl = '';
+    
+    // Method 1: From headers (most reliable)
+    if (event.headers.host) {
+        const protocol = event.headers['x-forwarded-proto'] || 'https';
+        baseUrl = `${protocol}://${event.headers.host}`;
+    }
+    
+    // Method 2: From Netlify environment
+    else if (process.env.URL) {
+        baseUrl = process.env.URL;
+    }
+    
+    // Method 3: Fallback construction
+    else {
+        baseUrl = 'https://trackingojoy.netlify.app';
+    }
+    
+    // Get the function path
+    const functionPath = event.path || '/.netlify/functions/attribution-recovery-3phase';
+    
+    const fullUrl = `${baseUrl}${functionPath}`;
+    console.log(`🔗 Function URL: ${fullUrl}`);
+    
+    return fullUrl;
+}
 
 // Global counters for cache statistics
 let cacheStats = {
@@ -452,7 +625,7 @@ async function markConversionAsNewlyUpdated(conversion) {
             email: conversion.email,
             timestamp: conversion.timestamp,
             processed_at: new Date().toISOString(),
-            system: 'attribution_improvement'
+            system: 'attribution_improvement_auto'
         };
         
         // Set with 30-day expiration
@@ -473,11 +646,11 @@ function generateStatusMessage(conversion, results, remainingCount, isComplete) 
     
     if (results.shouldUpdate) {
         const type = results.improvementType === 'NEW_ATTRIBUTION' ? 'NEW attribution created' : 'Attribution IMPROVED';
-        return `${type} for ${email}: ${results.newAttribution}. ${remainingCount} conversions remaining - run again to continue.`;
+        return `${type} for ${email}: ${results.newAttribution}. ${remainingCount} conversions remaining`;
     } else if (results.matchFound) {
-        return `Analyzed ${email}: Current attribution is already optimal. ${remainingCount} conversions remaining - run again to continue.`;
+        return `Analyzed ${email}: Current attribution is already optimal. ${remainingCount} conversions remaining`;
     } else {
-        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remainingCount} conversions remaining - run again to continue.`;
+        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remainingCount} conversions remaining`;
     }
 }
 
@@ -505,7 +678,7 @@ async function updateConversionAttribution(conversion, improvementResults) {
                 referrer_url: improvementResults.match.pageview.referrer_url || conversionData.referrer_url,
                 // Attribution improvement metadata
                 attribution_improvement: {
-                    method: 'temporal_optimization',
+                    method: 'temporal_optimization_auto',
                     improvement_type: improvementResults.improvementType,
                     confidence: improvementResults.match.confidence,
                     score: improvementResults.match.score,
