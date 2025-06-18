@@ -42,7 +42,7 @@ exports.handler = async (event, context) => {
             };
         }
         
-        console.log(`🔄 PROCESSING LOOP: Will run for max ${maxRunTime/1000} seconds`);
+        console.log(`🔄 BATCH PROCESSING: Will process in batches of 3 for max ${maxRunTime/1000} seconds`);
         
         // Step 3: Get initial list of unprocessed conversions (ONCE at start)
         console.log('🔍 Getting initial list of unprocessed conversions...');
@@ -61,59 +61,70 @@ exports.handler = async (event, context) => {
             };
         }
         
-        console.log(`📋 Found ${unprocessedConversions.length} unprocessed conversions to work through`);
+        console.log(`📋 Found ${unprocessedConversions.length} unprocessed conversions (will process in batches of 3)`);
+        console.log(`📊 Estimated batches needed: ${Math.ceil(unprocessedConversions.length / 3)}`);
         
-        // Main processing loop - process conversions from our list
+        
+        // Main processing loop - process conversions in batches of 3
         while (unprocessedConversions.length > 0 && Date.now() - startTime < maxRunTime) {
             
-            // Check if we have enough time for another conversion (~12 seconds needed)
+            // Check if we have enough time for another batch (~15 seconds needed for 3 conversions)
             const timeRemaining = maxRunTime - (Date.now() - startTime);
-            if (timeRemaining < 12000) { // Need at least 12 seconds for next conversion
-                console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping loop`);
-                console.log(`✅ Processed ${processedInThisRun} conversions in this run`);
+            if (timeRemaining < 15000) { // Need at least 15 seconds for next batch
+                console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping batch processing`);
                 break;
             }
             
-            // Step 4: Process next conversion from our list
-            const conversionToProcess = unprocessedConversions.shift(); // Remove from front of array
-            const conversionStartTime = Date.now();
+            // Step 4: Get next batch of 3 conversions (or remaining if less than 3)
+            const batchSize = Math.min(3, unprocessedConversions.length);
+            const currentBatch = unprocessedConversions.splice(0, batchSize); // Remove from front of array
+            const batchStartTime = Date.now();
             
-            console.log(`\n🎯 PROCESSING CONVERSION ${processedInThisRun + 1}: ${conversionToProcess.email}`);
-            console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
-            console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
-            console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
-            console.log(`   📈 Progress: ${processedInThisRun} done, ${unprocessedConversions.length + 1} remaining`); // +1 because we just shifted this one off
-            console.log(`   ⏱️  Time remaining: ${timeRemaining/1000}s`);
+            console.log(`\n📦 PROCESSING BATCH: ${batchSize} conversions (${unprocessedConversions.length} remaining after this batch)`);
             
-            // Step 5: Analyze this conversion
-            const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
-            
-            // Step 6: Update Redis if needed
-            let updateResult = null;
-            if (improvementResults.shouldUpdate) {
-                console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
-                try {
-                    updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
-                } catch (redisError) {
-                    console.error('❌ Redis update failed:', redisError);
+            // Process each conversion in the current batch
+            for (let i = 0; i < currentBatch.length; i++) {
+                const conversionToProcess = currentBatch[i];
+                const conversionStartTime = Date.now();
+                
+                console.log(`\n🎯 CONVERSION ${i + 1}/${batchSize}: ${conversionToProcess.email}`);
+                console.log(`   📍 IP: ${conversionToProcess.ip_address}`);
+                console.log(`   ⏰ Time: ${conversionToProcess.timestamp}`);
+                console.log(`   📊 Current: ${conversionToProcess.landing_page || 'NONE'}`);
+                
+                // Step 5: Analyze this conversion
+                const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
+                
+                // Step 6: Update Redis if needed
+                let updateResult = null;
+                if (improvementResults.shouldUpdate) {
+                    console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
+                    try {
+                        updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
+                    } catch (redisError) {
+                        console.error('❌ Redis update failed:', redisError);
+                    }
                 }
+                
+                // Step 7: Mark as processed
+                await markConversionAsNewlyUpdated(conversionToProcess);
+                
+                // Track this processed conversion
+                const conversionTime = Date.now() - conversionStartTime;
+                processedInThisRun++;
+                processedConversions.push({
+                    email: conversionToProcess.email,
+                    improvement_type: improvementResults.improvementType,
+                    processing_time_ms: conversionTime,
+                    update_result: updateResult
+                });
+                
+                console.log(`✅ Completed ${conversionToProcess.email} in ${conversionTime/1000}s`);
             }
             
-            // Step 7: Mark as processed
-            await markConversionAsNewlyUpdated(conversionToProcess);
-            
-            // Track this processed conversion
-            const conversionTime = Date.now() - conversionStartTime;
-            processedInThisRun++;
-            processedConversions.push({
-                email: conversionToProcess.email,
-                improvement_type: improvementResults.improvementType,
-                processing_time_ms: conversionTime,
-                update_result: updateResult
-            });
-            
-            console.log(`✅ Completed ${conversionToProcess.email} in ${conversionTime/1000}s`);
-            console.log(`📊 Total processed in this run: ${processedInThisRun}`);
+            // Batch completion summary (lightweight)
+            const batchTime = Date.now() - batchStartTime;
+            console.log(`📦 Batch complete: ${batchSize} conversions in ${batchTime/1000}s | Total processed: ${processedInThisRun}`);
         }
         
         // Final status calculation
