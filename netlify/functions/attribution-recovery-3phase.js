@@ -351,7 +351,7 @@ async function analyzeUnattributedConversions(unattributedConversions, pageviews
     return results;
 }
 
-// Find IPv6 pageviews within time window (UNCHANGED - identical to original)
+// Find IPv6 pageviews within time window - OPTIMIZED with timestamp sorting
 function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
@@ -366,7 +366,11 @@ function findIPv6PageviewsInWindow(conversion, pageviews, startMinutes, endMinut
                pv.ip_address && pv.ip_address.includes(':'); // IPv6 addresses contain colons
     });
     
+    // SORT BY TIMESTAMP - NEWEST FIRST (most recent pageviews checked first)
+    ipv6Pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
     console.log(`   📊 Found ${ipv6Pageviews.length} IPv6 pageviews in time window out of ${pageviews.length} total pageviews`);
+    console.log(`   🕐 Sorted by timestamp (newest first) - will check most recent matches first`);
     
     return ipv6Pageviews;
 }
