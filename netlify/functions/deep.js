@@ -25,9 +25,9 @@ exports.handler = async (event, context) => {
         const unattributedConversions = getUnattributedConversions(allConversions);
         
         // Step 3: Filter out conversions already processed with 24-hour window
-        const unprocessed24HourConversions = await filterOut24HourProcessed(unattributedConversions);
+        const alreadydeep = await alreadydeep(unattributedConversions);
         
-        if (unprocessed24HourConversions.length === 0) {
+        if (alreadydeep.length === 0) {
             if (unattributedConversions.length > 0) {
                 return {
                     statusCode: 200,
@@ -64,11 +64,11 @@ exports.handler = async (event, context) => {
         }
         
         console.log(`📋 Found ${unattributedConversions.length} unattributed conversions`);
-        console.log(`🎯 Found ${unprocessed24HourConversions.length} not yet processed with 24-hour window`);
+        console.log(`🎯 Found ${alreadydeep.length} not yet processed with 24-hour window`);
         console.log(`🔍 Processing the first unprocessed conversion...`);
         
         // Step 4: Process the FIRST unprocessed conversion
-        const conversionToProcess = unprocessed24HourConversions[0];
+        const conversionToProcess = alreadydeep[0];
         
         console.log(`\n🔬 DEEP DIVE ANALYSIS: [PRIVACY PROTECTED]`);
         console.log(`   📍 IP: ${conversionToProcess.ip_address}`);
@@ -90,12 +90,12 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 7: Mark as processed with 24-hour flag
-        await markConversionAs24HourProcessed(conversionToProcess);
+        // Step 7: Mark as processed with alreadydeep flag
+        await markConversionAsAlreadyDeep(conversionToProcess);
         
         // Step 8: Generate response
         const remainingUnattributed = unattributedConversions.length - 1;
-        const remainingUnprocessed24H = unprocessed24HourConversions.length - 1;
+        const remainingUnprocessed24H = alreadydeep.length - 1;
         const wasSuccessful = improvementResults.matchFound;
         
         let summaryMessage;
@@ -242,15 +242,15 @@ function getUnattributedConversions(allConversions) {
 }
 
 // Filter out conversions that have already been processed with 24-hour window
-async function filterOut24HourProcessed(unattributedConversions) {
+async function alreadydeep(unattributedConversions) {
     const unprocessedConversions = [];
     let alreadyProcessed24HCount = 0;
     
     for (const conversion of unattributedConversions) {
-        const key24Hour = `24hour_processed:${conversion.email}:${conversion.timestamp}`;
+        const keyAlreadyDeep = `alreadydeep:${conversion.email}:${conversion.timestamp}`;
         
         try {
-            const processedData = await redisRequest('get', key24Hour);
+            const processedData = await redisRequest('get', keyAlreadyDeep);
             
             if (processedData) {
                 alreadyProcessed24HCount++;
@@ -393,10 +393,10 @@ async function findBestTemporalMatch(conversion, candidatePageviews, conversionG
     return null;
 }
 
-// Mark conversion as 24-hour processed
-async function markConversionAs24HourProcessed(conversion) {
+// Mark conversion as alreadydeep
+async function markConversionAsAlreadyDeep(conversion) {
     try {
-        const key24Hour = `24hour_processed:${conversion.email}:${conversion.timestamp}`;
+        const keyAlreadyDeep = `alreadydeep:${conversion.email}:${conversion.timestamp}`;
         const processedData = {
             email: conversion.email,
             timestamp: conversion.timestamp,
@@ -406,10 +406,10 @@ async function markConversionAs24HourProcessed(conversion) {
         };
         
         // Set with 30-day expiration
-        await redisRequest('setex', key24Hour, 2592000, JSON.stringify(processedData)); // 30 days
-        console.log(`   ✅ Marked conversion as 24-hour processed`);
+        await redisRequest('setex', keyAlreadyDeep, 2592000, JSON.stringify(processedData)); // 30 days
+        console.log(`   ✅ Marked conversion as alreadydeep`);
     } catch (error) {
-        console.log(`   ⚠️ Could not mark conversion as 24-hour processed: ${error.message}`);
+        console.log(`   ⚠️ Could not mark conversion as alreadydeep: ${error.message}`);
     }
 }
 
@@ -564,7 +564,7 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Compare geographic data
+// Compare geographic data - STRICTER CRITERIA
 function compareGeographicData(conversionGeo, pageviewGeo) {
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
@@ -592,7 +592,7 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
         isMatch = true;
     } else if (score >= 3) {
         confidence = 'POSSIBLE';
-        isMatch = true;
+        isMatch = false; // ← STRICTER: Reject city-only matches
     }
 
     return {
