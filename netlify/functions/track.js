@@ -1,5 +1,6 @@
 // File: netlify/functions/track.js
-// Enhanced Attribution with IPinfo Geographic Correlation - Solves IPv6/IPv4 dual-stack problem
+// Enhanced Attribution with IPinfo Geographic Correlation - OPTIMIZED VERSION
+// Key Fixes: 1) Direct IP match first, 2) Cached geo data, 3) Fixed timing bug
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -49,6 +50,56 @@ const handler = async (event, context) => {
     });
     return response.json();
   };
+
+  // NEW: Get cached geographic data from attribution records (major optimization)
+  async function getCachedGeoData(ip) {
+    try {
+      // Check if we already have geo data for this IP from pageview attribution
+      const encodedIP = ip.replace(/:/g, '_');
+      const ipKey = `attribution_ip_${encodedIP}`;
+      const attrKeyResult = await redis(`get/${ipKey}`);
+      
+      if (attrKeyResult.result) {
+        // Get the main attribution record
+        const attrResult = await redis(`get/${attrKeyResult.result}`);
+        if (attrResult.result) {
+          const attrData = JSON.parse(attrResult.result);
+          if (attrData.geographic_data) {
+            console.log(`✅ Using cached geo data for ${ip}: ${attrData.geographic_data.city}, ${attrData.geographic_data.region} (${attrData.geographic_data.isp})`);
+            return attrData.geographic_data;
+          }
+        }
+      }
+      
+      // Also try to find geo data in any recent attribution record with this IP
+      const geoKeys = await redis(`keys/attribution_geo_*`);
+      if (geoKeys.result && geoKeys.result.length > 0) {
+        for (const geoKey of geoKeys.result.slice(-20)) { // Check last 20 geo keys
+          try {
+            const mainKeyResult = await redis(`get/${geoKey}`);
+            if (mainKeyResult.result) {
+              const mainKey = mainKeyResult.result;
+              const attrResult = await redis(`get/${mainKey}`);
+              if (attrResult.result) {
+                const attrData = JSON.parse(attrResult.result);
+                if (attrData.ip_address === ip && attrData.geographic_data) {
+                  console.log(`✅ Found cached geo data via geo key for ${ip}`);
+                  return attrData.geographic_data;
+                }
+              }
+            }
+          } catch (geoError) {
+            continue; // Skip invalid geo keys
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.log(`⚠️ Cached geo lookup failed for ${ip}: ${error.message}`);
+      return null;
+    }
+  }
 
   // IPinfo Geographic Correlation Service
   class IPinfoService {
@@ -131,13 +182,11 @@ const handler = async (event, context) => {
     }
   }
 
-  // Enhanced Geographic Attribution Engine - Solves IPv6/IPv4 dual-stack problem
+  // OPTIMIZED Enhanced Geographic Attribution Engine - FIXED VERSION
   async function findAttributionWithGeoCorrelation(customerIP, customerEmail) {
-    const ipinfoService = new IPinfoService();
-    
     console.log('🌍 Starting enhanced attribution search for:', { customerIP, customerEmail });
 
-    // Step 1: Try direct IP lookup first (existing logic - fastest)
+    // STEP 1: Try direct IP lookup FIRST (no geo needed - major optimization)
     try {
       const lookupResponse = await fetch(
         `https://trackingojoy.netlify.app/.netlify/functions/store-attribution?ip=${customerIP}&timestamp=${new Date().toISOString()}`,
@@ -150,7 +199,7 @@ const handler = async (event, context) => {
       if (lookupResponse.ok) {
         const lookupResult = await lookupResponse.json();
         if (lookupResult.found) {
-          console.log('✅ Direct IP match found (highest confidence)');
+          console.log('✅ Direct IP match found (highest confidence) - no geo lookup needed');
           return {
             data: lookupResult.data,
             score: 200,
@@ -162,11 +211,15 @@ const handler = async (event, context) => {
       console.log('⚠️ Direct IP lookup failed:', error.message);
     }
 
-    // Step 2: Geographic correlation for IPv6/IPv4 dual-stack attribution
+    // STEP 2: Only NOW do geographic correlation (since direct match failed)
     console.log('🔍 No direct IP match - starting geographic correlation...');
     
-    // Get geographic data for conversion IP
-    const conversionGeo = await ipinfoService.getGeoData(customerIP);
+    const ipinfoService = new IPinfoService();
+    
+    // Get geographic data for conversion IP (check cache first, then API)
+    const conversionGeo = await getCachedGeoData(customerIP) || 
+                         await ipinfoService.getGeoData(customerIP);
+    
     console.log('🌍 Conversion geographic data:', {
       city: conversionGeo.city,
       region: conversionGeo.region,
@@ -179,7 +232,7 @@ const handler = async (event, context) => {
       return await fallbackAttributionLookup(customerEmail);
     }
 
-    // Get attribution keys for recent pageviews (focus on IPv6 addresses)
+    // STEP 3: Search attribution records with FIXED timing logic
     const windowStart = Date.now() - (2 * 60 * 60 * 1000); // 2 hours ago
     
     try {
@@ -210,14 +263,11 @@ const handler = async (event, context) => {
         return await fallbackAttributionLookup(customerEmail);
       }
 
-      let bestMatch = null;
-      let bestScore = 0;
-      let checkedCount = 0;
+      // FIXED TIMING LOGIC - Process keys and sort by timestamp
+      let validRecords = [];
 
-      // Check recent attribution records (last 100 for performance)
-      const keysToCheck = uniqueKeys.slice(-100);
-      
-      for (const key of keysToCheck) {
+      // First pass: Get all records with timestamps
+      for (const key of uniqueKeys) {
         try {
           const attrResult = await redis(`get/${key}`);
           if (!attrResult.result) continue;
@@ -225,51 +275,81 @@ const handler = async (event, context) => {
           const attrData = JSON.parse(attrResult.result);
           const attrTimestamp = new Date(attrData.timestamp).getTime();
           
-          // Only consider recent attribution (within 2 hours)
-          if (attrTimestamp < windowStart) continue;
-
-          // Get geographic data for attribution IP (will use cache if available)
-          const attrGeo = await ipinfoService.getGeoData(attrData.ip_address);
-          
-          // Calculate geographic correlation score
-          const geoScore = calculateGeographicScore(conversionGeo, attrGeo);
-          
-          // Calculate time proximity score (0-30 points)
-          const timeDiff = Math.abs(Date.now() - attrTimestamp);
-          const timeScore = Math.max(0, 30 - (timeDiff / (2 * 60 * 1000))); // 0-30 based on minutes
-          
-          // Calculate identity matching score
-          let identityScore = 0;
-          if (customerEmail && attrData.email === customerEmail) identityScore += 50;
-          if (attrData.session_id) identityScore += 10; // Session continuity bonus
-          
-          const totalScore = geoScore + timeScore + identityScore;
-          
-          console.log(`🧮 Score for ${attrData.ip_address}:`, {
-            geographic: geoScore,
-            time: Math.round(timeScore),
-            identity: identityScore,
-            total: Math.round(totalScore),
-            timeDiff: Math.round(timeDiff / 60000) + 'm',
-            cities: `${conversionGeo.city} vs ${attrGeo.city}`,
-            isps: `${conversionGeo.isp} vs ${attrGeo.isp}`
+          validRecords.push({
+            key,
+            data: attrData,
+            timestamp: attrTimestamp
           });
-
-          if (totalScore > bestScore && totalScore >= 100) { // 100+ point threshold
-            bestMatch = attrData;
-            bestScore = totalScore;
-          }
-
-          checkedCount++;
           
-          // Early exit if we find a very high confidence match
-          if (totalScore >= 150) {
-            console.log(`🎯 High confidence match found early, stopping search`);
-            break;
-          }
-
+          // Break early if we have enough records to avoid timeout
+          if (validRecords.length >= 200) break;
+          
         } catch (parseError) {
-          continue; // Skip invalid records
+          continue;
+        }
+      }
+
+      // Sort by timestamp (newest first) and filter by time window
+      const recentRecords = validRecords
+        .filter(record => record.timestamp >= windowStart)
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, 50); // Take top 50 most recent
+
+      console.log(`🔍 Found ${validRecords.length} valid records, ${recentRecords.length} within 2-hour window`);
+
+      if (recentRecords.length === 0) {
+        console.log('❌ No recent attribution records found within 2-hour window');
+        return await fallbackAttributionLookup(customerEmail);
+      }
+
+      let bestMatch = null;
+      let bestScore = 0;
+      let checkedCount = 0;
+
+      // Second pass: Process the recent records
+      for (const record of recentRecords) {
+        const attrData = record.data;
+        const attrTimestamp = record.timestamp;
+        
+        // Get geographic data for attribution IP (use cache first, then API)
+        const attrGeo = await getCachedGeoData(attrData.ip_address) || 
+                       await ipinfoService.getGeoData(attrData.ip_address);
+        
+        // Calculate geographic correlation score
+        const geoScore = calculateGeographicScore(conversionGeo, attrGeo);
+        
+        // Calculate time proximity score (0-30 points)
+        const timeDiff = Math.abs(Date.now() - attrTimestamp);
+        const timeScore = Math.max(0, 30 - (timeDiff / (2 * 60 * 1000))); // 0-30 based on minutes
+        
+        // Calculate identity matching score
+        let identityScore = 0;
+        if (customerEmail && attrData.email === customerEmail) identityScore += 50;
+        if (attrData.session_id) identityScore += 10; // Session continuity bonus
+        
+        const totalScore = geoScore + timeScore + identityScore;
+        
+        console.log(`🧮 Score for ${attrData.ip_address}:`, {
+          geographic: geoScore,
+          time: Math.round(timeScore),
+          identity: identityScore,
+          total: Math.round(totalScore),
+          timeDiff: Math.round(timeDiff / 60000) + 'm',
+          cities: `${conversionGeo.city} vs ${attrGeo.city}`,
+          isps: `${conversionGeo.isp} vs ${attrGeo.isp}`
+        });
+
+        if (totalScore > bestScore && totalScore >= 100) { // 100+ point threshold
+          bestMatch = attrData;
+          bestScore = totalScore;
+        }
+
+        checkedCount++;
+        
+        // Early exit if we find a very high confidence match
+        if (totalScore >= 150) {
+          console.log(`🎯 High confidence match found early, stopping search`);
+          break;
         }
       }
 
@@ -440,7 +520,7 @@ const handler = async (event, context) => {
       
       console.log('🔍 Customer IP extracted:', customerIP);
       
-      // Enhanced attribution with geographic correlation
+      // Enhanced attribution with geographic correlation (OPTIMIZED)
       attributionResult = await findAttributionWithGeoCorrelation(customerIP, data.email);
     }
     
