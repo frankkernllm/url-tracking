@@ -45,33 +45,33 @@ exports.handler = async (event, context) => {
         
         console.log(`🔍 REPROCESSING TARGET: POSSIBLE attribution conversions only`);
         
-        // Step 3: Get conversions with POSSIBLE attribution confidence (not already reprocessed)
-        console.log('🔍 Finding conversions with POSSIBLE attribution confidence...');
-        let possibleConversions = await filterPossibleAttributionConversions(allConversions);
+        // Step 3: Get initial list of unprocessed conversions (simple filtering only)
+        console.log('🔍 Getting initial list of non-reprocessed conversions...');
+        let unprocessedConversions = await filterNonReprocessedConversions(allConversions);
         
-        if (possibleConversions.length === 0) {
-            console.log('🎉 NO POSSIBLE CONVERSIONS FOUND TO REPROCESS!');
+        if (unprocessedConversions.length === 0) {
+            console.log('🎉 ALL CONVERSIONS ALREADY REPROCESSED!');
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'No POSSIBLE attribution conversions found to reprocess',
+                    message: 'All conversions already reprocessed',
                     progress: { 
                         total_conversions: allConversions.length, 
-                        possible_conversions: 0, 
+                        total_reprocessed: allConversions.length, 
                         remaining_conversions: 0, 
-                        status: 'NO_POSSIBLE_FOUND' 
+                        status: 'ALL_COMPLETE' 
                     }
                 })
             };
         }
         
-        console.log(`📋 Found ${possibleConversions.length} POSSIBLE attribution conversions to reprocess`);
-        console.log(`📊 Estimated batches needed: ${Math.ceil(possibleConversions.length / 3)}`);
+        console.log(`📋 Found ${unprocessedConversions.length} non-reprocessed conversions (will check for POSSIBLE inside loop)`);
+        console.log(`📊 Estimated max batches needed: ${Math.ceil(unprocessedConversions.length / 3)}`);
         
         // Main reprocessing loop - process conversions in batches of 3
-        while (possibleConversions.length > 0 && Date.now() - startTime < maxRunTime) {
+        while (unprocessedConversions.length > 0 && Date.now() - startTime < maxRunTime) {
             
             // Check if we have enough time for another batch
             const timeRemaining = maxRunTime - (Date.now() - startTime);
@@ -81,18 +81,28 @@ exports.handler = async (event, context) => {
             }
             
             // Step 4: Get next batch of 3 conversions
-            const batchSize = Math.min(3, possibleConversions.length);
-            const currentBatch = possibleConversions.splice(0, batchSize);
+            const batchSize = Math.min(3, unprocessedConversions.length);
+            const currentBatch = unprocessedConversions.splice(0, batchSize);
             const batchStartTime = Date.now();
             
-            console.log(`\n📦 REPROCESSING BATCH: ${batchSize} conversions (${possibleConversions.length} remaining after this batch)`);
+            console.log(`\n📦 CHECKING BATCH: ${batchSize} conversions (${unprocessedConversions.length} remaining after this batch)`);
             
             // Process each conversion in the current batch
             for (let i = 0; i < currentBatch.length; i++) {
                 const conversionToProcess = currentBatch[i];
                 const conversionStartTime = Date.now();
                 
-                console.log(`\n🎯 REPROCESSING ${i + 1}/${batchSize}: ${conversionToProcess.email}`);
+                console.log(`\n🔍 CHECKING ${i + 1}/${batchSize}: ${conversionToProcess.email}`);
+                
+                // Check if this conversion has POSSIBLE attribution (inside timeout-protected loop)
+                const hasPossibleAttribution = await checkForPossibleAttribution(conversionToProcess);
+                
+                if (!hasPossibleAttribution) {
+                    console.log(`   ⏭️  SKIP: Not POSSIBLE attribution - continuing to next conversion`);
+                    continue;
+                }
+                
+                console.log(`   🎯 REPROCESSING: Has POSSIBLE attribution`);
                 console.log(`   📍 IP: ${conversionToProcess.ip_address}`);
                 console.log(`   ⏰ Time: ${conversionToProcess.timestamp}`);
                 console.log(`   📊 Current POSSIBLE Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
@@ -134,23 +144,25 @@ exports.handler = async (event, context) => {
         
         // Final status calculation
         const totalTime = Date.now() - startTime;
-        const totalRemaining = possibleConversions.length;
+        const totalRemaining = unprocessedConversions.length; // Remaining in our list
+        const totalProcessed = allConversions.length - totalRemaining;
         const isComplete = totalRemaining === 0;
         
         console.log(`\n🏁 REPROCESSING COMPLETE:`);
         console.log(`   ⏱️  Total run time: ${totalTime/1000}s`);
-        console.log(`   ✅ Reprocessed in this run: ${processedInThisRun}`);
-        console.log(`   🔄 Remaining POSSIBLE conversions: ${totalRemaining}`);
-        console.log(`   🎯 Status: ${isComplete ? 'ALL POSSIBLE CONVERSIONS REPROCESSED' : 'RUN AGAIN TO CONTINUE'}`);
+        console.log(`   ✅ POSSIBLE conversions reprocessed in this run: ${processedInThisRun}`);
+        console.log(`   📊 Total conversions checked overall: ${totalProcessed}/${allConversions.length}`);
+        console.log(`   🔄 Remaining to check: ${totalRemaining}`);
+        console.log(`   🎯 Status: ${isComplete ? 'ALL CHECKED' : 'RUN AGAIN TO CONTINUE'}`);
         
         // Generate summary message
         let summaryMessage;
         if (isComplete) {
-            summaryMessage = `🎉 ALL POSSIBLE CONVERSIONS REPROCESSED! Evaluated ${processedInThisRun} conversions with stricter criteria.`;
+            summaryMessage = `🎉 ALL CONVERSIONS CHECKED! Found and reprocessed ${processedInThisRun} POSSIBLE conversions in final run.`;
         } else if (processedInThisRun > 0) {
-            summaryMessage = `✅ Reprocessed ${processedInThisRun} POSSIBLE conversions (${totalRemaining} remaining). Run again to continue.`;
+            summaryMessage = `✅ Reprocessed ${processedInThisRun} POSSIBLE conversions (${totalRemaining} conversions remaining to check). Run again to continue.`;
         } else {
-            summaryMessage = `⚠️ No conversions reprocessed (may be near timeout limit). ${totalRemaining} POSSIBLE conversions remaining.`;
+            summaryMessage = `⚠️ No POSSIBLE conversions found in this batch (${totalRemaining} conversions remaining to check).`;
         }
         
         return {
@@ -164,11 +176,12 @@ exports.handler = async (event, context) => {
                 message: summaryMessage,
                 progress: {
                     total_conversions: allConversions.length,
-                    possible_conversions_found: processedInThisRun + totalRemaining,
+                    total_checked: totalProcessed,
+                    possible_conversions_reprocessed: processedInThisRun,
                     reprocessed_this_batch: processedInThisRun,
-                    remaining_possible_conversions: totalRemaining,
-                    status: isComplete ? 'ALL_POSSIBLE_COMPLETE' : 'CONTINUE_REPROCESSING',
-                    next_action: isComplete ? 'All POSSIBLE conversions reprocessed with stricter criteria!' : 'Run the function again to continue reprocessing'
+                    remaining_conversions: totalRemaining,
+                    status: isComplete ? 'ALL_CHECKED' : 'CONTINUE_CHECKING',
+                    next_action: isComplete ? 'All conversions checked for POSSIBLE attribution!' : 'Run the function again to continue checking'
                 },
                 performance: {
                     total_run_time_seconds: totalTime / 1000,
@@ -257,14 +270,13 @@ function getAllConversions(conversions) {
     return sortedConversions;
 }
 
-// NEW: Filter conversions with POSSIBLE attribution confidence (not already reprocessed)
-async function filterPossibleAttributionConversions(allConversions) {
-    const possibleConversions = [];
+// Filter out conversions already marked as reprocessed (simple filtering only)
+async function filterNonReprocessedConversions(allConversions) {
+    const nonReprocessedConversions = [];
     let alreadyReprocessedCount = 0;
-    let possibleCount = 0;
     
     for (const conversion of allConversions) {
-        // Check if already reprocessed
+        // Only check if already reprocessed (simple Redis get)
         const reprocessedKey = `reprocessed_strict:${conversion.email}:${conversion.timestamp}`;
         
         try {
@@ -272,30 +284,20 @@ async function filterPossibleAttributionConversions(allConversions) {
             
             if (reprocessedData) {
                 alreadyReprocessedCount++;
-                continue;
+            } else {
+                nonReprocessedConversions.push(conversion);
             }
-            
-            // Check if this conversion has POSSIBLE attribution confidence
-            const hasPossibleAttribution = await checkForPossibleAttribution(conversion);
-            
-            if (hasPossibleAttribution) {
-                possibleCount++;
-                possibleConversions.push(conversion);
-                console.log(`   🔍 POSSIBLE: ${conversion.email} - ${conversion.landing_page || 'NO_ATTRIBUTION'}`);
-            }
-            
         } catch (error) {
-            // If we can't check status, skip for safety
-            console.log(`   ⚠️ Could not check reprocessing status for ${conversion.email}`);
+            // If we can't check status, assume not reprocessed
+            nonReprocessedConversions.push(conversion);
         }
     }
     
-    console.log(`📊 Attribution confidence breakdown:`);
-    console.log(`   🔍 POSSIBLE attributions found: ${possibleCount}`);
+    console.log(`📊 Reprocessing status breakdown:`);
     console.log(`   ✅ Already reprocessed: ${alreadyReprocessedCount}`);
-    console.log(`   🎯 Available for reprocessing: ${possibleConversions.length}`);
+    console.log(`   🎯 Available for checking: ${nonReprocessedConversions.length}`);
     
-    return possibleConversions;
+    return nonReprocessedConversions;
 }
 
 // Check if conversion has POSSIBLE attribution confidence
