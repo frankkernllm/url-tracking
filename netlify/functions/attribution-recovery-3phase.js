@@ -317,16 +317,16 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
         }
     };
     
-    // Find all pageviews in 3-hour window before conversion
-    const candidatePageviews = findPageviewsIn3HourWindow(conversion, pageviews);
+    // Find all pageviews in 90-minute window before conversion
+    const candidatePageviews = findPageviewsIn90MinuteWindow(conversion, pageviews);
     
     if (candidatePageviews.length === 0) {
-        console.log(`   ❌ No pageviews found in 3-hour window before conversion`);
+        console.log(`   ❌ No pageviews found in 90-minute window before conversion`);
         results.analysis.pageviews_in_window = 0;
         return results;
     }
     
-    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 3-hour window`);
+    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 90-minute window`);
     results.analysis.pageviews_in_window = candidatePageviews.length;
     
     // Get conversion geographic data
@@ -368,10 +368,10 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
     return results;
 }
 
-// Find pageviews in 3-hour window before conversion
-function findPageviewsIn3HourWindow(conversion, pageviews) {
+// Find pageviews in 90-minute window before conversion
+function findPageviewsIn90MinuteWindow(conversion, pageviews) {
     const conversionTime = new Date(conversion.timestamp);
-    const windowStart = new Date(conversionTime.getTime() - 3 * 60 * 60 * 1000); // 3 hours before
+    const windowStart = new Date(conversionTime.getTime() - 90 * 60 * 1000); // 90 minutes before
     
     const candidatePageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
