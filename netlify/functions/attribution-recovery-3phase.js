@@ -15,8 +15,8 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🎯 Starting JUNE 12-18 Batch Attribution Recovery (SPECIAL RUN)');
-        console.log('⚠️  BYPASSING processed check - will reprocess ALL unattributed conversions');
+        console.log('🎯 Starting JUNE 12-18 Batch Attribution Recovery (Progressive Batching)');
+        console.log('📋 Processing in batches of 3 with proper processed marker tracking');
         
         // OPTIMIZED CONFIGURATION - Cache working well, can process more
         const BATCH_SIZE = 3; // Process 3 conversions at a time (cache hit rate 70%+)
@@ -116,22 +116,6 @@ exports.handler = async (event, context) => {
     }
 };
 
-// NEW: Clear processed markers for conversions we want to reprocess
-async function clearProcessedMarkers(conversions) {
-    console.log('🧹 Clearing processed markers for June 12-18 conversions...');
-    
-    for (const conversion of conversions) {
-        try {
-            const processedKey = `processed_conversion:${conversion.email}:${conversion.timestamp}`;
-            await redisRequest('del', processedKey);
-            console.log(`🗑️  Cleared processed marker: ${conversion.email}`);
-        } catch (error) {
-            console.log(`⚠️ Could not clear processed marker for ${conversion.email}: ${error.message}`);
-            // Continue anyway - we're bypassing the check
-        }
-    }
-}
-
 // Global counters for cache statistics
 let cacheStats = {
     hits: 0,
@@ -191,7 +175,7 @@ async function markConversionsAsProcessed(conversions) {
                 timestamp: conversion.timestamp,
                 processed_at: new Date().toISOString(),
                 batch_id: Date.now(),
-                special_run: 'june_12_18_recovery'
+                special_run: 'june_12_18_progressive'
             };
             
             // Set with 7-day expiration to prevent Redis bloat
@@ -655,7 +639,7 @@ async function updateRecoveredAttributions(matches) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: 'june_12_18_special',
+                    recovery_method: 'june_12_18_progressive',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
