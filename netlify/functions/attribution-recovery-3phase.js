@@ -1,7 +1,7 @@
 exports.handler = async (event, context) => {
-    // TEST VERSION: Single Conversion Attribution Recovery - 6 Hour Window
-    // Takes the most recent unattributed conversion and checks 6 hours of pageview data
-    // Ignores processed status for testing purposes
+    // ATTRIBUTION IMPROVEMENT SYSTEM: Single Conversion Processing
+    // Processes one conversion at a time with comprehensive 24-hour attribution analysis
+    // Improves existing attribution by finding temporally closer matches
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -15,81 +15,115 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🧪 Starting TEST: Single Conversion Attribution Recovery (24-Hour Window)');
-        console.log('🎯 Testing most recent unattributed conversion with comprehensive pageview analysis');
+        console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM');
+        console.log('📋 Processing single conversion with comprehensive 24-hour attribution analysis');
         
-        // Step 1: Fetch analytics data from June 12-18
-        const analyticsData = await fetchAnalyticsDataJune1218();
+        // Step 1: Fetch analytics data from past 10 days (dynamic date range)
+        const analyticsData = await fetchAnalyticsDataPast10Days();
         
-        // Step 2: Find unattributed conversions
-        const allUnattributedConversions = findUnattributedConversions(analyticsData.conversions);
+        // Step 2: Find all conversions (not just unattributed)
+        const allConversions = getAllConversions(analyticsData.conversions);
         
-        if (allUnattributedConversions.length === 0) {
+        if (allConversions.length === 0) {
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'No unattributed conversions found in June 12-18 period',
-                    results: { total: 0, recovered: 0, test_mode: true }
+                    message: 'No conversions found in past 10 days',
+                    results: { total: 0, processed: 0, remaining: 0 }
                 })
             };
         }
         
-        // Step 3: Take the FIRST (most recent) unattributed conversion for testing
-        // Sort by timestamp descending to get the most recent first
-        allUnattributedConversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        const testConversion = allUnattributedConversions[0];
+        // Step 3: Filter out "newly updated" conversions
+        console.log('🔍 Filtering out already processed conversions...');
+        const unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
         
-        console.log(`🔬 TEST SUBJECT: ${testConversion.email}`);
-        console.log(`   📍 Conversion IP: ${testConversion.ip_address}`);
-        console.log(`   ⏰ Conversion Time: ${testConversion.timestamp}`);
-        console.log(`   📊 Testing 1 of ${allUnattributedConversions.length} unattributed conversions`);
+        if (unprocessedConversions.length === 0) {
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'All conversions from past 10 days have been processed!',
+                    results: { 
+                        total: allConversions.length, 
+                        processed: allConversions.length, 
+                        remaining: 0 
+                    },
+                    status: 'COMPLETE',
+                    next_action: 'All recent conversions have been optimized'
+                })
+            };
+        }
         
-        // Step 4: Analyze this single conversion with 24-hour comprehensive window
-        const recoveryResults = await analyzeSingleConversionComprehensive(testConversion, analyticsData.page_views);
+        // Step 4: Take the first unprocessed conversion
+        const conversionToProcess = unprocessedConversions[0];
+        const remainingAfterThis = unprocessedConversions.length - 1;
         
-        // Step 5: If match found, optionally update Redis (keeping test mode flag)
-        if (recoveryResults.matches.length > 0) {
-            console.log(`📝 Match found! Updating Redis with test recovery...`);
+        console.log(`🎯 PROCESSING CONVERSION: ${conversionToProcess.email}`);
+        console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
+        console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
+        console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
+        console.log(`   📈 Progress: 1 of ${unprocessedConversions.length} remaining conversions`);
+        
+        // Step 5: Analyze this conversion with 24-hour attribution improvement
+        const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
+        
+        // Step 6: Update Redis with improved attribution
+        let updateResult = null;
+        if (improvementResults.shouldUpdate) {
+            console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
             try {
-                await updateRecoveredAttributions(recoveryResults.matches, true); // true = test mode
+                updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
             } catch (redisError) {
-                console.error('❌ Redis update failed but recovery succeeded:', redisError);
+                console.error('❌ Redis update failed:', redisError);
             }
         }
         
-        // Step 6: Return comprehensive test results
+        // Step 7: Mark conversion as "newly updated"
+        await markConversionAsNewlyUpdated(conversionToProcess);
+        
+        // Step 8: Return processing status
+        const isComplete = remainingAfterThis === 0;
+        const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, remainingAfterThis, isComplete);
+        
         return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
                 success: true,
-                test_mode: true,
-                test_subject: {
-                    email: testConversion.email,
-                    ip_address: testConversion.ip_address,
-                    timestamp: testConversion.timestamp
+                processed_conversion: {
+                    email: conversionToProcess.email,
+                    timestamp: conversionToProcess.timestamp,
+                    original_attribution: conversionToProcess.landing_page || null,
+                    improvement_found: improvementResults.matchFound,
+                    new_attribution: improvementResults.newAttribution || null,
+                    improvement_type: improvementResults.improvementType
                 },
-                results: recoveryResults,
-                message: recoveryResults.matches.length > 0 ? 
-                    `TEST SUCCESS: Found attribution match for ${testConversion.email} in 24-hour window` :
-                    `TEST COMPLETE: No attribution match found for ${testConversion.email} in 24-hour comprehensive search`,
-                total_unattributed: allUnattributedConversions.length,
-                date_range: 'June 12-18, 2025',
-                search_window: '24 hours comprehensive'
+                results: improvementResults,
+                message: statusMessage,
+                progress: {
+                    total_conversions: allConversions.length,
+                    already_processed: allConversions.length - unprocessedConversions.length,
+                    remaining_conversions: remainingAfterThis,
+                    status: isComplete ? 'COMPLETE' : 'CONTINUE',
+                    next_action: isComplete ? 'All conversions optimized!' : 'Run again to process next conversion'
+                },
+                date_range: 'Past 10 days (dynamic)',
+                update_result: updateResult
             })
         };
 
     } catch (error) {
-        console.error('❌ Test attribution recovery error:', error);
+        console.error('❌ Attribution improvement system error:', error);
         return {
             statusCode: 500,
             headers,
             body: JSON.stringify({
-                error: 'Test attribution recovery failed',
-                details: error.message,
-                test_mode: true
+                error: 'Attribution improvement system failed',
+                details: error.message
             })
         };
     }
@@ -102,253 +136,23 @@ let cacheStats = {
     errors: 0
 };
 
-// Analyze single conversion with comprehensive 24-hour window
-async function analyzeSingleConversionComprehensive(conversion, pageviews) {
-    console.log('🔬 COMPREHENSIVE TEST: Analyzing single conversion with 24-hour pageview window...');
+// Fetch analytics data for past 10 days (dynamic date range)
+async function fetchAnalyticsDataPast10Days() {
+    console.log('📊 Fetching analytics data for past 10 days...');
     
-    // Reset cache statistics for this test
-    cacheStats = { hits: 0, misses: 0, errors: 0 };
+    // Calculate dynamic date range
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - 10);
     
-    const results = {
-        total: 1,
-        recovered: 0,
-        matches: [],
-        test_details: {
-            conversion_analyzed: conversion.email,
-            search_window_minutes: 1440, // 24 hours
-            total_pageviews_checked: 0,
-            ipv6_pageviews_in_window: 0,
-            geographic_lookups_performed: 0,
-            cache_performance: {}
-        }
-    };
+    const startDateStr = startDate.toISOString().split('T')[0];
+    const endDateStr = endDate.toISOString().split('T')[0];
     
-    console.log(`🔍 ANALYZING TEST CONVERSION: ${conversion.email}`);
-    console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
-    console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
-    
-    // Find ALL pageviews in 24-hour window (1440 minutes)
-    const candidatePageviews = findAllPageviewsInWindow(conversion, pageviews, 0, 1440);
-    
-    if (candidatePageviews.length === 0) {
-        console.log(`   ❌ No pageviews found in 24-hour window`);
-        results.test_details.ipv6_pageviews_in_window = 0;
-        return results;
-    }
-    
-    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 24-hour window`);
-    results.test_details.ipv6_pageviews_in_window = candidatePageviews.length;
-    
-    // Get geographic data for conversion IP
-    console.log(`   🌍 Looking up conversion location...`);
-    const conversionGeoData = await getIPLocationData(conversion.ip_address);
-    console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
-    
-    // Check EVERY pageview for geographic match (comprehensive test)
-    console.log(`   🔍 Starting comprehensive geographic matching...`);
-    const match = await checkAllPageviewCandidates(conversion, candidatePageviews, conversionGeoData);
-    
-    if (match) {
-        console.log(`   ✅ COMPREHENSIVE TEST: MATCH FOUND!`);
-        
-        results.matches.push({
-            conversion: conversion,
-            match: match,
-            phase: 'COMPREHENSIVE_24H',
-            confidence: match.confidence
-        });
-        
-        results.recovered = 1;
-    } else {
-        console.log('   ❌ COMPREHENSIVE TEST: No matches found in entire 24-hour window');
-    }
-    
-    // Final cache statistics
-    const totalCacheLookups = cacheStats.hits + cacheStats.misses + cacheStats.errors;
-    const cacheHitRate = totalCacheLookups > 0 ? ((cacheStats.hits / totalCacheLookups) * 100).toFixed(1) : 0;
-    
-    results.test_details.cache_performance = {
-        cache_hits: cacheStats.hits,
-        cache_misses: cacheStats.misses,
-        cache_errors: cacheStats.errors,
-        cache_hit_rate_percent: cacheHitRate,
-        fresh_api_calls_needed: cacheStats.misses
-    };
-    
-    console.log(`📈 COMPREHENSIVE TEST CACHE STATISTICS:`);
-    console.log(`   💾 Cache hits: ${cacheStats.hits}`);
-    console.log(`   📭 Cache misses: ${cacheStats.misses}`);
-    console.log(`   ❌ Cache errors: ${cacheStats.errors}`);
-    console.log(`   📊 Cache hit rate: ${cacheHitRate}%`);
-    console.log(`   🌍 Fresh API calls needed: ${cacheStats.misses}`);
-    
-    console.log(`🏁 Comprehensive Test Complete: ${results.recovered}/1 conversion recovered`);
-    return results;
-}
-
-// Find ALL pageviews (both IPv4 and IPv6) within time window for comprehensive testing
-function findAllPageviewsInWindow(conversion, pageviews, startMinutes, endMinutes) {
-    const conversionTime = new Date(conversion.timestamp);
-    const windowStart = new Date(conversionTime.getTime() - endMinutes * 60 * 1000);
-    const windowEnd = new Date(conversionTime.getTime() - startMinutes * 60 * 1000);
-    
-    console.log(`   🕐 COMPREHENSIVE Search window: ${windowStart.toISOString()} to ${windowEnd.toISOString()}`);
-    console.log(`   ⏱️  Window size: ${endMinutes} minutes (${endMinutes/60} hours)`);
-    
-    // Filter pageviews in time window - including BOTH IPv4 and IPv6 for comprehensive test
-    const candidatePageviews = pageviews.filter(pv => {
-        const pvTime = new Date(pv.timestamp);
-        return pvTime >= windowStart && 
-               pvTime <= conversionTime && 
-               pv.ip_address; // Any IP address (both IPv4 and IPv6)
-    });
-    
-    // SORT BY TIMESTAMP - NEWEST FIRST (most recent pageviews checked first)
-    candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    // Count IPv4 vs IPv6 for analysis
-    const ipv4Count = candidatePageviews.filter(pv => !pv.ip_address.includes(':')).length;
-    const ipv6Count = candidatePageviews.filter(pv => pv.ip_address.includes(':')).length;
-    
-    console.log(`   📊 Found ${candidatePageviews.length} total pageviews in time window out of ${pageviews.length} total pageviews`);
-    console.log(`   🌐 IP breakdown: ${ipv4Count} IPv4, ${ipv6Count} IPv6`);
-    console.log(`   🕐 Sorted by timestamp (newest first) - will check most recent matches first`);
-    console.log(`   🔬 COMPREHENSIVE TEST: No limits - checking ALL pageviews in 24-hour window`);
-    
-    return candidatePageviews;
-}
-
-// Check ALL pageview candidates for comprehensive testing
-async function checkAllPageviewCandidates(conversion, candidatePageviews, conversionGeoData) {
-    let freshApiCallCount = 0;
-    let totalChecked = 0;
-    let bestMatch = null;
-    let bestScore = 0;
-    
-    console.log(`   🔍 COMPREHENSIVE CHECK: Analyzing ${candidatePageviews.length} pageviews...`);
-    
-    for (let i = 0; i < candidatePageviews.length; i++) {
-        const pageview = candidatePageviews[i];
-        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
-        const ipType = pageview.ip_address.includes(':') ? 'IPv6' : 'IPv4';
-        
-        totalChecked++;
-        
-        console.log(`   🌐 Candidate ${i + 1}/${candidatePageviews.length}: ${pageview.ip_address} (${ipType})`);
-        console.log(`      ⏰ Pageview Time: ${pageview.timestamp} (${timeDiff.toFixed(1)} min before)`);
-        console.log(`      📄 Landing Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
-        
-        // Use unified cache/fresh lookup
-        const startTime = Date.now();
-        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
-        const lookupTime = Date.now() - startTime;
-        
-        // Count fresh API calls for statistics
-        if (lookupTime > 100) { // Likely a fresh API call if it took >100ms
-            freshApiCallCount++;
-        }
-        
-        console.log(`      📍 ${ipType} Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
-        
-        // Compare geographic data
-        const match = compareGeographicData(conversionGeoData, pageviewGeoData);
-        
-        if (match.isMatch) {
-            console.log(`      ✅ GEOGRAPHIC MATCH FOUND! (${match.confidence}, Score: ${match.score})`);
-            console.log(`         🎯 City: ${match.cityMatch ? '✓' : '✗'} | Region: ${match.regionMatch ? '✓' : '✗'} | Country: ${match.countryMatch ? '✓' : '✗'} | ISP: ${match.ispMatch ? '✓' : '✗'}`);
-            
-            // In comprehensive mode, keep checking to find the BEST match
-            if (match.score > bestScore) {
-                bestScore = match.score;
-                bestMatch = {
-                    pageview: pageview,
-                    score: match.score,
-                    timeDiff: timeDiff,
-                    confidence: match.confidence,
-                    conversionGeo: conversionGeoData,
-                    pageviewGeo: pageviewGeoData,
-                    ipType: ipType,
-                    candidateNumber: i + 1
-                };
-                console.log(`      🏆 NEW BEST MATCH! Score: ${match.score}`);
-            } else {
-                console.log(`      ✅ Good match but lower score than current best (${match.score} vs ${bestScore})`);
-            }
-        } else {
-            console.log(`      ❌ No geographic match (${match.confidence}, Score: ${match.score})`);
-        }
-        
-        // Log progress every 10 checks for long lists
-        if ((i + 1) % 10 === 0) {
-            console.log(`   📊 Progress: ${i + 1}/${candidatePageviews.length} checked, ${freshApiCallCount} API calls so far`);
-        }
-    }
-    
-    console.log(`   📊 COMPREHENSIVE CHECK COMPLETE:`);
-    console.log(`      🔍 Total pageviews analyzed: ${totalChecked}`);
-    console.log(`      🌍 Estimated fresh API calls: ${freshApiCallCount}`);
-    console.log(`      🏆 Best match score: ${bestScore}`);
-    
-    if (bestMatch) {
-        console.log(`   🎯 RETURNING BEST MATCH: Candidate #${bestMatch.candidateNumber} (${bestMatch.ipType}) with score ${bestMatch.score}`);
-    }
-    
-    return bestMatch;
-}
-
-// NEW: Get cached geographic data using SAME cache structure as track.js
-async function getCachedGeoData(ip) {
-    try {
-        // Use SAME cache key format as track.js IPinfoService
-        const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
-        
-        console.log(`   🔍 Checking track.js style cache for key: ${cacheKey}`);
-        const cachedResult = await redisRequest('get', cacheKey);
-        
-        if (cachedResult === null || cachedResult === undefined) {
-            console.log(`   📭 Cache miss: No geo_cache key found for ${ip}`);
-            cacheStats.misses++;
-            return null;
-        }
-        
-        if (cachedResult) {
-            try {
-                // Decode the cached data (track.js uses encodeURIComponent)
-                const cachedData = JSON.parse(decodeURIComponent(cachedResult));
-                console.log(`   💾 Cache HIT for ${ip}: ${cachedData.city}, ${cachedData.region} (${cachedData.isp})`);
-                cacheStats.hits++;
-                return cachedData;
-            } catch (parseError) {
-                console.log(`   ❌ Cache parse error for ${ip}: ${parseError.message}`);
-                cacheStats.errors++;
-                return null;
-            }
-        }
-        
-        console.log(`   📭 Cache miss: No usable geo data for ${ip}`);
-        cacheStats.misses++;
-        return null;
-        
-    } catch (error) {
-        console.log(`   ❌ Cache lookup ERROR for ${ip}: ${error.message}`);
-        cacheStats.errors++;
-        return null;
-    }
-}
-
-// MODIFIED: Fetch analytics data for June 12-18 specifically
-async function fetchAnalyticsDataJune1218() {
-    console.log('📊 Fetching analytics data for June 12-18, 2025...');
-    
-    // FIXED DATE RANGE for June 12-18 batch
-    const startDate = '2025-06-12';
-    const endDate = '2025-06-18';
-    
-    console.log(`📅 Date range: ${startDate} to ${endDate} (June 12-18 test)`);
+    console.log(`📅 Dynamic date range: ${startDateStr} to ${endDateStr} (past 10 days)`);
     
     const params = new URLSearchParams();
-    params.append('start_date', startDate);
-    params.append('end_date', endDate);
+    params.append('start_date', startDateStr);
+    params.append('end_date', endDateStr);
     
     const apiUrl = `https://trackingojoy.netlify.app/.netlify/functions/analytics?${params}`;
     
@@ -365,7 +169,7 @@ async function fetchAnalyticsDataJune1218() {
     }
     
     const data = await response.json();
-    console.log(`✅ Analytics data loaded for ${startDate} to ${endDate}:`);
+    console.log(`✅ Analytics data loaded for ${startDateStr} to ${endDateStr}:`);
     console.log(`   📊 Total conversions: ${data.conversions?.length || 0}`);
     console.log(`   📊 Total pageviews: ${data.page_views?.length || 0}`);
     
@@ -378,38 +182,390 @@ async function fetchAnalyticsDataJune1218() {
     return data;
 }
 
-// Step 2: Find unattributed conversions (UNCHANGED - identical to original)
-function findUnattributedConversions(conversions) {
+// Get ALL conversions (not just unattributed)
+function getAllConversions(conversions) {
     if (!conversions || conversions.length === 0) {
         console.log('❌ No conversions found in analytics data');
         return [];
     }
     
-    const unattributed = conversions.filter(conv => 
-        conv.attribution_found === false || 
-        !conv.landing_page || 
-        conv.landing_page === ''
-    );
+    // Sort by timestamp (oldest first for systematic processing)
+    const sortedConversions = conversions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
-    console.log(`🚨 Found ${unattributed.length} unattributed conversions out of ${conversions.length} total`);
-    
-    if (unattributed.length > 0) {
-        console.log('📋 Unattributed conversions:');
-        unattributed.forEach((conv, index) => {
-            console.log(`   ${index + 1}. ${conv.email} | ${conv.ip_address} | ${conv.timestamp}`);
-        });
+    console.log(`📊 Found ${sortedConversions.length} total conversions for attribution improvement`);
+    console.log('📋 All conversions (oldest first):');
+    sortedConversions.slice(0, 5).forEach((conv, index) => {
+        const attribution = conv.landing_page ? `${conv.landing_page}` : 'NO ATTRIBUTION';
+        console.log(`   ${index + 1}. ${conv.email} | ${conv.timestamp} | ${attribution}`);
+    });
+    if (sortedConversions.length > 5) {
+        console.log(`   ... and ${sortedConversions.length - 5} more`);
     }
     
-    return unattributed;
+    return sortedConversions;
 }
 
-// OPTIMIZED: Get location/ISP data using SAME cache structure as track.js
+// Filter out conversions marked as "newly updated"
+async function filterNewlyUpdatedConversions(allConversions) {
+    console.log(`🔍 Checking "newly updated" status for ${allConversions.length} conversions...`);
+    
+    const unprocessedConversions = [];
+    let newlyUpdatedCount = 0;
+    
+    for (const conversion of allConversions) {
+        const newlyUpdatedKey = `newly_updated:${conversion.email}:${conversion.timestamp}`;
+        
+        try {
+            const updatedData = await redisRequest('get', newlyUpdatedKey);
+            
+            if (updatedData) {
+                newlyUpdatedCount++;
+                console.log(`✅ Already processed: ${conversion.email}`);
+            } else {
+                unprocessedConversions.push(conversion);
+                console.log(`🔄 Needs processing: ${conversion.email}`);
+            }
+        } catch (error) {
+            // If we can't check status, assume unprocessed
+            console.log(`⚠️ Could not check status for ${conversion.email}, assuming unprocessed`);
+            unprocessedConversions.push(conversion);
+        }
+    }
+    
+    console.log(`📊 Filter complete: ${newlyUpdatedCount} already processed, ${unprocessedConversions.length} need processing`);
+    return unprocessedConversions;
+}
+
+// Analyze single conversion for attribution improvement
+async function analyzeConversionForAttribution(conversion, pageviews) {
+    console.log('🔬 ATTRIBUTION ANALYSIS: Finding best temporal match for conversion...');
+    
+    // Reset cache statistics
+    cacheStats = { hits: 0, misses: 0, errors: 0 };
+    
+    const results = {
+        conversionEmail: conversion.email,
+        originalAttribution: conversion.landing_page || null,
+        matchFound: false,
+        newAttribution: null,
+        shouldUpdate: false,
+        improvementType: 'NO_CHANGE',
+        match: null,
+        analysis: {
+            pageviews_in_window: 0,
+            geographic_lookups: 0,
+            cache_performance: {}
+        }
+    };
+    
+    console.log(`🔍 ANALYZING: ${conversion.email}`);
+    console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
+    console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
+    console.log(`   📄 Current Attribution: ${conversion.landing_page || 'NONE'}`);
+    
+    // Find all pageviews in 24-hour window before conversion
+    const candidatePageviews = findPageviewsIn24HourWindow(conversion, pageviews);
+    
+    if (candidatePageviews.length === 0) {
+        console.log(`   ❌ No pageviews found in 24-hour window before conversion`);
+        results.analysis.pageviews_in_window = 0;
+        return results;
+    }
+    
+    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 24-hour window`);
+    results.analysis.pageviews_in_window = candidatePageviews.length;
+    
+    // Get conversion geographic data
+    console.log(`   🌍 Looking up conversion location...`);
+    const conversionGeoData = await getIPLocationData(conversion.ip_address);
+    console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
+    
+    // Find the best temporal match
+    const bestMatch = await findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData);
+    
+    if (bestMatch) {
+        console.log(`   ✅ ATTRIBUTION MATCH FOUND!`);
+        
+        results.matchFound = true;
+        results.newAttribution = bestMatch.pageview.landing_page || bestMatch.pageview.url;
+        results.match = bestMatch;
+        
+        // Determine if we should update
+        const shouldUpdate = shouldUpdateAttribution(conversion, bestMatch);
+        results.shouldUpdate = shouldUpdate.update;
+        results.improvementType = shouldUpdate.type;
+        
+        console.log(`   🎯 Update Decision: ${shouldUpdate.update ? 'YES' : 'NO'} (${shouldUpdate.type})`);
+        
+    } else {
+        console.log('   ❌ No geographic matches found in 24-hour window');
+        results.improvementType = 'NO_MATCH_FOUND';
+    }
+    
+    // Cache performance stats
+    const totalLookups = cacheStats.hits + cacheStats.misses + cacheStats.errors;
+    const hitRate = totalLookups > 0 ? ((cacheStats.hits / totalLookups) * 100).toFixed(1) : 0;
+    
+    results.analysis.cache_performance = {
+        cache_hits: cacheStats.hits,
+        cache_misses: cacheStats.misses,
+        cache_hit_rate_percent: hitRate,
+        fresh_api_calls: cacheStats.misses
+    };
+    
+    console.log(`📈 ANALYSIS COMPLETE:`);
+    console.log(`   💾 Cache hits: ${cacheStats.hits}, misses: ${cacheStats.misses} (${hitRate}% hit rate)`);
+    console.log(`   🌍 Fresh API calls: ${cacheStats.misses}`);
+    
+    return results;
+}
+
+// Find pageviews in 24-hour window before conversion
+function findPageviewsIn24HourWindow(conversion, pageviews) {
+    const conversionTime = new Date(conversion.timestamp);
+    const windowStart = new Date(conversionTime.getTime() - 24 * 60 * 60 * 1000); // 24 hours before
+    
+    console.log(`   🕐 24-hour window: ${windowStart.toISOString()} to ${conversionTime.toISOString()}`);
+    
+    const candidatePageviews = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        return pvTime >= windowStart && 
+               pvTime <= conversionTime && 
+               pv.ip_address; // Must have IP address
+    });
+    
+    // Sort by timestamp DESCENDING (newest first = closest to conversion)
+    candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    const ipv4Count = candidatePageviews.filter(pv => !pv.ip_address.includes(':')).length;
+    const ipv6Count = candidatePageviews.filter(pv => pv.ip_address.includes(':')).length;
+    
+    console.log(`   📊 Found ${candidatePageviews.length} pageviews in window (IPv4: ${ipv4Count}, IPv6: ${ipv6Count})`);
+    console.log(`   ⏰ Sorted by timestamp (newest first) for optimal temporal matching`);
+    
+    return candidatePageviews;
+}
+
+// Find best temporal match (closest to conversion time)
+async function findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData) {
+    console.log(`   🔍 TEMPORAL MATCHING: Checking pageviews for geographic correlation...`);
+    console.log(`   ⚡ Strategy: First acceptable match wins (prioritizing recency)`);
+    
+    for (let i = 0; i < candidatePageviews.length; i++) {
+        const pageview = candidatePageviews[i];
+        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
+        const ipType = pageview.ip_address.includes(':') ? 'IPv6' : 'IPv4';
+        
+        console.log(`   🌐 Checking ${i + 1}/${candidatePageviews.length}: ${pageview.ip_address} (${ipType})`);
+        console.log(`      ⏰ ${timeDiff.toFixed(1)} min before conversion`);
+        console.log(`      📄 Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
+        
+        // Get pageview geographic data
+        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
+        console.log(`      📍 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
+        
+        // Compare geographic data
+        const geoMatch = compareGeographicData(conversionGeoData, pageviewGeoData);
+        
+        if (geoMatch.isMatch) {
+            console.log(`      ✅ TEMPORAL MATCH FOUND! (${geoMatch.confidence}, Score: ${geoMatch.score})`);
+            console.log(`         🎯 Match: City: ${geoMatch.cityMatch ? '✓' : '✗'} | Region: ${geoMatch.regionMatch ? '✓' : '✗'} | Country: ${geoMatch.countryMatch ? '✓' : '✗'} | ISP: ${geoMatch.ispMatch ? '✓' : '✗'}`);
+            console.log(`      🏆 SELECTED: Most recent geographic match (${timeDiff.toFixed(1)} min before conversion)`);
+            
+            return {
+                pageview: pageview,
+                score: geoMatch.score,
+                timeDiff: timeDiff,
+                confidence: geoMatch.confidence,
+                conversionGeo: conversionGeoData,
+                pageviewGeo: pageviewGeoData,
+                ipType: ipType,
+                candidateNumber: i + 1
+            };
+        } else {
+            console.log(`      ❌ No geographic match (${geoMatch.confidence}, Score: ${geoMatch.score})`);
+        }
+        
+        // Progress logging for large datasets
+        if ((i + 1) % 50 === 0) {
+            console.log(`   📊 Progress: ${i + 1}/${candidatePageviews.length} checked`);
+        }
+    }
+    
+    console.log(`   ❌ No geographic matches found in any of ${candidatePageviews.length} pageviews`);
+    return null;
+}
+
+// Determine if attribution should be updated
+function shouldUpdateAttribution(conversion, newMatch) {
+    const hasCurrentAttribution = conversion.landing_page && conversion.landing_page !== '';
+    const newAttribution = newMatch.pageview.landing_page || newMatch.pageview.url;
+    
+    if (!hasCurrentAttribution) {
+        // No current attribution - always create new
+        console.log(`   🆕 CREATE: No existing attribution, adding new attribution`);
+        return { update: true, type: 'NEW_ATTRIBUTION' };
+    }
+    
+    // Has existing attribution - check temporal precedence
+    const currentAttributionTime = conversion.attributed_pageview_timestamp || conversion.timestamp;
+    const newMatchTime = newMatch.pageview.timestamp;
+    
+    if (new Date(newMatchTime) < new Date(currentAttributionTime)) {
+        // New match occurred before current attribution
+        console.log(`   ⬆️ IMPROVE: New match occurred before current attribution`);
+        console.log(`      📅 Current: ${currentAttributionTime}`);
+        console.log(`      📅 New: ${newMatchTime}`);
+        return { update: true, type: 'TEMPORAL_IMPROVEMENT' };
+    } else {
+        // Current attribution is already earlier
+        console.log(`   ✋ KEEP: Current attribution occurred before new match`);
+        console.log(`      📅 Current: ${currentAttributionTime} (keeping)`);
+        console.log(`      📅 New: ${newMatchTime} (skipping)`);
+        return { update: false, type: 'NO_IMPROVEMENT' };
+    }
+}
+
+// Mark conversion as newly updated
+async function markConversionAsNewlyUpdated(conversion) {
+    console.log(`📝 Marking ${conversion.email} as newly updated...`);
+    
+    try {
+        const newlyUpdatedKey = `newly_updated:${conversion.email}:${conversion.timestamp}`;
+        const updatedData = {
+            email: conversion.email,
+            timestamp: conversion.timestamp,
+            processed_at: new Date().toISOString(),
+            system: 'attribution_improvement'
+        };
+        
+        // Set with 30-day expiration
+        await redisRequest('setex', newlyUpdatedKey, 2592000, JSON.stringify(updatedData)); // 30 days
+        console.log(`✅ Marked as newly updated: ${conversion.email}`);
+    } catch (error) {
+        console.log(`⚠️ Could not mark ${conversion.email} as newly updated: ${error.message}`);
+    }
+}
+
+// Generate status message
+function generateStatusMessage(conversion, results, remaining, isComplete) {
+    const email = conversion.email;
+    
+    if (isComplete) {
+        return `Attribution improvement COMPLETE! Processed final conversion: ${email}. All recent conversions have been optimized.`;
+    }
+    
+    if (results.shouldUpdate) {
+        const type = results.improvementType === 'NEW_ATTRIBUTION' ? 'NEW attribution created' : 'Attribution IMPROVED';
+        return `${type} for ${email}: ${results.newAttribution}. ${remaining} conversions remaining - run again to continue.`;
+    } else if (results.matchFound) {
+        return `Analyzed ${email}: Current attribution is already optimal. ${remaining} conversions remaining - run again to continue.`;
+    } else {
+        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remaining} conversions remaining - run again to continue.`;
+    }
+}
+
+// Update conversion attribution in Redis
+async function updateConversionAttribution(conversion, improvementResults) {
+    console.log(`📝 Updating attribution for ${conversion.email}...`);
+    
+    try {
+        // Find the conversion record in Redis
+        const conversionKey = await findConversionKey(conversion);
+        
+        if (conversionKey) {
+            // Get existing data
+            const existingData = await redisRequest('get', conversionKey);
+            let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
+            
+            // Update with improved attribution
+            const updatedConversion = {
+                ...conversionData,
+                attribution_found: true,
+                landing_page: improvementResults.newAttribution,
+                source: improvementResults.match.pageview.source || 'improved',
+                utm_campaign: improvementResults.match.pageview.utm_campaign || conversionData.utm_campaign,
+                utm_medium: improvementResults.match.pageview.utm_medium || conversionData.utm_medium,
+                referrer_url: improvementResults.match.pageview.referrer_url || conversionData.referrer_url,
+                // Attribution improvement metadata
+                attribution_improvement: {
+                    method: 'temporal_optimization',
+                    improvement_type: improvementResults.improvementType,
+                    confidence: improvementResults.match.confidence,
+                    score: improvementResults.match.score,
+                    time_difference_minutes: improvementResults.match.timeDiff,
+                    improved_at: new Date().toISOString(),
+                    pageview_ip: improvementResults.match.pageview.ip_address,
+                    pageview_timestamp: improvementResults.match.pageview.timestamp
+                },
+                // Store previous attribution if it existed
+                previous_attribution: conversionData.landing_page || null,
+                attributed_pageview_timestamp: improvementResults.match.pageview.timestamp
+            };
+            
+            // Save back to Redis
+            await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
+            
+            console.log(`✅ Successfully updated ${conversion.email}`);
+            console.log(`   📄 New attribution: ${improvementResults.newAttribution}`);
+            console.log(`   🕐 Pageview time: ${improvementResults.match.pageview.timestamp}`);
+            
+            return {
+                success: true,
+                updated_attribution: improvementResults.newAttribution,
+                previous_attribution: conversionData.landing_page || null,
+                improvement_type: improvementResults.improvementType
+            };
+            
+        } else {
+            console.log(`⚠️ Could not find Redis key for ${conversion.email}`);
+            return { success: false, error: 'Conversion not found in Redis' };
+        }
+        
+    } catch (error) {
+        console.log(`❌ Failed to update ${conversion.email}: ${error.message}`);
+        return { success: false, error: error.message };
+    }
+}
+
+// NEW: Get cached geographic data using SAME cache structure as track.js
+async function getCachedGeoData(ip) {
+    try {
+        const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
+        const cachedResult = await redisRequest('get', cacheKey);
+        
+        if (cachedResult === null || cachedResult === undefined) {
+            cacheStats.misses++;
+            return null;
+        }
+        
+        if (cachedResult) {
+            try {
+                const cachedData = JSON.parse(decodeURIComponent(cachedResult));
+                cacheStats.hits++;
+                return cachedData;
+            } catch (parseError) {
+                cacheStats.errors++;
+                return null;
+            }
+        }
+        
+        cacheStats.misses++;
+        return null;
+        
+    } catch (error) {
+        cacheStats.errors++;
+        return null;
+    }
+}
+
+// Get location/ISP data using cache
 async function getIPLocationData(ip) {
-    // Check cache first using SAME logic as track.js
+    // Check cache first
     const cached = await getCachedGeoData(ip);
     if (cached) return cached;
     
-    // Make fresh API call and cache using SAME format as track.js
+    // Make fresh API call
     const token = process.env.IPINFO_TOKEN || 'dd31c7ae01d4e4';
     const url = `https://ipinfo.io/${ip}?token=${token}`;
     
@@ -417,7 +573,7 @@ async function getIPLocationData(ip) {
         const response = await fetch(url, {
             method: 'GET',
             headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(2000) // 2 second timeout like track.js
+            signal: AbortSignal.timeout(2000)
         });
         
         if (response.ok) {
@@ -434,14 +590,13 @@ async function getIPLocationData(ip) {
                 lookup_timestamp: new Date().toISOString()
             };
             
-            // Cache using SAME format as track.js (24 hours = 86400 seconds)
+            // Cache the result
             try {
                 const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
                 const encodedData = encodeURIComponent(JSON.stringify(geoData));
                 await redisRequest('setex', cacheKey, 86400, encodedData);
-                console.log(`   🌍 Fresh lookup + cached for ${ip}: ${geoData.city}, ${geoData.region} (${geoData.isp})`);
             } catch (cacheError) {
-                console.log(`   ⚠️ Failed to cache geo data for ${ip}: ${cacheError.message}`);
+                console.log(`   ⚠️ Failed to cache geo data for ${ip}`);
             }
             
             return geoData;
@@ -449,7 +604,6 @@ async function getIPLocationData(ip) {
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (error) {
-        console.log(`   ⚠️  Failed to lookup ${ip}: ${error.message}`);
         return {
             ip: ip,
             city: 'LOOKUP_FAILED',
@@ -460,9 +614,8 @@ async function getIPLocationData(ip) {
     }
 }
 
-// Extract best ISP info using SAME logic as track.js
+// Extract best ISP info
 function extractBestISP(data) {
-    // Priority hierarchy for ISP identification (same as track.js)
     if (data.company?.name) return data.company.name;
     if (data.asn?.name) return data.asn.name;
     if (data.org) return data.org;
@@ -470,7 +623,7 @@ function extractBestISP(data) {
     return 'Unknown';
 }
 
-// Compare geographic data between conversion and pageview (UNCHANGED - identical to original)
+// Compare geographic data
 function compareGeographicData(conversionGeo, pageviewGeo) {
     if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
         return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
@@ -481,14 +634,12 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     const countryMatch = conversionGeo.country === pageviewGeo.country;
     const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
 
-    // Scoring system
     let score = 0;
     if (cityMatch) score += 3;
     if (regionMatch) score += 2;
     if (countryMatch) score += 1;
     if (ispMatch) score += 2;
 
-    // Determine confidence level
     let confidence = 'NO_MATCH';
     let isMatch = false;
 
@@ -514,7 +665,7 @@ function compareGeographicData(conversionGeo, pageviewGeo) {
     };
 }
 
-// Compare ISP names (UNCHANGED - identical to original)
+// Compare ISP names
 function compareISPs(isp1, isp2) {
     if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
     
@@ -522,13 +673,9 @@ function compareISPs(isp1, isp2) {
     const norm1 = normalize(isp1);
     const norm2 = normalize(isp2);
     
-    // Exact match
     if (norm1 === norm2) return true;
-    
-    // Contains match
     if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
     
-    // ASN match
     const asn1 = isp1.match(/AS(\d+)/);
     const asn2 = isp2.match(/AS(\d+)/);
     if (asn1 && asn2 && asn1[1] === asn2[1]) return true;
@@ -536,7 +683,7 @@ function compareISPs(isp1, isp2) {
     return false;
 }
 
-// Helper function to make Redis HTTP requests (FIXED - proper error handling for missing keys)
+// Redis request helper
 async function redisRequest(command, ...args) {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -548,7 +695,6 @@ async function redisRequest(command, ...args) {
     let response;
     
     try {
-        // For complex commands like SET with JSON, use POST with body
         if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
             response = await fetch(url, {
                 method: 'POST',
@@ -558,10 +704,7 @@ async function redisRequest(command, ...args) {
                 },
                 body: JSON.stringify([command, ...args])
             });
-        } 
-        // For simple commands like GET, KEYS, DEL, use URL path
-        else {
-            // Properly encode Redis key for URL
+        } else {
             const encodedArgs = args.map(arg => encodeURIComponent(arg));
             const requestUrl = `${url}/${command}/${encodedArgs.join('/')}`;
             
@@ -574,7 +717,6 @@ async function redisRequest(command, ...args) {
         }
         
         if (!response.ok) {
-            // Don't throw for 404-like responses - Redis returns these for missing keys
             if (response.status === 404) {
                 return null;
             }
@@ -585,70 +727,13 @@ async function redisRequest(command, ...args) {
         return data.result;
         
     } catch (error) {
-        // Log the actual request details for debugging
-        console.log(`   🔧 Redis request debug: ${command} ${args.join(' ')} -> Error: ${error.message}`);
         throw error;
     }
 }
 
-// Update recovered attributions in Redis with test mode flag
-async function updateRecoveredAttributions(matches, testMode = false) {
-    console.log(`📝 Updating ${matches.length} recovered attributions in Redis${testMode ? ' (TEST MODE)' : ''}...`);
-    
-    for (const match of matches) {
-        const conversion = match.conversion;
-        const pageview = match.match.pageview;
-        
-        try {
-            console.log(`🔄 Updating ${conversion.email}...`);
-            
-            // Try to find the conversion record in Redis by searching different key patterns
-            const conversionKey = await findConversionKey(conversion);
-            
-            if (conversionKey) {
-                // Get the existing conversion data
-                const existingData = await redisRequest('get', conversionKey);
-                let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
-                
-                // Update with recovered attribution
-                const updatedConversion = {
-                    ...conversionData,
-                    attribution_found: true,
-                    landing_page: pageview.landing_page || pageview.url,
-                    source: pageview.source || 'recovered',
-                    utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
-                    utm_medium: pageview.utm_medium || conversionData.utm_medium,
-                    referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: testMode ? 'TEST_comprehensive_24h' : 'comprehensive_24h',
-                    recovery_phase: match.phase,
-                    recovery_confidence: match.confidence,
-                    recovery_score: match.match.score,
-                    recovery_timestamp: new Date().toISOString(),
-                    recovery_match_ip: pageview.ip_address,
-                    recovery_ip_type: match.match.ipType,
-                    test_mode: testMode
-                };
-                
-                // Save back to Redis (using fixed POST method)
-                await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
-                
-                console.log(`✅ Updated ${conversion.email}: ${pageview.landing_page} (${match.phase}${testMode ? ' - TEST' : ''})`);
-            } else {
-                console.log(`⚠️ Could not find Redis key for ${conversion.email}`);
-            }
-            
-        } catch (error) {
-            console.log(`❌ Failed to update ${conversion.email}: ${error.message}`);
-        }
-    }
-    
-    console.log(`📝 Redis update complete for ${matches.length} attributions${testMode ? ' (TEST MODE)' : ''}`);
-}
-
-// Find the Redis key for a specific conversion (UNCHANGED - identical to original)
+// Find the Redis key for a specific conversion
 async function findConversionKey(conversion) {
     try {
-        // Try different possible key patterns (including the actual format seen in logs)
         const patterns = [
             `conversions:*${conversion.email}*`,
             `conversions:${conversion.timestamp.split('T')[0]}*`,
@@ -663,30 +748,24 @@ async function findConversionKey(conversion) {
             try {
                 const keys = await redisRequest('keys', pattern);
                 if (keys && keys.length > 0) {
-                    // If multiple keys, try to find the exact match
                     for (const key of keys) {
                         const data = await redisRequest('get', key);
                         if (data) {
                             const parsed = typeof data === 'string' ? JSON.parse(data) : data;
                             if (parsed.email === conversion.email && 
                                 Math.abs(new Date(parsed.timestamp) - new Date(conversion.timestamp)) < 60000) {
-                                console.log(`🔍 Found conversion key: ${key}`);
                                 return key;
                             }
                         }
                     }
                 }
             } catch (error) {
-                // Continue trying other patterns
-                console.log(`   ⚠️ Pattern ${pattern} failed: ${error.message}`);
+                continue;
             }
         }
         
-        // If no existing key found, create a new one
+        // Create new key if not found
         const newKey = `conversion_${conversion.email}_${Date.now()}`;
-        console.log(`🆕 Creating new conversion key: ${newKey}`);
-        
-        // Store the conversion data first
         await redisRequest('set', newKey, JSON.stringify(conversion));
         return newKey;
         
