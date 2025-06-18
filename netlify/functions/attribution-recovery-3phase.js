@@ -1,11 +1,11 @@
 exports.handler = async (event, context) => {
-    // ATTRIBUTION IMPROVEMENT SYSTEM: Auto-Continue with Safety Mechanisms
-    // Processes one conversion at a time with automatic continuation
-    // Includes safety limits and error recovery
+    // ATTRIBUTION IMPROVEMENT SYSTEM: Internal Loop Version
+    // Processes multiple conversions in one run with timeout protection
+    // No self-triggering - just processes as many as possible before timeout
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Auto-Run-Count',
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Content-Type': 'application/json'
     };
@@ -15,30 +15,14 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        // Safety mechanism: Track auto-run count to prevent infinite loops
-        const currentRunCount = parseInt(event.headers['x-auto-run-count'] || '0');
-        const MAX_AUTO_RUNS = 250; // Safety limit (should cover all conversions + buffer)
-        const isManualRun = currentRunCount === 0;
+        console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - INTERNAL LOOP v3.0');
+        console.log('⚡ Will process multiple conversions until timeout approaches');
         
-        console.log(`🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - AUTO-CONTINUE v2.0`);
-        console.log(`📊 Run Info: ${isManualRun ? 'MANUAL START' : `AUTO-RUN #${currentRunCount}`}`);
-        console.log(`🛡️ Safety: ${currentRunCount}/${MAX_AUTO_RUNS} runs used`);
-        
-        // Safety check: Prevent infinite loops
-        if (currentRunCount >= MAX_AUTO_RUNS) {
-            console.log('🚨 SAFETY LIMIT REACHED - Stopping auto-continuation');
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    success: false,
-                    error: 'AUTO_RUN_LIMIT_REACHED',
-                    message: `Safety limit of ${MAX_AUTO_RUNS} auto-runs reached. Manual intervention required.`,
-                    runs_completed: currentRunCount,
-                    manual_override_needed: true
-                })
-            };
-        }
+        // Timeout protection
+        const startTime = Date.now();
+        const maxRunTime = 22000; // 22 seconds (safe buffer before 26s Netlify timeout)
+        let processedInThisRun = 0;
+        const processedConversions = [];
         
         // Step 1: Fetch analytics data from past 7 days (safe date range)
         const analyticsData = await fetchAnalyticsDataPast7Days();
@@ -53,183 +37,122 @@ exports.handler = async (event, context) => {
                 body: JSON.stringify({
                     success: true,
                     message: 'No conversions found in past 7 days',
-                    results: { total: 0, processed: 0, remaining: 0 },
-                    auto_continue: false
+                    results: { total: 0, processed: 0, remaining: 0 }
                 })
             };
         }
         
-        // Step 3: Filter out "newly updated" conversions
-        console.log('🔍 Filtering out already processed conversions...');
-        const unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
+        console.log(`🔄 PROCESSING LOOP: Will run for max ${maxRunTime/1000} seconds`);
         
-        if (unprocessedConversions.length === 0) {
-            console.log('🎉 ALL CONVERSIONS COMPLETED! Auto-continuation stopping.');
-            return {
-                statusCode: 200,
-                headers,
-                body: JSON.stringify({
-                    success: true,
-                    message: 'ALL CONVERSIONS COMPLETED! Attribution improvement finished.',
-                    results: { 
-                        total: allConversions.length, 
-                        processed: allConversions.length, 
-                        remaining: 0 
-                    },
-                    status: 'COMPLETE',
-                    auto_continue: false,
-                    total_runs: currentRunCount + 1,
-                    completion_message: `Successfully processed all ${allConversions.length} conversions across ${currentRunCount + 1} automatic runs.`
-                })
-            };
-        }
-        
-        // Step 4: Take the first unprocessed conversion
-        const conversionToProcess = unprocessedConversions[0];
-        
-        console.log(`🎯 PROCESSING CONVERSION: ${conversionToProcess.email}`);
-        console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
-        console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
-        console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
-        console.log(`   📈 Progress: Processing 1 of ${unprocessedConversions.length} remaining conversions`);
-        
-        // Step 5: Analyze this conversion with 24-hour attribution improvement
-        const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
-        
-        // Step 6: Update Redis with improved attribution
-        let updateResult = null;
-        if (improvementResults.shouldUpdate) {
-            console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
-            try {
-                updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
-            } catch (redisError) {
-                console.error('❌ Redis update failed:', redisError);
-            }
-        }
-        
-        // Step 7: Mark conversion as "newly updated"
-        await markConversionAsNewlyUpdated(conversionToProcess);
-        
-        // Step 8: Calculate completion status
-        const totalProcessedAfterThis = allConversions.length - unprocessedConversions.length + 1;
-        const totalRemainingAfterThis = allConversions.length - totalProcessedAfterThis;
-        const isComplete = totalRemainingAfterThis === 0;
-        
-        console.log(`📊 PROGRESS UPDATE:`);
-        console.log(`   📈 Total conversions: ${allConversions.length}`);
-        console.log(`   ✅ Processed (including current): ${totalProcessedAfterThis}`);
-        console.log(`   🔄 Remaining to process: ${totalRemainingAfterThis}`);
-        console.log(`   🏁 Status: ${isComplete ? 'COMPLETE' : 'CONTINUE'}`);
-        
-        // Step 9: Auto-continue if more conversions remain
-        if (!isComplete && totalRemainingAfterThis > 0) {
-            console.log(`🔄 AUTO-CONTINUE: ${totalRemainingAfterThis} conversions remaining`);
-            console.log(`   ⏱️  Adding 2-second delay before next run...`);
+        // Main processing loop - continue until timeout approaches or all done
+        while (Date.now() - startTime < maxRunTime) {
+            // Step 3: Filter out "newly updated" conversions
+            console.log('🔍 Checking for unprocessed conversions...');
+            const unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
             
-            // Add delay between calls to prevent overwhelming the system
-            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
-            
-            try {
-                // Self-trigger the function for next conversion
-                await triggerNextRun(event, currentRunCount + 1, totalRemainingAfterThis);
-                
-                // Return immediate response indicating auto-continuation
-                const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, false);
-                
-                return {
-                    statusCode: 200,
-                    headers,
-                    body: JSON.stringify({
-                        success: true,
-                        auto_continued: true,
-                        processed_conversion: {
-                            email: conversionToProcess.email,
-                            timestamp: conversionToProcess.timestamp,
-                            original_attribution: conversionToProcess.landing_page || null,
-                            improvement_found: improvementResults.matchFound,
-                            new_attribution: improvementResults.newAttribution || null,
-                            improvement_type: improvementResults.improvementType
-                        },
-                        results: improvementResults,
-                        message: statusMessage + ' (AUTO-CONTINUING...)',
-                        progress: {
-                            total_conversions: allConversions.length,
-                            just_processed: conversionToProcess.email,
-                            remaining_conversions: totalRemainingAfterThis,
-                            current_run: currentRunCount + 1,
-                            status: 'AUTO_CONTINUING',
-                            next_action: 'Processing continues automatically...'
-                        },
-                        date_range: 'Past 7 days (safe range)',
-                        update_result: updateResult,
-                        auto_continue_info: {
-                            triggered_next_run: true,
-                            run_count: currentRunCount + 1,
-                            estimated_runs_remaining: Math.ceil(totalRemainingAfterThis),
-                            safety_limit: MAX_AUTO_RUNS
-                        }
-                    })
-                };
-                
-            } catch (autoError) {
-                console.error('❌ Auto-continuation failed:', autoError);
-                
-                // Fall back to manual continuation message
-                const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, false);
-                
-                return {
-                    statusCode: 200,
-                    headers,
-                    body: JSON.stringify({
-                        success: true,
-                        auto_continue_failed: true,
-                        processed_conversion: {
-                            email: conversionToProcess.email,
-                            improvement_type: improvementResults.improvementType
-                        },
-                        message: statusMessage + ' (AUTO-CONTINUE FAILED - Manual run needed)',
-                        progress: {
-                            total_conversions: allConversions.length,
-                            remaining_conversions: totalRemainingAfterThis,
-                            status: 'MANUAL_INTERVENTION_NEEDED',
-                            next_action: 'Run the function again manually to continue'
-                        },
-                        error_details: autoError.message
-                    })
-                };
+            if (unprocessedConversions.length === 0) {
+                console.log('🎉 ALL CONVERSIONS COMPLETED!');
+                break;
             }
+            
+            // Check if we have enough time for another conversion (~15 seconds needed)
+            const timeRemaining = maxRunTime - (Date.now() - startTime);
+            if (timeRemaining < 16000) { // Need at least 16 seconds for next conversion
+                console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping loop`);
+                console.log(`✅ Processed ${processedInThisRun} conversions in this run`);
+                break;
+            }
+            
+            // Step 4: Process next conversion
+            const conversionToProcess = unprocessedConversions[0];
+            const conversionStartTime = Date.now();
+            
+            console.log(`\n🎯 PROCESSING CONVERSION ${processedInThisRun + 1}: ${conversionToProcess.email}`);
+            console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
+            console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
+            console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
+            console.log(`   📈 Progress: ${processedInThisRun} done, ${unprocessedConversions.length} remaining`);
+            console.log(`   ⏱️  Time remaining: ${timeRemaining/1000}s`);
+            
+            // Step 5: Analyze this conversion
+            const improvementResults = await analyzeConversionForAttribution(conversionToProcess, analyticsData.page_views);
+            
+            // Step 6: Update Redis if needed
+            let updateResult = null;
+            if (improvementResults.shouldUpdate) {
+                console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
+                try {
+                    updateResult = await updateConversionAttribution(conversionToProcess, improvementResults);
+                } catch (redisError) {
+                    console.error('❌ Redis update failed:', redisError);
+                }
+            }
+            
+            // Step 7: Mark as processed
+            await markConversionAsNewlyUpdated(conversionToProcess);
+            
+            // Track this processed conversion
+            const conversionTime = Date.now() - conversionStartTime;
+            processedInThisRun++;
+            processedConversions.push({
+                email: conversionToProcess.email,
+                improvement_type: improvementResults.improvementType,
+                processing_time_ms: conversionTime,
+                update_result: updateResult
+            });
+            
+            console.log(`✅ Completed ${conversionToProcess.email} in ${conversionTime/1000}s`);
+            console.log(`📊 Total processed in this run: ${processedInThisRun}`);
         }
         
-        // Step 10: Return final completion status (if complete)
-        const statusMessage = generateStatusMessage(conversionToProcess, improvementResults, totalRemainingAfterThis, isComplete);
+        // Final status calculation
+        const totalTime = Date.now() - startTime;
+        const finalUnprocessed = await filterNewlyUpdatedConversions(allConversions);
+        const totalProcessed = allConversions.length - finalUnprocessed.length;
+        const totalRemaining = finalUnprocessed.length;
+        const isComplete = totalRemaining === 0;
+        
+        console.log(`\n🏁 RUN COMPLETE:`);
+        console.log(`   ⏱️  Total run time: ${totalTime/1000}s`);
+        console.log(`   ✅ Processed in this run: ${processedInThisRun}`);
+        console.log(`   📊 Total processed overall: ${totalProcessed}/${allConversions.length}`);
+        console.log(`   🔄 Remaining: ${totalRemaining}`);
+        console.log(`   🎯 Status: ${isComplete ? 'ALL COMPLETE' : 'RUN AGAIN TO CONTINUE'}`);
+        
+        // Generate summary message
+        let summaryMessage;
+        if (isComplete) {
+            summaryMessage = `🎉 ALL ${allConversions.length} CONVERSIONS COMPLETED! Processed ${processedInThisRun} conversions in final run.`;
+        } else if (processedInThisRun > 0) {
+            summaryMessage = `✅ Processed ${processedInThisRun} conversions (${totalRemaining} remaining). Run again to continue optimizing.`;
+        } else {
+            summaryMessage = `⚠️ No conversions processed (may be near timeout limit). ${totalRemaining} conversions remaining.`;
+        }
         
         return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
                 success: true,
-                processed_conversion: {
-                    email: conversionToProcess.email,
-                    timestamp: conversionToProcess.timestamp,
-                    original_attribution: conversionToProcess.landing_page || null,
-                    improvement_found: improvementResults.matchFound,
-                    new_attribution: improvementResults.newAttribution || null,
-                    improvement_type: improvementResults.improvementType
-                },
-                results: improvementResults,
-                message: statusMessage,
+                batch_complete: true,
+                processed_this_run: processedInThisRun,
+                processed_conversions: processedConversions,
+                message: summaryMessage,
                 progress: {
                     total_conversions: allConversions.length,
-                    already_processed: totalProcessedAfterThis - 1,
-                    just_processed: conversionToProcess.email,
-                    remaining_conversions: totalRemainingAfterThis,
-                    status: isComplete ? 'COMPLETE' : 'CONTINUE',
-                    next_action: isComplete ? 'All conversions optimized!' : 'Run again to process next conversion'
+                    total_processed: totalProcessed,
+                    remaining_conversions: totalRemaining,
+                    processed_this_batch: processedInThisRun,
+                    status: isComplete ? 'ALL_COMPLETE' : 'CONTINUE',
+                    next_action: isComplete ? 'All conversions optimized!' : 'Run the function again to continue processing'
+                },
+                performance: {
+                    total_run_time_seconds: totalTime / 1000,
+                    average_time_per_conversion: processedInThisRun > 0 ? (totalTime / processedInThisRun / 1000) : 0,
+                    timeout_limit_seconds: maxRunTime / 1000
                 },
                 date_range: 'Past 7 days (safe range)',
-                update_result: updateResult,
-                auto_continue: false,
-                final_completion: isComplete
+                processing_method: 'internal_loop_batch'
             })
         };
 
@@ -240,77 +163,11 @@ exports.handler = async (event, context) => {
             headers,
             body: JSON.stringify({
                 error: 'Attribution improvement system failed',
-                details: error.message,
-                auto_continue: false
+                details: error.message
             })
         };
     }
 };
-
-// Self-trigger function for auto-continuation
-async function triggerNextRun(originalEvent, nextRunCount, remainingConversions) {
-    console.log(`🚀 TRIGGERING NEXT RUN: #${nextRunCount} (${remainingConversions} conversions remaining)`);
-    
-    // Construct the function URL
-    const functionUrl = constructFunctionUrl(originalEvent);
-    
-    try {
-        const response = await fetch(functionUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': process.env.OJOY_API_KEY,
-                'X-Auto-Run-Count': nextRunCount.toString(),
-                'User-Agent': 'Attribution-Auto-Continue/1.0'
-            },
-            body: JSON.stringify({
-                auto_continue: true,
-                triggered_by_run: nextRunCount - 1,
-                remaining_conversions: remainingConversions
-            })
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        console.log(`✅ Successfully triggered next run #${nextRunCount}`);
-        
-    } catch (error) {
-        console.error(`❌ Failed to trigger next run: ${error.message}`);
-        throw error;
-    }
-}
-
-// Construct function URL for self-invocation
-function constructFunctionUrl(event) {
-    // Try to get the function URL from various sources
-    let baseUrl = '';
-    
-    // Method 1: From headers (most reliable)
-    if (event.headers.host) {
-        const protocol = event.headers['x-forwarded-proto'] || 'https';
-        baseUrl = `${protocol}://${event.headers.host}`;
-    }
-    
-    // Method 2: From Netlify environment
-    else if (process.env.URL) {
-        baseUrl = process.env.URL;
-    }
-    
-    // Method 3: Fallback construction
-    else {
-        baseUrl = 'https://trackingojoy.netlify.app';
-    }
-    
-    // Get the function path
-    const functionPath = event.path || '/.netlify/functions/attribution-recovery-3phase';
-    
-    const fullUrl = `${baseUrl}${functionPath}`;
-    console.log(`🔗 Function URL: ${fullUrl}`);
-    
-    return fullUrl;
-}
 
 // Global counters for cache statistics
 let cacheStats = {
@@ -396,8 +253,6 @@ function getAllConversions(conversions) {
 
 // Filter out conversions marked as "newly updated"
 async function filterNewlyUpdatedConversions(allConversions) {
-    console.log(`🔍 Checking "newly updated" status for ${allConversions.length} conversions...`);
-    
     const unprocessedConversions = [];
     let newlyUpdatedCount = 0;
     
@@ -409,25 +264,21 @@ async function filterNewlyUpdatedConversions(allConversions) {
             
             if (updatedData) {
                 newlyUpdatedCount++;
-                console.log(`✅ Already processed: ${conversion.email}`);
             } else {
                 unprocessedConversions.push(conversion);
-                console.log(`🔄 Needs processing: ${conversion.email}`);
             }
         } catch (error) {
             // If we can't check status, assume unprocessed
-            console.log(`⚠️ Could not check status for ${conversion.email}, assuming unprocessed`);
             unprocessedConversions.push(conversion);
         }
     }
     
-    console.log(`📊 Filter complete: ${newlyUpdatedCount} already processed, ${unprocessedConversions.length} need processing`);
     return unprocessedConversions;
 }
 
 // Analyze single conversion for attribution improvement
 async function analyzeConversionForAttribution(conversion, pageviews) {
-    console.log('🔬 ATTRIBUTION ANALYSIS: Finding best temporal match for conversion...');
+    console.log('   🔬 Finding best temporal match...');
     
     // Reset cache statistics
     cacheStats = { hits: 0, misses: 0, errors: 0 };
@@ -442,15 +293,9 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
         match: null,
         analysis: {
             pageviews_in_window: 0,
-            geographic_lookups: 0,
             cache_performance: {}
         }
     };
-    
-    console.log(`🔍 ANALYZING: ${conversion.email}`);
-    console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
-    console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
-    console.log(`   📄 Current Attribution: ${conversion.landing_page || 'NONE'}`);
     
     // Find all pageviews in 24-hour window before conversion
     const candidatePageviews = findPageviewsIn24HourWindow(conversion, pageviews);
@@ -465,15 +310,14 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
     results.analysis.pageviews_in_window = candidatePageviews.length;
     
     // Get conversion geographic data
-    console.log(`   🌍 Looking up conversion location...`);
     const conversionGeoData = await getIPLocationData(conversion.ip_address);
-    console.log(`   📍 Conversion Location: ${conversionGeoData.city}, ${conversionGeoData.region}, ${conversionGeoData.country} (${conversionGeoData.isp})`);
+    console.log(`   📍 Location: ${conversionGeoData.city}, ${conversionGeoData.region} (${conversionGeoData.isp})`);
     
     // Find the best temporal match
     const bestMatch = await findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData);
     
     if (bestMatch) {
-        console.log(`   ✅ ATTRIBUTION MATCH FOUND!`);
+        console.log(`   ✅ MATCH FOUND! (${bestMatch.confidence})`);
         
         results.matchFound = true;
         results.newAttribution = bestMatch.pageview.landing_page || bestMatch.pageview.url;
@@ -484,10 +328,10 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
         results.shouldUpdate = shouldUpdate.update;
         results.improvementType = shouldUpdate.type;
         
-        console.log(`   🎯 Update Decision: ${shouldUpdate.update ? 'YES' : 'NO'} (${shouldUpdate.type})`);
+        console.log(`   🎯 Update: ${shouldUpdate.update ? 'YES' : 'NO'} (${shouldUpdate.type})`);
         
     } else {
-        console.log('   ❌ No geographic matches found in 24-hour window');
+        console.log('   ❌ No geographic matches found');
         results.improvementType = 'NO_MATCH_FOUND';
     }
     
@@ -498,13 +342,8 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
     results.analysis.cache_performance = {
         cache_hits: cacheStats.hits,
         cache_misses: cacheStats.misses,
-        cache_hit_rate_percent: hitRate,
-        fresh_api_calls: cacheStats.misses
+        cache_hit_rate_percent: hitRate
     };
-    
-    console.log(`📈 ANALYSIS COMPLETE:`);
-    console.log(`   💾 Cache hits: ${cacheStats.hits}, misses: ${cacheStats.misses} (${hitRate}% hit rate)`);
-    console.log(`   🌍 Fresh API calls: ${cacheStats.misses}`);
     
     return results;
 }
@@ -513,8 +352,6 @@ async function analyzeConversionForAttribution(conversion, pageviews) {
 function findPageviewsIn24HourWindow(conversion, pageviews) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - 24 * 60 * 60 * 1000); // 24 hours before
-    
-    console.log(`   🕐 24-hour window: ${windowStart.toISOString()} to ${conversionTime.toISOString()}`);
     
     const candidatePageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
@@ -526,40 +363,24 @@ function findPageviewsIn24HourWindow(conversion, pageviews) {
     // Sort by timestamp DESCENDING (newest first = closest to conversion)
     candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    const ipv4Count = candidatePageviews.filter(pv => !pv.ip_address.includes(':')).length;
-    const ipv6Count = candidatePageviews.filter(pv => pv.ip_address.includes(':')).length;
-    
-    console.log(`   📊 Found ${candidatePageviews.length} pageviews in window (IPv4: ${ipv4Count}, IPv6: ${ipv6Count})`);
-    console.log(`   ⏰ Sorted by timestamp (newest first) for optimal temporal matching`);
-    
     return candidatePageviews;
 }
 
 // Find best temporal match (closest to conversion time)
 async function findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData) {
-    console.log(`   🔍 TEMPORAL MATCHING: Checking pageviews for geographic correlation...`);
-    console.log(`   ⚡ Strategy: First acceptable match wins (prioritizing recency)`);
-    
     for (let i = 0; i < candidatePageviews.length; i++) {
         const pageview = candidatePageviews[i];
         const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
         const ipType = pageview.ip_address.includes(':') ? 'IPv6' : 'IPv4';
         
-        console.log(`   🌐 Checking ${i + 1}/${candidatePageviews.length}: ${pageview.ip_address} (${ipType})`);
-        console.log(`      ⏰ ${timeDiff.toFixed(1)} min before conversion`);
-        console.log(`      📄 Page: ${pageview.landing_page || pageview.url || 'Unknown'}`);
-        
         // Get pageview geographic data
         const pageviewGeoData = await getIPLocationData(pageview.ip_address);
-        console.log(`      📍 Location: ${pageviewGeoData.city}, ${pageviewGeoData.region}, ${pageviewGeoData.country} (${pageviewGeoData.isp})`);
         
         // Compare geographic data
         const geoMatch = compareGeographicData(conversionGeoData, pageviewGeoData);
         
         if (geoMatch.isMatch) {
-            console.log(`      ✅ TEMPORAL MATCH FOUND! (${geoMatch.confidence}, Score: ${geoMatch.score})`);
-            console.log(`         🎯 Match: City: ${geoMatch.cityMatch ? '✓' : '✗'} | Region: ${geoMatch.regionMatch ? '✓' : '✗'} | Country: ${geoMatch.countryMatch ? '✓' : '✗'} | ISP: ${geoMatch.ispMatch ? '✓' : '✗'}`);
-            console.log(`      🏆 SELECTED: Most recent geographic match (${timeDiff.toFixed(1)} min before conversion)`);
+            console.log(`   🏆 TEMPORAL MATCH: ${timeDiff.toFixed(1)}min before (${geoMatch.confidence})`);
             
             return {
                 pageview: pageview,
@@ -571,28 +392,22 @@ async function findBestTemporalMatch(conversion, candidatePageviews, conversionG
                 ipType: ipType,
                 candidateNumber: i + 1
             };
-        } else {
-            console.log(`      ❌ No geographic match (${geoMatch.confidence}, Score: ${geoMatch.score})`);
         }
         
         // Progress logging for large datasets
-        if ((i + 1) % 50 === 0) {
-            console.log(`   📊 Progress: ${i + 1}/${candidatePageviews.length} checked`);
+        if ((i + 1) % 25 === 0) {
+            console.log(`   📊 Checked ${i + 1}/${candidatePageviews.length} pageviews`);
         }
     }
     
-    console.log(`   ❌ No geographic matches found in any of ${candidatePageviews.length} pageviews`);
     return null;
 }
 
 // Determine if attribution should be updated
 function shouldUpdateAttribution(conversion, newMatch) {
     const hasCurrentAttribution = conversion.landing_page && conversion.landing_page !== '';
-    const newAttribution = newMatch.pageview.landing_page || newMatch.pageview.url;
     
     if (!hasCurrentAttribution) {
-        // No current attribution - always create new
-        console.log(`   🆕 CREATE: No existing attribution, adding new attribution`);
         return { update: true, type: 'NEW_ATTRIBUTION' };
     }
     
@@ -601,63 +416,32 @@ function shouldUpdateAttribution(conversion, newMatch) {
     const newMatchTime = newMatch.pageview.timestamp;
     
     if (new Date(newMatchTime) < new Date(currentAttributionTime)) {
-        // New match occurred before current attribution
-        console.log(`   ⬆️ IMPROVE: New match occurred before current attribution`);
-        console.log(`      📅 Current: ${currentAttributionTime}`);
-        console.log(`      📅 New: ${newMatchTime}`);
         return { update: true, type: 'TEMPORAL_IMPROVEMENT' };
     } else {
-        // Current attribution is already earlier
-        console.log(`   ✋ KEEP: Current attribution occurred before new match`);
-        console.log(`      📅 Current: ${currentAttributionTime} (keeping)`);
-        console.log(`      📅 New: ${newMatchTime} (skipping)`);
         return { update: false, type: 'NO_IMPROVEMENT' };
     }
 }
 
 // Mark conversion as newly updated
 async function markConversionAsNewlyUpdated(conversion) {
-    console.log(`📝 Marking ${conversion.email} as newly updated...`);
-    
     try {
         const newlyUpdatedKey = `newly_updated:${conversion.email}:${conversion.timestamp}`;
         const updatedData = {
             email: conversion.email,
             timestamp: conversion.timestamp,
             processed_at: new Date().toISOString(),
-            system: 'attribution_improvement_auto'
+            system: 'attribution_improvement_batch'
         };
         
         // Set with 30-day expiration
         await redisRequest('setex', newlyUpdatedKey, 2592000, JSON.stringify(updatedData)); // 30 days
-        console.log(`✅ Marked as newly updated: ${conversion.email}`);
     } catch (error) {
-        console.log(`⚠️ Could not mark ${conversion.email} as newly updated: ${error.message}`);
-    }
-}
-
-// Generate status message
-function generateStatusMessage(conversion, results, remainingCount, isComplete) {
-    const email = conversion.email;
-    
-    if (isComplete) {
-        return `Attribution improvement COMPLETE! Processed final conversion: ${email}. All recent conversions have been optimized.`;
-    }
-    
-    if (results.shouldUpdate) {
-        const type = results.improvementType === 'NEW_ATTRIBUTION' ? 'NEW attribution created' : 'Attribution IMPROVED';
-        return `${type} for ${email}: ${results.newAttribution}. ${remainingCount} conversions remaining`;
-    } else if (results.matchFound) {
-        return `Analyzed ${email}: Current attribution is already optimal. ${remainingCount} conversions remaining`;
-    } else {
-        return `Analyzed ${email}: No attribution matches found in 24-hour window. ${remainingCount} conversions remaining`;
+        console.log(`   ⚠️ Could not mark ${conversion.email} as newly updated: ${error.message}`);
     }
 }
 
 // Update conversion attribution in Redis
 async function updateConversionAttribution(conversion, improvementResults) {
-    console.log(`📝 Updating attribution for ${conversion.email}...`);
-    
     try {
         // Find the conversion record in Redis
         const conversionKey = await findConversionKey(conversion);
@@ -678,7 +462,7 @@ async function updateConversionAttribution(conversion, improvementResults) {
                 referrer_url: improvementResults.match.pageview.referrer_url || conversionData.referrer_url,
                 // Attribution improvement metadata
                 attribution_improvement: {
-                    method: 'temporal_optimization_auto',
+                    method: 'temporal_optimization_batch',
                     improvement_type: improvementResults.improvementType,
                     confidence: improvementResults.match.confidence,
                     score: improvementResults.match.score,
@@ -695,10 +479,6 @@ async function updateConversionAttribution(conversion, improvementResults) {
             // Save back to Redis
             await redisRequest('set', conversionKey, JSON.stringify(updatedConversion));
             
-            console.log(`✅ Successfully updated ${conversion.email}`);
-            console.log(`   📄 New attribution: ${improvementResults.newAttribution}`);
-            console.log(`   🕐 Pageview time: ${improvementResults.match.pageview.timestamp}`);
-            
             return {
                 success: true,
                 updated_attribution: improvementResults.newAttribution,
@@ -707,17 +487,15 @@ async function updateConversionAttribution(conversion, improvementResults) {
             };
             
         } else {
-            console.log(`⚠️ Could not find Redis key for ${conversion.email}`);
             return { success: false, error: 'Conversion not found in Redis' };
         }
         
     } catch (error) {
-        console.log(`❌ Failed to update ${conversion.email}: ${error.message}`);
         return { success: false, error: error.message };
     }
 }
 
-// NEW: Get cached geographic data using SAME cache structure as track.js
+// Get cached geographic data
 async function getCachedGeoData(ip) {
     try {
         const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
@@ -785,7 +563,7 @@ async function getIPLocationData(ip) {
                 const encodedData = encodeURIComponent(JSON.stringify(geoData));
                 await redisRequest('setex', cacheKey, 86400, encodedData);
             } catch (cacheError) {
-                console.log(`   ⚠️ Failed to cache geo data for ${ip}`);
+                // Ignore cache errors
             }
             
             return geoData;
