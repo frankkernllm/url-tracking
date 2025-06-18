@@ -18,9 +18,9 @@ exports.handler = async (event, context) => {
         console.log('🔧 Starting ATTRIBUTION IMPROVEMENT SYSTEM - INTERNAL LOOP v3.0');
         console.log('⚡ Will process multiple conversions until timeout approaches');
         
-        // Timeout protection
+        // Timeout protection - more aggressive timing
         const startTime = Date.now();
-        const maxRunTime = 22000; // 22 seconds (safe buffer before 26s Netlify timeout)
+        const maxRunTime = 20000; // 20 seconds (tighter buffer)
         let processedInThisRun = 0;
         const processedConversions = [];
         
@@ -44,34 +44,45 @@ exports.handler = async (event, context) => {
         
         console.log(`🔄 PROCESSING LOOP: Will run for max ${maxRunTime/1000} seconds`);
         
-        // Main processing loop - continue until timeout approaches or all done
-        while (Date.now() - startTime < maxRunTime) {
-            // Step 3: Filter out "newly updated" conversions
-            console.log('🔍 Checking for unprocessed conversions...');
-            const unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
+        // Step 3: Get initial list of unprocessed conversions (ONCE at start)
+        console.log('🔍 Getting initial list of unprocessed conversions...');
+        let unprocessedConversions = await filterNewlyUpdatedConversions(allConversions);
+        
+        if (unprocessedConversions.length === 0) {
+            console.log('🎉 ALL CONVERSIONS ALREADY COMPLETED!');
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'All conversions already completed',
+                    progress: { total_conversions: allConversions.length, total_processed: allConversions.length, remaining_conversions: 0, status: 'ALL_COMPLETE' }
+                })
+            };
+        }
+        
+        console.log(`📋 Found ${unprocessedConversions.length} unprocessed conversions to work through`);
+        
+        // Main processing loop - process conversions from our list
+        while (unprocessedConversions.length > 0 && Date.now() - startTime < maxRunTime) {
             
-            if (unprocessedConversions.length === 0) {
-                console.log('🎉 ALL CONVERSIONS COMPLETED!');
-                break;
-            }
-            
-            // Check if we have enough time for another conversion (~15 seconds needed)
+            // Check if we have enough time for another conversion (~12 seconds needed)
             const timeRemaining = maxRunTime - (Date.now() - startTime);
-            if (timeRemaining < 16000) { // Need at least 16 seconds for next conversion
+            if (timeRemaining < 12000) { // Need at least 12 seconds for next conversion
                 console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping loop`);
                 console.log(`✅ Processed ${processedInThisRun} conversions in this run`);
                 break;
             }
             
-            // Step 4: Process next conversion
-            const conversionToProcess = unprocessedConversions[0];
+            // Step 4: Process next conversion from our list
+            const conversionToProcess = unprocessedConversions.shift(); // Remove from front of array
             const conversionStartTime = Date.now();
             
             console.log(`\n🎯 PROCESSING CONVERSION ${processedInThisRun + 1}: ${conversionToProcess.email}`);
             console.log(`   📍 Conversion IP: ${conversionToProcess.ip_address}`);
             console.log(`   ⏰ Conversion Time: ${conversionToProcess.timestamp}`);
             console.log(`   📊 Current Attribution: ${conversionToProcess.landing_page || 'NONE'}`);
-            console.log(`   📈 Progress: ${processedInThisRun} done, ${unprocessedConversions.length} remaining`);
+            console.log(`   📈 Progress: ${processedInThisRun} done, ${unprocessedConversions.length + 1} remaining`); // +1 because we just shifted this one off
             console.log(`   ⏱️  Time remaining: ${timeRemaining/1000}s`);
             
             // Step 5: Analyze this conversion
@@ -107,9 +118,8 @@ exports.handler = async (event, context) => {
         
         // Final status calculation
         const totalTime = Date.now() - startTime;
-        const finalUnprocessed = await filterNewlyUpdatedConversions(allConversions);
-        const totalProcessed = allConversions.length - finalUnprocessed.length;
-        const totalRemaining = finalUnprocessed.length;
+        const totalRemaining = unprocessedConversions.length; // Remaining in our list
+        const totalProcessed = allConversions.length - totalRemaining;
         const isComplete = totalRemaining === 0;
         
         console.log(`\n🏁 RUN COMPLETE:`);
