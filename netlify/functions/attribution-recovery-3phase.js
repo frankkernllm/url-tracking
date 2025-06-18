@@ -64,13 +64,12 @@ exports.handler = async (event, context) => {
         console.log(`📋 Found ${unprocessedConversions.length} unprocessed conversions (will process in batches of 3)`);
         console.log(`📊 Estimated batches needed: ${Math.ceil(unprocessedConversions.length / 3)}`);
         
-        
         // Main processing loop - process conversions in batches of 3
         while (unprocessedConversions.length > 0 && Date.now() - startTime < maxRunTime) {
             
-            // Check if we have enough time for another batch (~15 seconds needed for 3 conversions)
+            // Check if we have enough time for another batch (~4 seconds needed for 3 conversions)
             const timeRemaining = maxRunTime - (Date.now() - startTime);
-            if (timeRemaining < 15000) { // Need at least 15 seconds for next batch
+            if (timeRemaining < 4000) { // Need at least 4 seconds for next batch
                 console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping batch processing`);
                 break;
             }
