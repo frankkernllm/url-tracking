@@ -277,6 +277,152 @@ async function filterNonProcess3Conversions(allConversions) {
     return nonProcess3Conversions;
 }
 
+// Analyze single conversion for attribution improvement
+async function analyzeConversionForAttribution(conversion, pageviews) {
+    console.log('   🔬 Finding best temporal match...');
+    
+    // Reset cache statistics
+    cacheStats = { hits: 0, misses: 0, errors: 0 };
+    
+    const results = {
+        conversionEmail: conversion.email,
+        originalAttribution: conversion.landing_page || null,
+        matchFound: false,
+        newAttribution: null,
+        shouldUpdate: false,
+        improvementType: 'NO_CHANGE',
+        match: null,
+        analysis: {
+            pageviews_in_window: 0,
+            cache_performance: {}
+        }
+    };
+    
+    // Find all pageviews in 90-minute window before conversion
+    const candidatePageviews = findPageviewsIn90MinuteWindow(conversion, pageviews);
+    
+    if (candidatePageviews.length === 0) {
+        console.log(`   ❌ No pageviews found in 90-minute window before conversion`);
+        results.analysis.pageviews_in_window = 0;
+        return results;
+    }
+    
+    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 90-minute window`);
+    results.analysis.pageviews_in_window = candidatePageviews.length;
+    
+    // Get conversion geographic data
+    const conversionGeoData = await getIPLocationData(conversion.ip_address);
+    console.log(`   📍 Location: ${conversionGeoData.city}, ${conversionGeoData.region} (${conversionGeoData.isp})`);
+    
+    // Find the best temporal match
+    const bestMatch = await findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData);
+    
+    if (bestMatch) {
+        console.log(`   ✅ MATCH FOUND! (${bestMatch.confidence})`);
+        
+        results.matchFound = true;
+        results.newAttribution = bestMatch.pageview.landing_page || bestMatch.pageview.url;
+        results.match = bestMatch;
+        
+        // Determine if we should update
+        const shouldUpdate = shouldUpdateAttribution(conversion, bestMatch);
+        results.shouldUpdate = shouldUpdate.update;
+        results.improvementType = shouldUpdate.type;
+        
+        console.log(`   🎯 Update: ${shouldUpdate.update ? 'YES' : 'NO'} (${shouldUpdate.type})`);
+        
+    } else {
+        console.log('   ❌ No geographic matches found');
+        results.improvementType = 'NO_MATCH_FOUND';
+    }
+    
+    // Cache performance stats
+    const totalLookups = cacheStats.hits + cacheStats.misses + cacheStats.errors;
+    const hitRate = totalLookups > 0 ? ((cacheStats.hits / totalLookups) * 100).toFixed(1) : 0;
+    
+    results.analysis.cache_performance = {
+        cache_hits: cacheStats.hits,
+        cache_misses: cacheStats.misses,
+        cache_hit_rate_percent: hitRate
+    };
+    
+    return results;
+}
+
+// Find pageviews in 90-minute window before conversion
+function findPageviewsIn90MinuteWindow(conversion, pageviews) {
+    const conversionTime = new Date(conversion.timestamp);
+    const windowStart = new Date(conversionTime.getTime() - 90 * 60 * 1000); // 90 minutes before
+    
+    const candidatePageviews = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        return pvTime >= windowStart && 
+               pvTime <= conversionTime && 
+               pv.ip_address; // Must have IP address
+    });
+    
+    // Sort by timestamp DESCENDING (newest first = closest to conversion)
+    candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    return candidatePageviews;
+}
+
+// Find best temporal match (closest to conversion time)
+async function findBestTemporalMatch(conversion, candidatePageviews, conversionGeoData) {
+    for (let i = 0; i < candidatePageviews.length; i++) {
+        const pageview = candidatePageviews[i];
+        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
+        const ipType = pageview.ip_address.includes(':') ? 'IPv6' : 'IPv4';
+        
+        // Get pageview geographic data
+        const pageviewGeoData = await getIPLocationData(pageview.ip_address);
+        
+        // Compare geographic data
+        const geoMatch = compareGeographicData(conversionGeoData, pageviewGeoData);
+        
+        if (geoMatch.isMatch) {
+            console.log(`   🏆 TEMPORAL MATCH: ${timeDiff.toFixed(1)}min before (${geoMatch.confidence})`);
+            
+            return {
+                pageview: pageview,
+                score: geoMatch.score,
+                timeDiff: timeDiff,
+                confidence: geoMatch.confidence,
+                conversionGeo: conversionGeoData,
+                pageviewGeo: pageviewGeoData,
+                ipType: ipType,
+                candidateNumber: i + 1
+            };
+        }
+        
+        // Progress logging for large datasets
+        if ((i + 1) % 25 === 0) {
+            console.log(`   📊 Checked ${i + 1}/${candidatePageviews.length} pageviews`);
+        }
+    }
+    
+    return null;
+}
+
+// Determine if attribution should be updated
+function shouldUpdateAttribution(conversion, newMatch) {
+    const hasCurrentAttribution = conversion.landing_page && conversion.landing_page !== '';
+    
+    if (!hasCurrentAttribution) {
+        return { update: true, type: 'NEW_ATTRIBUTION' };
+    }
+    
+    // Has existing attribution - check temporal precedence
+    const currentAttributionTime = conversion.attributed_pageview_timestamp || conversion.timestamp;
+    const newMatchTime = newMatch.pageview.timestamp;
+    
+    if (new Date(newMatchTime) < new Date(currentAttributionTime)) {
+        return { update: true, type: 'TEMPORAL_IMPROVEMENT' };
+    } else {
+        return { update: false, type: 'NO_IMPROVEMENT' };
+    }
+}
+
 // Check if conversion has POSSIBLE attribution confidence
 async function checkForPossibleAttribution(conversion) {
     try {
