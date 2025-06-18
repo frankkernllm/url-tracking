@@ -15,7 +15,7 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🧪 Starting TEST: Single Conversion Attribution Recovery (6-Hour Window)');
+        console.log('🧪 Starting TEST: Single Conversion Attribution Recovery (24-Hour Window)');
         console.log('🎯 Testing most recent unattributed conversion with comprehensive pageview analysis');
         
         // Step 1: Fetch analytics data from June 12-18
@@ -46,7 +46,7 @@ exports.handler = async (event, context) => {
         console.log(`   ⏰ Conversion Time: ${testConversion.timestamp}`);
         console.log(`   📊 Testing 1 of ${allUnattributedConversions.length} unattributed conversions`);
         
-        // Step 4: Analyze this single conversion with 6-hour comprehensive window
+        // Step 4: Analyze this single conversion with 24-hour comprehensive window
         const recoveryResults = await analyzeSingleConversionComprehensive(testConversion, analyticsData.page_views);
         
         // Step 5: If match found, optionally update Redis (keeping test mode flag)
@@ -73,11 +73,11 @@ exports.handler = async (event, context) => {
                 },
                 results: recoveryResults,
                 message: recoveryResults.matches.length > 0 ? 
-                    `TEST SUCCESS: Found attribution match for ${testConversion.email} in 6-hour window` :
-                    `TEST COMPLETE: No attribution match found for ${testConversion.email} in 6-hour comprehensive search`,
+                    `TEST SUCCESS: Found attribution match for ${testConversion.email} in 24-hour window` :
+                    `TEST COMPLETE: No attribution match found for ${testConversion.email} in 24-hour comprehensive search`,
                 total_unattributed: allUnattributedConversions.length,
                 date_range: 'June 12-18, 2025',
-                search_window: '6 hours comprehensive'
+                search_window: '24 hours comprehensive'
             })
         };
 
@@ -102,9 +102,9 @@ let cacheStats = {
     errors: 0
 };
 
-// Analyze single conversion with comprehensive 6-hour window
+// Analyze single conversion with comprehensive 24-hour window
 async function analyzeSingleConversionComprehensive(conversion, pageviews) {
-    console.log('🔬 COMPREHENSIVE TEST: Analyzing single conversion with 6-hour pageview window...');
+    console.log('🔬 COMPREHENSIVE TEST: Analyzing single conversion with 24-hour pageview window...');
     
     // Reset cache statistics for this test
     cacheStats = { hits: 0, misses: 0, errors: 0 };
@@ -115,7 +115,7 @@ async function analyzeSingleConversionComprehensive(conversion, pageviews) {
         matches: [],
         test_details: {
             conversion_analyzed: conversion.email,
-            search_window_minutes: 360, // 6 hours
+            search_window_minutes: 1440, // 24 hours
             total_pageviews_checked: 0,
             ipv6_pageviews_in_window: 0,
             geographic_lookups_performed: 0,
@@ -127,16 +127,16 @@ async function analyzeSingleConversionComprehensive(conversion, pageviews) {
     console.log(`   📍 Conversion IP: ${conversion.ip_address}`);
     console.log(`   ⏰ Conversion Time: ${conversion.timestamp}`);
     
-    // Find ALL pageviews in 6-hour window (360 minutes)
-    const candidatePageviews = findAllPageviewsInWindow(conversion, pageviews, 0, 360);
+    // Find ALL pageviews in 24-hour window (1440 minutes)
+    const candidatePageviews = findAllPageviewsInWindow(conversion, pageviews, 0, 1440);
     
     if (candidatePageviews.length === 0) {
-        console.log(`   ❌ No pageviews found in 6-hour window`);
+        console.log(`   ❌ No pageviews found in 24-hour window`);
         results.test_details.ipv6_pageviews_in_window = 0;
         return results;
     }
     
-    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 6-hour window`);
+    console.log(`   📱 Found ${candidatePageviews.length} pageviews in 24-hour window`);
     results.test_details.ipv6_pageviews_in_window = candidatePageviews.length;
     
     // Get geographic data for conversion IP
@@ -154,13 +154,13 @@ async function analyzeSingleConversionComprehensive(conversion, pageviews) {
         results.matches.push({
             conversion: conversion,
             match: match,
-            phase: 'COMPREHENSIVE_6H',
+            phase: 'COMPREHENSIVE_24H',
             confidence: match.confidence
         });
         
         results.recovered = 1;
     } else {
-        console.log('   ❌ COMPREHENSIVE TEST: No matches found in entire 6-hour window');
+        console.log('   ❌ COMPREHENSIVE TEST: No matches found in entire 24-hour window');
     }
     
     // Final cache statistics
@@ -213,7 +213,7 @@ function findAllPageviewsInWindow(conversion, pageviews, startMinutes, endMinute
     console.log(`   📊 Found ${candidatePageviews.length} total pageviews in time window out of ${pageviews.length} total pageviews`);
     console.log(`   🌐 IP breakdown: ${ipv4Count} IPv4, ${ipv6Count} IPv6`);
     console.log(`   🕐 Sorted by timestamp (newest first) - will check most recent matches first`);
-    console.log(`   🔬 COMPREHENSIVE TEST: No limits - checking ALL pageviews in 6-hour window`);
+    console.log(`   🔬 COMPREHENSIVE TEST: No limits - checking ALL pageviews in 24-hour window`);
     
     return candidatePageviews;
 }
@@ -619,7 +619,7 @@ async function updateRecoveredAttributions(matches, testMode = false) {
                     utm_campaign: pageview.utm_campaign || conversionData.utm_campaign,
                     utm_medium: pageview.utm_medium || conversionData.utm_medium,
                     referrer_url: pageview.referrer_url || conversionData.referrer_url,
-                    recovery_method: testMode ? 'TEST_comprehensive_6h' : 'comprehensive_6h',
+                    recovery_method: testMode ? 'TEST_comprehensive_24h' : 'comprehensive_24h',
                     recovery_phase: match.phase,
                     recovery_confidence: match.confidence,
                     recovery_score: match.match.score,
