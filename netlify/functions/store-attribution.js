@@ -1,5 +1,5 @@
 // File: netlify/functions/store-attribution.js
-// ENHANCED: IPv6-safe + Device Fingerprinting + Geographic Keys (Phase 2 & 3)
+// ENHANCED: IPv6-safe + Device Fingerprinting + Geographic Keys + Direct Lookup Keys (Phase 4)
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -64,6 +64,17 @@ const handler = async (event, context) => {
     return str.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
   }
 
+  // NEW: Hash function for privacy-safe parameter values (matching landing page script)
+  function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36); // Convert to base36 for shorter string
+  }
+
   if (event.httpMethod === 'POST') {
     try {
       const attributionData = JSON.parse(event.body);
@@ -71,13 +82,15 @@ const handler = async (event, context) => {
       const visitorIP = getVisitorIP(event);
       attributionData.ip_address = visitorIP;
       
-      console.log('📊 Storing attribution data:', {
+      console.log('📊 Storing enhanced attribution data:', {
         session_id: attributionData.session_id,
         ip_address: visitorIP,
         source: attributionData.source,
         landing_page: attributionData.landing_page,
         canvas_fp: attributionData.canvas_fingerprint?.substring(0, 10) + '...',
-        webgl_fp: attributionData.webgl_fingerprint?.substring(0, 10) + '...'
+        webgl_fp: attributionData.webgl_fingerprint?.substring(0, 10) + '...',
+        cpu_cores: attributionData.cpu_cores,
+        memory_gb: attributionData.memory_gb
       });
       
       const timestamp = Date.now();
@@ -92,42 +105,75 @@ const handler = async (event, context) => {
       await redis(`set/${baseKey}/${encodeURIComponent(JSON.stringify(attributionData))}`);
       console.log('✅ Stored attribution with key:', baseKey);
       
-      // Create lookup keys with 24-hour expiration (86400 seconds)
+      // Create basic lookup keys with 24-hour expiration (86400 seconds)
       const ipKey = `attribution_ip_${encodedIP}`;
       const sessionKey = `attribution_session_${attributionData.session_id}`;
       
       await redis(`setex/${ipKey}/86400/${baseKey}`);
       await redis(`setex/${sessionKey}/86400/${baseKey}`);
       
-      console.log('✅ Created lookup keys:', { ipKey, sessionKey });
+      console.log('✅ Created basic lookup keys:', { ipKey, sessionKey });
       
       let additionalKeysCreated = 0;
 
-      // PHASE 2: Device fingerprint storage for cross-device attribution
+      // ✅ ENHANCED: Device fingerprint storage with DUAL key pattern for cross-device attribution
       try {
         const deviceFingerprint = attributionData.canvas_fingerprint || '';
         if (deviceFingerprint && deviceFingerprint !== 'unavailable' && deviceFingerprint.length > 10) {
-          // Use last 20 characters for uniqueness while keeping key reasonable length
+          // 1. EXISTING: Timestamped key for analytics
           const fpHash = deviceFingerprint.slice(-20);
           const fpKey = `attribution_fp_${fpHash}_${timestamp}`;
           await redis(`setex/${fpKey}/86400/${baseKey}`);
-          console.log('✅ Created fingerprint key:', fpKey);
+          console.log('✅ Created timestamped fingerprint key:', fpKey);
+          additionalKeysCreated++;
+          
+          // 2. NEW: Direct lookup key (no timestamp) for track.js priority matching
+          const directFpKey = `attribution_fp_${fpHash}`;
+          await redis(`setex/${directFpKey}/86400/${baseKey}`);
+          console.log('✅ Created direct fingerprint lookup key:', directFpKey);
           additionalKeysCreated++;
         }
 
-        // Additional WebGL fingerprint key for enhanced cross-device matching
+        // ✅ ENHANCED: WebGL fingerprint with dual pattern
         const webglFingerprint = attributionData.webgl_fingerprint || '';
         if (webglFingerprint && webglFingerprint !== 'unavailable' && webglFingerprint !== 'blocked' && webglFingerprint.length > 10) {
           const webglHash = cleanForRedisKey(webglFingerprint.substring(0, 30));
           if (webglHash.length > 5) {
+            // 1. EXISTING: Timestamped key
             const webglKey = `attribution_webgl_${webglHash}_${timestamp}`;
             await redis(`setex/${webglKey}/86400/${baseKey}`);
-            console.log('✅ Created WebGL fingerprint key:', webglKey);
+            console.log('✅ Created timestamped WebGL key:', webglKey);
+            additionalKeysCreated++;
+            
+            // 2. NEW: Direct lookup key for hashed WebGL signature (gsig parameter)
+            const hashedWebGL = hashString(webglFingerprint);
+            const directWebglKey = `attribution_webgl_${hashedWebGL}`;
+            await redis(`setex/${directWebglKey}/86400/${baseKey}`);
+            console.log('✅ Created direct WebGL lookup key:', directWebglKey);
             additionalKeysCreated++;
           }
         }
+
+        // ✅ NEW: Screen resolution hash key (SVV parameter from landing page)
+        const screenResolution = attributionData.screen_resolution || '';
+        if (screenResolution && screenResolution !== 'unknown') {
+          const screenHash = hashString(screenResolution);
+          const screenKey = `attribution_screen_${screenHash}`;
+          await redis(`setex/${screenKey}/86400/${baseKey}`);
+          console.log('✅ Created screen hash key:', screenKey);
+          additionalKeysCreated++;
+        }
+
+        // ✅ NEW: Enhanced hardware fingerprinting keys
+        if (attributionData.cpu_cores && attributionData.cpu_cores !== 'unknown') {
+          const hardwareKey = `attribution_hw_${attributionData.cpu_cores}_${attributionData.memory_gb || 'unknown'}`;
+          await redis(`setex/${hardwareKey}/86400/${baseKey}`);
+          console.log('✅ Created hardware fingerprint key:', hardwareKey);
+          additionalKeysCreated++;
+        }
+
       } catch (fpError) {
-        console.log('⚠️ Fingerprint key creation failed:', fpError.message);
+        console.log('⚠️ Enhanced fingerprint key creation failed:', fpError.message);
       }
 
       // PHASE 3: Geographic keys for faster correlation (IPv6/IPv4 dual-stack solution)
@@ -222,7 +268,9 @@ const handler = async (event, context) => {
           encoded_ip: encodedIP,
           enhancements: {
             fingerprint_keys: additionalKeysCreated > 0,
-            geographic_keys: additionalKeysCreated > 2,
+            direct_lookup_keys: true, // NEW: Direct lookup keys for track.js
+            geographic_keys: additionalKeysCreated > 5,
+            hardware_fingerprinting: true, // NEW: CPU/memory fingerprinting
             cross_device_ready: true,
             ipv6_ipv4_correlation: true
           }
