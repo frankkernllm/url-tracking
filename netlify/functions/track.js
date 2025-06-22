@@ -67,13 +67,15 @@ const handler = async (event, context) => {
     return Math.abs(hash).toString(36); // Convert to base36 for shorter string
   }
 
-  // ✅ ENHANCED: Multi-priority attribution function with 6-tier system
+  // ✅ ENHANCED: Multi-priority attribution function with 7-tier system
   async function findEnhancedAttribution(webhookData) {
-    console.log('🔍 Starting enhanced 6-tier attribution search...', {
+    console.log('🔍 Starting enhanced 7-tier attribution search...', {
       SSID: webhookData.SSID || 'none',
-      PIP: webhookData.PIP || 'none', 
-      CIP: webhookData.CIP || 'none',
+      PIP: webhookData.PIP || 'none',
+      CIP: webhookData.CIP || 'none', 
+      IP: webhookData.IP || 'none',
       dsig: webhookData.dsig?.substring(0, 10) + '...' || 'none',
+      SVV: webhookData.SVV || 'none',
       gsig: webhookData.gsig || 'none'
     });
     
@@ -98,9 +100,9 @@ const handler = async (event, context) => {
       console.log('⚠️ Priority 1: SSID lookup failed');
     }
     
-    // Priority 2: Primary IP Match (250 points) - IPv6 Original
+    // Priority 2: Primary IP Match (280 points) - IPv6 Original or Explicit Primary IP
     if (webhookData.PIP) {
-      console.log('🔍 Priority 2: Trying Primary IP match (IPv6):', webhookData.PIP);
+      console.log('🔍 Priority 2: Trying Primary IP match:', webhookData.PIP);
       const pipKey = `attribution_ip_${encodeIPForKey(webhookData.PIP)}`;
       const pipResult = await redis(`get/${pipKey}`);
       
@@ -108,11 +110,11 @@ const handler = async (event, context) => {
         const mainKey = pipResult.result;
         const attributionResult = await redis(`get/${mainKey}`);
         if (attributionResult.result) {
-          console.log('✅ Priority 2: Primary IP match found (IPv6 original)');
+          console.log('✅ Priority 2: Primary IP match found');
           return {
             method: 'primary_ip_match',
-            score: 250,
-            matched_ip: 'primary_ipv6',
+            score: 280,
+            matched_ip: 'primary',
             ...JSON.parse(attributionResult.result)
           };
         }
@@ -120,9 +122,9 @@ const handler = async (event, context) => {
       console.log('⚠️ Priority 2: Primary IP lookup failed');
     }
     
-    // Priority 3: Conversion IP Match (200 points) - IPv4 Converted
+    // Priority 3: Conversion IP Match (260 points) - Top-level checkout IP
     if (webhookData.CIP && webhookData.CIP !== webhookData.PIP) {
-      console.log('🔍 Priority 3: Trying Conversion IP match (IPv4):', webhookData.CIP);
+      console.log('🔍 Priority 3: Trying Conversion IP match:', webhookData.CIP);
       const cipKey = `attribution_ip_${encodeIPForKey(webhookData.CIP)}`;
       const cipResult = await redis(`get/${cipKey}`);
       
@@ -130,11 +132,11 @@ const handler = async (event, context) => {
         const mainKey = cipResult.result;
         const attributionResult = await redis(`get/${mainKey}`);
         if (attributionResult.result) {
-          console.log('✅ Priority 3: Conversion IP match found (IPv4 converted)');
+          console.log('✅ Priority 3: Conversion IP match found');
           return {
             method: 'conversion_ip_match',
-            score: 200,
-            matched_ip: 'conversion_ipv4',
+            score: 260,
+            matched_ip: 'conversion',
             ...JSON.parse(attributionResult.result)
           };
         }
@@ -142,10 +144,31 @@ const handler = async (event, context) => {
       console.log('⚠️ Priority 3: Conversion IP lookup failed');
     }
     
-    // Priority 4: Device Signature Match (180 points) - Cross-device attribution
+    // Priority 4: Pageview IP Match (240 points) - Nested pageview IP (backward compatibility)
+    if (webhookData.IP && webhookData.IP !== webhookData.CIP && webhookData.IP !== webhookData.PIP) {
+      console.log('🔍 Priority 4: Trying Pageview IP match:', webhookData.IP);
+      const ipKey = `attribution_ip_${encodeIPForKey(webhookData.IP)}`;
+      const ipResult = await redis(`get/${ipKey}`);
+      
+      if (ipResult.result) {
+        const mainKey = ipResult.result;
+        const attributionResult = await redis(`get/${mainKey}`);
+        if (attributionResult.result) {
+          console.log('✅ Priority 4: Pageview IP match found');
+          return {
+            method: 'pageview_ip_match',
+            score: 240,
+            matched_ip: 'pageview',
+            ...JSON.parse(attributionResult.result)
+          };
+        }
+      }
+      console.log('⚠️ Priority 4: Pageview IP lookup failed');
+    }
+    
+    // Priority 5: Device Signature Match (220 points) - Cross-device attribution
     if (webhookData.dsig) {
-      console.log('🔍 Priority 4: Trying device signature match:', webhookData.dsig);
-      // Use direct lookup key (no timestamp) created by enhanced store-attribution.js
+      console.log('🔍 Priority 5: Trying device signature match:', webhookData.dsig);
       const fpKey = `attribution_fp_${webhookData.dsig}`;
       const fpResult = await redis(`get/${fpKey}`);
       
@@ -153,21 +176,41 @@ const handler = async (event, context) => {
         const mainKey = fpResult.result;
         const attributionResult = await redis(`get/${mainKey}`);
         if (attributionResult.result) {
-          console.log('✅ Priority 4: Device signature match found - cross-device attribution');
+          console.log('✅ Priority 5: Device signature match found - cross-device attribution');
           return {
             method: 'device_signature_match',
-            score: 180,
+            score: 220,
             ...JSON.parse(attributionResult.result)
           };
         }
       }
-      console.log('⚠️ Priority 4: Device signature lookup failed');
+      console.log('⚠️ Priority 5: Device signature lookup failed');
     }
     
-    // Priority 5: WebGL Signature Match (160 points) - Additional device validation
+    // Priority 6: Screen Hash Match (200 points) - Privacy-safe device correlation
+    if (webhookData.SVV) {
+      console.log('🔍 Priority 6: Trying screen hash match:', webhookData.SVV);
+      const screenKey = `attribution_screen_${webhookData.SVV}`;
+      const screenResult = await redis(`get/${screenKey}`);
+      
+      if (screenResult.result) {
+        const mainKey = screenResult.result;
+        const attributionResult = await redis(`get/${mainKey}`);
+        if (attributionResult.result) {
+          console.log('✅ Priority 6: Screen hash match found - privacy-safe device correlation');
+          return {
+            method: 'screen_hash_match',
+            score: 200,
+            ...JSON.parse(attributionResult.result)
+          };
+        }
+      }
+      console.log('⚠️ Priority 6: Screen hash lookup failed');
+    }
+    
+    // Priority 7: WebGL Signature Match (180 points) - Additional device validation
     if (webhookData.gsig) {
-      console.log('🔍 Priority 5: Trying WebGL signature match:', webhookData.gsig);
-      // Use direct lookup key for hashed WebGL signature
+      console.log('🔍 Priority 7: Trying WebGL signature match:', webhookData.gsig);
       const webglKey = `attribution_webgl_${webhookData.gsig}`;
       const webglResult = await redis(`get/${webglKey}`);
       
@@ -175,28 +218,29 @@ const handler = async (event, context) => {
         const mainKey = webglResult.result;
         const attributionResult = await redis(`get/${mainKey}`);
         if (attributionResult.result) {
-          console.log('✅ Priority 5: WebGL signature match found');
+          console.log('✅ Priority 7: WebGL signature match found');
           return {
             method: 'webgl_signature_match',
-            score: 160,
+            score: 180,
             ...JSON.parse(attributionResult.result)
           };
         }
       }
-      console.log('⚠️ Priority 5: WebGL signature lookup failed');
+      console.log('⚠️ Priority 7: WebGL signature lookup failed');
     }
     
-    // Priority 6: Geographic Correlation (60-100 points) - EXISTING LOGIC MAINTAINED
-    console.log('🔍 Priority 6: Falling back to geographic correlation');
-    const geoResult = await tryGeographicCorrelation([webhookData.PIP, webhookData.CIP].filter(Boolean));
+    // Priority 8: Geographic Correlation (60-100 points) - EXISTING LOGIC MAINTAINED
+    console.log('🔍 Priority 8: Falling back to geographic correlation');
+    const testIPs = [webhookData.PIP, webhookData.CIP, webhookData.IP].filter(Boolean);
+    const geoResult = await tryGeographicCorrelation(testIPs);
     if (geoResult) {
-      console.log('✅ Priority 6: Geographic correlation successful');
+      console.log('✅ Priority 8: Geographic correlation successful');
       return geoResult;
     }
     
-    console.log('❌ All 6 attribution priorities failed');
+    console.log('❌ All 8 attribution priorities failed');
     return null;
-  }
+  } '
 
   // EXISTING: Geographic correlation function (maintained for backward compatibility)
   async function tryGeographicCorrelation(customerIPs) {
@@ -603,7 +647,7 @@ const handler = async (event, context) => {
     
     console.log('📥 Raw webhook/conversion data:', JSON.stringify(data, null, 2));
     
-    // ✅ ENHANCED: Extract all attribution data from webhook
+    // ✅ ENHANCED: Extract all attribution data from webhook (FIXED to match actual Spiffy fields)
     const extractedData = {
       // Basic conversion data
       email: data.email || data.customer?.email,
@@ -611,15 +655,15 @@ const handler = async (event, context) => {
       order_id: data.order_id,
       offer_name: data.offer_name,
       
-      // ✅ ENHANCED: Dual IP extraction
-      PIP: data.PIP || data.ip,                                                     // Primary IP (IPv6 original)
-      CIP: data.CIP || data.checkoutview?.pageviewcheckout?.pageview?.ip,          // Conversion IP (IPv4 converted)
-      IP: data.checkoutview?.pageviewcheckout?.pageview?.ip || data.ip,            // Backward compatibility
+      // ✅ FIXED: IP extraction mapping to actual Spiffy webhook structure
+      PIP: data.custom_ipv6 || data.custom_ipv4,                                   // Primary IP (explicit custom fields)
+      CIP: data.ip,                                                                // Conversion IP (top level)
+      IP: data.checkoutview?.pageviewcheckout?.pageview?.ip,                       // Pageview IP (nested - backward compatibility)
       
-      // ✅ NEW: Custom attribution parameters from landing page link injection
-      SSID: data.SSID,                                                             // Session ID
-      dsig: data.dsig,                                                             // Device signature
-      SVV: data.SVV,                                                               // Screen value (hashed)
+      // ✅ FIXED: Custom attribution parameters matching actual Spiffy webhook field names
+      SSID: data.ssid,                                                             // Session ID (lowercase)
+      dsig: data.dsig,                                                             // Device signature (canvas slice)
+      SVV: data.svvv,                                                              // Screen value (hashed - webhook sends svvv)
       gsig: data.gsig,                                                             // GPU signature (hashed)
       
       // UTM parameters from multiple locations (EXISTING - MAINTAINED)
@@ -662,19 +706,25 @@ const handler = async (event, context) => {
       email: extractedData.email,
       PIP: extractedData.PIP,
       CIP: extractedData.CIP,
+      IP: extractedData.IP,
       SSID: extractedData.SSID,
-      dsig: extractedData.dsig?.substring(0, 10) + '...',
+      dsig: extractedData.dsig?.substring(0, 10) + '...' || 'null',
+      SVV: extractedData.SVV,
       gsig: extractedData.gsig,
       utm_source: extractedData.utm_source,
       utm_campaign: extractedData.utm_campaign
     });
     
-    // Detect dual IP scenario
-    const isDualIP = extractedData.PIP !== extractedData.CIP && extractedData.PIP && extractedData.CIP;
+    // Detect dual IP scenario (IPv6 to IPv4 conversion)
+    const isDualIP = extractedData.PIP && extractedData.CIP && extractedData.PIP !== extractedData.CIP;
     if (isDualIP) {
-      console.log('🔄 Dual IP detected - IPv6 to IPv4 conversion:', {
+      console.log('🔄 Dual IP detected - IPv6 to IPv4 conversion scenario:', {
         PIP: extractedData.PIP,
         CIP: extractedData.CIP
+      });
+    } else if (extractedData.PIP && extractedData.CIP && extractedData.PIP === extractedData.CIP) {
+      console.log('📍 Single IP scenario - same address throughout:', {
+        IP: extractedData.PIP
       });
     }
     
@@ -683,16 +733,16 @@ const handler = async (event, context) => {
     let attributionResult = null;
     
     if (isSpiffyWebhook) {
-      console.log('🛒 Spiffy webhook detected, starting enhanced 6-tier attribution lookup...');
+      console.log('🛒 Spiffy webhook detected, starting enhanced 8-tier attribution lookup...');
       
-      // ✅ ENHANCED: Use new 6-tier attribution system
+      // ✅ ENHANCED: Use new 8-tier attribution system with proper IP handling
       attributionResult = await findEnhancedAttribution(extractedData);
       
       // ✅ FALLBACK: If enhanced attribution fails, try existing geographic correlation
       if (!attributionResult) {
-        console.log('🔄 Enhanced attribution failed, trying legacy geographic correlation...');
-        const customerIPs = [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(Boolean);
-        attributionResult = await tryGeographicCorrelation(customerIPs);
+        console.log('🔄 Enhanced attribution failed, trying geographic correlation...');
+        const testIPs = [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(Boolean);
+        attributionResult = await tryGeographicCorrelation(testIPs);
       }
       
       // ✅ FINAL FALLBACK: Email-based lookup
@@ -762,12 +812,14 @@ const handler = async (event, context) => {
       attribution_score: Math.round(attributionScore),
       attribution_source: attributionData ? 'lookup' : 'direct',
       
-      // ✅ NEW: Enhanced attribution metadata
+      // ✅ NEW: Enhanced attribution metadata with proper IP tracking
       dual_ip_scenario: isDualIP,
       primary_ip: extractedData.PIP,
       conversion_ip: extractedData.CIP,
+      pageview_ip: extractedData.IP,
       session_id_found: !!extractedData.SSID,
       device_signature_found: !!extractedData.dsig,
+      screen_hash_found: !!extractedData.SVV,
       webgl_signature_found: !!extractedData.gsig
     };
     
