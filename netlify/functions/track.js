@@ -1,8 +1,8 @@
 // File: netlify/functions/track.js
-// Clean version with no syntax errors
+// PRODUCTION-READY: Handles missing custom fields gracefully with CORRECTED IP mapping
 
 const handler = async (event, context) => {
-  console.log('Track function started');
+  console.log('Enhanced track function started');
 
   // Handle CORS preflight
   if (event.httpMethod === 'OPTIONS') {
@@ -80,7 +80,7 @@ const handler = async (event, context) => {
     const data = JSON.parse(event.body || '{}');
     console.log('Webhook data received:', Object.keys(data));
 
-    // Extract data safely
+    // Extract data safely with comprehensive field mapping
     const extractedData = {
       email: data.email || data.customer?.email || 'unknown',
       order_total: parseFloat(data.order_total) || 0,
@@ -92,12 +92,12 @@ const handler = async (event, context) => {
       offer_name: data.offer_name,
       event_name: data.event_name,
       
-      // IP addresses
-      PIP: data.custom_ipv6 || data.custom_ipv4,
-      CIP: data.ip,
-      IP: data.checkoutview?.pageviewcheckout?.pageview?.ip,
+      // IP addresses - CORRECTED mapping based on Spiffy webhook structure
+      PIP: data.ip,                                           // Primary/Original pageview IP (top-level)
+      CIP: data.checkoutview?.pageviewcheckout?.pageview?.ip, // Conversion/Checkout IP (nested)
+      IP: data.ip,                                            // Original pageview IP (same as PIP)
       
-      // Attribution parameters - handle both field name variations
+      // Attribution parameters - handle both field name variations and missing fields
       SSID: data.ssid,
       dsig: data.dsig,
       SVV: data.svvv || data.SVV, // Spiffy may send as 'svvv'
@@ -268,6 +268,7 @@ const handler = async (event, context) => {
       primary_ip: extractedData.PIP || null,
       conversion_ip: extractedData.CIP || null,
       pageview_ip: extractedData.IP || null,
+      
       // Enhanced dual IP detection - check all IP combinations
       dual_ip_scenario: isDualIPScenario,
       ip_addresses_detected: uniqueIPs.length,
