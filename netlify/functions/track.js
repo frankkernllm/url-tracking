@@ -117,6 +117,11 @@ const handler = async (event, context) => {
       timestamp: new Date().toISOString()
     };
 
+    // Enhanced dual IP detection
+    const allIPs = [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(ip => ip && ip.trim() !== '');
+    const uniqueIPs = [...new Set(allIPs)];
+    const isDualIPScenario = uniqueIPs.length > 1;
+
     console.log('Extracted data:', {
       email: extractedData.email,
       order_total: extractedData.order_total,
@@ -128,7 +133,8 @@ const handler = async (event, context) => {
       has_PIP: !!extractedData.PIP,
       has_CIP: !!extractedData.CIP,
       has_IP: !!extractedData.IP,
-      dual_ip: !!(extractedData.PIP && extractedData.CIP && extractedData.PIP !== extractedData.CIP),
+      dual_ip: isDualIPScenario,
+      unique_ip_count: uniqueIPs.length,
       missing_attribution_fields: [
         !extractedData.SSID && 'session_id',
         !extractedData.dsig && 'device_signature', 
@@ -262,7 +268,10 @@ const handler = async (event, context) => {
       primary_ip: extractedData.PIP || null,
       conversion_ip: extractedData.CIP || null,
       pageview_ip: extractedData.IP || null,
-      dual_ip_scenario: !!(extractedData.PIP && extractedData.CIP && extractedData.PIP !== extractedData.CIP)
+      // Enhanced dual IP detection - check all IP combinations
+      dual_ip_scenario: isDualIPScenario,
+      ip_addresses_detected: uniqueIPs.length,
+      unique_ips: uniqueIPs
     };
 
     console.log('Final tracking data:', trackingData);
@@ -288,7 +297,7 @@ const handler = async (event, context) => {
         attribution_score: trackingData.attribution_score || 0,
         order_id: trackingData.order_id,
         event_type: trackingData.event_type,
-        dual_ip_detected: trackingData.dual_ip_scenario,
+        dual_ip_detected: isDualIPScenario,
         attribution_fields_received: trackingData.attribution_fields_present,
         webhook_health: {
           data_extracted: true,
