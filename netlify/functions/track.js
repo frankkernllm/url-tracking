@@ -300,6 +300,16 @@ const handler = async (event, context) => {
         event_type: trackingData.event_type,
         dual_ip_detected: isDualIPScenario,
         attribution_fields_received: trackingData.attribution_fields_present,
+        
+        // IP breakdown for verification (can remove in production)
+        ip_details: {
+          primary_ip: extractedData.PIP,
+          conversion_ip: extractedData.CIP,
+          pageview_ip: extractedData.IP,
+          unique_ips: uniqueIPs,
+          ip_count: uniqueIPs.length
+        },
+        
         webhook_health: {
           data_extracted: true,
           attribution_attempted: true,
