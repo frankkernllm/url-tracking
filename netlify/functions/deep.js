@@ -649,12 +649,49 @@ function findPageviewsIn24HourWindow(conversion, pageviews) {
     const pageviewsWithoutIP = pageviews.filter(pv => !pv.ip_address);
     console.log(`      📊 Pageviews with IP: ${pageviewsWithIP.length}, without IP: ${pageviewsWithoutIP.length}`);
     
-    // Debug: Check how many are in time window (regardless of IP)
-    const pageviewsInTimeWindow = pageviews.filter(pv => {
-        const pvTime = new Date(pv.timestamp);
-        return pvTime >= windowStart && pvTime <= conversionTime;
+    // Debug: Check time distribution
+    let beforeWindow = 0;
+    let inWindow = 0; 
+    let afterWindow = 0;
+    let invalidTime = 0;
+    
+    pageviews.forEach(pv => {
+        try {
+            const pvTime = new Date(pv.timestamp);
+            if (isNaN(pvTime.getTime())) {
+                invalidTime++;
+            } else if (pvTime < windowStart) {
+                beforeWindow++;
+            } else if (pvTime > conversionTime) {
+                afterWindow++;
+            } else {
+                inWindow++;
+            }
+        } catch (error) {
+            invalidTime++;
+        }
     });
-    console.log(`      📊 Pageviews in time window (all): ${pageviewsInTimeWindow.length}`);
+    
+    console.log(`      📊 Time distribution:`);
+    console.log(`      ⏰ Before window (< ${windowStart.toISOString()}): ${beforeWindow}`);
+    console.log(`      ✅ In window (${windowStart.toISOString()} to ${conversionTime.toISOString()}): ${inWindow}`);
+    console.log(`      ⏰ After window (> ${conversionTime.toISOString()}): ${afterWindow}`);
+    console.log(`      ❌ Invalid timestamps: ${invalidTime}`);
+    
+    // Show sample pageviews just outside the window for debugging
+    const justBefore = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        const timeDiff = windowStart.getTime() - pvTime.getTime();
+        return timeDiff > 0 && timeDiff < 2 * 60 * 60 * 1000; // Within 2 hours before window
+    }).slice(0, 3);
+    
+    if (justBefore.length > 0) {
+        console.log(`      🔍 Sample pageviews just before window:`);
+        justBefore.forEach(pv => {
+            const hoursBefore = (windowStart.getTime() - new Date(pv.timestamp).getTime()) / (1000 * 60 * 60);
+            console.log(`      ⏰ ${pv.timestamp} (${hoursBefore.toFixed(1)} hours before window)`);
+        });
+    }
     
     // Debug: Check how many have IP AND are in time window
     const candidatePageviews = pageviews.filter(pv => {
@@ -662,18 +699,19 @@ function findPageviewsIn24HourWindow(conversion, pageviews) {
         const inTimeWindow = pvTime >= windowStart && pvTime <= conversionTime;
         const hasIP = pv.ip_address;
         
-        // Log first few that fail each filter
-        if (!inTimeWindow && pageviewsInTimeWindow.length < 50) {
-            console.log(`      ⏰ Outside time window: ${pv.timestamp} (${pvTime.toISOString()})`);
-        }
-        if (inTimeWindow && !hasIP && pageviewsWithoutIP.length < 10) {
-            console.log(`      🚫 In time window but no IP: ${pv.timestamp}`);
-        }
-        
         return inTimeWindow && hasIP;
     });
     
     console.log(`      ✅ Final candidates (in window + has IP): ${candidatePageviews.length}`);
+    
+    // Show first few candidates for verification
+    if (candidatePageviews.length > 0) {
+        console.log(`      🔍 Sample candidates in window:`);
+        candidatePageviews.slice(0, 3).forEach((pv, index) => {
+            const minutesBefore = (conversionTime.getTime() - new Date(pv.timestamp).getTime()) / (1000 * 60);
+            console.log(`      ✅ ${index + 1}. ${pv.timestamp} (${minutesBefore.toFixed(1)} min before conversion)`);
+        });
+    }
     
     // Sort by timestamp DESCENDING (newest first = closest to conversion)
     candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
