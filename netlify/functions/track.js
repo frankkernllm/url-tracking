@@ -1,4 +1,5 @@
 // File: netlify/functions/track.js
+// FIXED: Device signature attribution now properly copies landing_page field
 // PRODUCTION-READY: Handles missing custom fields gracefully with CORRECTED IP mapping
 
 const handler = async (event, context) => {
@@ -94,61 +95,83 @@ const handler = async (event, context) => {
       
       // IP addresses - CORRECTED mapping based on Spiffy webhook structure
       PIP: data.ip,                                           // Primary/Original pageview IP (top-level)
-      CIP: data.checkoutview?.pageviewcheckout?.pageview?.ip, // Conversion/Checkout IP (nested)
-      IP: data.ip,                                            // Original pageview IP (same as PIP)
+      CIP: data.customer?.ip_address,                         // Conversion/Checkout IP (nested)
+      IP: data.customer?.ip_address || data.ip,               // Fallback IP
       
-      // Attribution parameters - handle both field name variations and missing fields
-      SSID: data.ssid,
-      dsig: data.dsig,
-      SVV: data.svvv || data.SVV, // Spiffy may send as 'svvv'
-      gsig: data.gsig,
-      
-      // UTM parameters from multiple possible locations
-      utm_source: data.utm_source || 
-                 data.checkoutview?.utm_source ||
-                 data.checkoutview?.pageviewcheckout?.pageview?.utm_source,
-      utm_campaign: data.utm_campaign || 
-                   data.checkoutview?.utm_campaign ||
-                   data.checkoutview?.pageviewcheckout?.pageview?.utm_campaign,
-      utm_medium: data.utm_medium || 
-                 data.checkoutview?.utm_medium ||
-                 data.checkoutview?.pageviewcheckout?.pageview?.utm_medium,
-      
-      timestamp: new Date().toISOString()
+      // Enhanced attribution parameters (may be missing)
+      SSID: data.ssid || data.session_id,                     // Session ID from custom field
+      dsig: data.dsig || data.device_signature,               // Device signature from custom field
+      SVV: data.SVV || data.screen_value,                     // Screen value from custom field  
+      gsig: data.gsig || data.gpu_signature                   // GPU signature from custom field
     };
 
-    // Enhanced dual IP detection
+    console.log('Enhanced data extraction complete:', {
+      email: extractedData.email,
+      has_session_id: !!extractedData.SSID,
+      has_device_signature: !!extractedData.dsig,
+      has_screen_value: !!extractedData.SVV,
+      has_gpu_signature: !!extractedData.gsig,
+      ip_addresses: {
+        primary: extractedData.PIP,
+        conversion: extractedData.CIP,
+        fallback: extractedData.IP
+      }
+    });
+
+    // Detect event type
+    const isSubscriptionEvent = !!(data.subscription_id || data.event_name?.includes('subscription'));
+    
+    // Build comprehensive tracking data
+    const trackingData = {
+      email: extractedData.email,
+      order_total: extractedData.order_total,
+      order_id: extractedData.order_id,
+      timestamp: new Date().toISOString(),
+      
+      // Event classification
+      event_type: isSubscriptionEvent ? 'subscription' : 'purchase',
+      subscription_id: extractedData.subscription_id,
+      subscription_amount: extractedData.subscription_amount,
+      offer_name: extractedData.offer_name || 'Ojoy 7 Day FREE Trial',
+      event_name: extractedData.event_name,
+      
+      // Default attribution (will be enhanced if found)
+      attribution_found: false,
+      attribution_method: 'none',
+      attribution_score: 0,
+      source: 'direct',
+      campaign: 'none',
+      medium: 'none',
+      landing_page: null,  // ← CRITICAL: This will be populated from attribution data
+      
+      // Attribution field availability (for debugging/analytics)
+      attribution_fields_present: {
+        session_id: !!extractedData.SSID,
+        device_signature: !!extractedData.dsig,
+        screen_value: !!extractedData.SVV,
+        gpu_signature: !!extractedData.gsig
+      }
+    };
+
+    // IP analysis for dual-IP detection
     const allIPs = [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(ip => ip && ip.trim() !== '');
     const uniqueIPs = [...new Set(allIPs)];
     const isDualIPScenario = uniqueIPs.length > 1;
-
-    console.log('Extracted data:', {
-      email: extractedData.email,
-      order_total: extractedData.order_total,
-      event_name: extractedData.event_name,
-      has_SSID: !!extractedData.SSID,
-      has_dsig: !!extractedData.dsig,
-      has_SVV: !!extractedData.SVV,
-      has_gsig: !!extractedData.gsig,
-      has_PIP: !!extractedData.PIP,
-      has_CIP: !!extractedData.CIP,
-      has_IP: !!extractedData.IP,
-      dual_ip: isDualIPScenario,
-      unique_ip_count: uniqueIPs.length,
-      missing_attribution_fields: [
-        !extractedData.SSID && 'session_id',
-        !extractedData.dsig && 'device_signature', 
-        !extractedData.SVV && 'screen_value',
-        !extractedData.gsig && 'gpu_signature'
-      ].filter(Boolean)
+    
+    console.log('IP Analysis:', {
+      primary_ip: extractedData.PIP,
+      conversion_ip: extractedData.CIP,
+      pageview_ip: extractedData.IP,
+      unique_count: uniqueIPs.length,
+      dual_ip_detected: isDualIPScenario
     });
 
-    // Robust attribution lookup - handles missing fields gracefully
+    // ENHANCED ATTRIBUTION LOGIC - Ordered by priority
     let attributionResult = null;
 
     try {
-      // Priority 1: Session ID lookup (only if SSID exists)
-      if (extractedData.SSID && extractedData.SSID.trim() !== '') {
+      // Priority 1: Session ID lookup (highest priority - 300 points)
+      if (!attributionResult && extractedData.SSID && extractedData.SSID.trim() !== '') {
         console.log('Trying session ID lookup:', extractedData.SSID);
         const sessionKey = `attribution_session_${extractedData.SSID}`;
         const sessionResult = await redis(`get/${sessionKey}`, 2000);
@@ -166,7 +189,7 @@ const handler = async (event, context) => {
         }
       }
 
-      // Priority 2: Device signature lookup (only if dsig exists)
+      // Priority 2: Device signature lookup (220 points) - FIXED VERSION
       if (!attributionResult && extractedData.dsig && extractedData.dsig.trim() !== '') {
         console.log('Trying device signature lookup:', extractedData.dsig);
         const fpKey = `attribution_fp_${extractedData.dsig}`;
@@ -175,25 +198,31 @@ const handler = async (event, context) => {
         if (fpResult.result) {
           const attributionDataResult = await redis(`get/${fpResult.result}`, 2000);
           if (attributionDataResult.result) {
+            const attributionData = JSON.parse(attributionDataResult.result);
             attributionResult = {
-              data: JSON.parse(attributionDataResult.result),
+              data: attributionData,
               method: 'device_signature_match',
               score: 220
             };
             console.log('✅ Device signature attribution found');
+            console.log('Attribution data includes landing_page:', !!attributionData.landing_page);
           }
         }
       }
 
-      // Priority 3: IP lookup (always try if IPs exist)
+      // Priority 3: IP lookup (variable points based on IP type)
       if (!attributionResult && (extractedData.PIP || extractedData.CIP || extractedData.IP)) {
-        // Try Primary IP first, then Conversion IP, then fallback IP
-        const ipList = [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(ip => ip && ip.trim() !== '');
+        // Try Primary IP first (280 points), then Conversion IP (260 points), then fallback IP (240 points)
+        const ipList = [
+          { ip: extractedData.PIP, method: 'primary_ip_match', score: 280 },
+          { ip: extractedData.CIP, method: 'conversion_ip_match', score: 260 },
+          { ip: extractedData.IP, method: 'pageview_ip_match', score: 240 }
+        ].filter(item => item.ip && item.ip.trim() !== '');
         
-        for (const testIP of ipList) {
-          console.log('Trying IP lookup:', testIP);
+        for (const ipItem of ipList) {
+          console.log('Trying IP lookup:', ipItem.ip);
           
-          const encodedIP = encodeIPForKey(testIP);
+          const encodedIP = encodeIPForKey(ipItem.ip);
           const ipKey = `attribution_ip_${encodedIP}`;
           
           const ipResult = await redis(`get/${ipKey}`, 2000);
@@ -202,12 +231,10 @@ const handler = async (event, context) => {
             if (attributionDataResult.result) {
               attributionResult = {
                 data: JSON.parse(attributionDataResult.result),
-                method: testIP === extractedData.PIP ? 'primary_ip_match' : 
-                        testIP === extractedData.CIP ? 'conversion_ip_match' : 'pageview_ip_match',
-                score: testIP === extractedData.PIP ? 280 : 
-                       testIP === extractedData.CIP ? 260 : 240
+                method: ipItem.method,
+                score: ipItem.score
               };
-              console.log(`✅ IP attribution found via ${testIP}`);
+              console.log(`✅ IP attribution found via ${ipItem.ip} (${ipItem.method})`);
               break; // Stop on first match
             }
           }
@@ -220,48 +247,43 @@ const handler = async (event, context) => {
         device_signature_attempted: !!extractedData.dsig,
         ip_addresses_attempted: [extractedData.PIP, extractedData.CIP, extractedData.IP].filter(Boolean).length,
         attribution_found: !!attributionResult,
-        method: attributionResult?.method || 'none'
+        attribution_method: attributionResult?.method || 'none',
+        attribution_score: attributionResult?.score || 0
       });
 
     } catch (attributionError) {
-      console.log('⚠️ Attribution lookup failed (non-critical):', attributionError.message);
-      // Continue execution - attribution failure shouldn't break webhook processing
+      console.log('Attribution lookup error:', attributionError.message);
+      // Continue without attribution - graceful degradation
     }
 
-    // Determine event type
-    const isSubscriptionEvent = data.event_name === 'subscription:started' || data.subscription_id;
-    const isPurchaseEvent = extractedData.order_total > 0;
-    
-    // Build tracking data
-    const trackingData = {
-      timestamp: extractedData.timestamp,
-      event_type: isSubscriptionEvent ? 'subscription' : 'purchase',
+    // CRITICAL FIX: Apply attribution data to tracking record
+    if (attributionResult && attributionResult.data) {
+      const attrData = attributionResult.data;
       
-      source: attributionResult?.data?.source || extractedData.utm_source || 'direct',
-      campaign: attributionResult?.data?.utm_campaign || extractedData.utm_campaign || 'none',
-      medium: attributionResult?.data?.utm_medium || extractedData.utm_medium || 'none',
+      // ✅ FIXED: Copy ALL attribution fields including landing_page
+      trackingData.attribution_found = true;
+      trackingData.attribution_method = attributionResult.method;
+      trackingData.attribution_score = attributionResult.score;
+      trackingData.source = attrData.source || 'direct';
+      trackingData.campaign = attrData.utm_campaign || attrData.campaign || 'none';
+      trackingData.medium = attrData.utm_medium || attrData.medium || 'none';
+      trackingData.landing_page = attrData.landing_page;  // ← CRITICAL FIX: Copy landing_page
+      trackingData.utm_source = attrData.utm_source;
+      trackingData.utm_content = attrData.utm_content;
+      trackingData.utm_term = attrData.utm_term;
+      trackingData.referrer_url = attrData.referrer_url;
       
-      email: extractedData.email,
-      order_id: extractedData.order_id,
-      order_total: extractedData.order_total,
-      
-      // Subscription data (for subscription events)
-      subscription_id: extractedData.subscription_id,
-      subscription_amount: extractedData.subscription_amount,
-      offer_name: extractedData.offer_name,
-      event_name: extractedData.event_name,
-      
-      attribution_found: !!attributionResult,
-      attribution_method: attributionResult?.method || 'none',
-      attribution_score: attributionResult?.score || 0,
-      
-      // Attribution field availability (for debugging/analytics)
-      attribution_fields_present: {
-        session_id: !!extractedData.SSID,
-        device_signature: !!extractedData.dsig,
-        screen_value: !!extractedData.SVV,
-        gpu_signature: !!extractedData.gsig
-      },
+      console.log('✅ Attribution applied to tracking data:', {
+        method: trackingData.attribution_method,
+        score: trackingData.attribution_score,
+        source: trackingData.source,
+        landing_page: trackingData.landing_page ? 'SET' : 'MISSING'  // ← Debug landing page
+      });
+    }
+
+    // Enhanced tracking data with comprehensive IP information
+    const enhancedTrackingData = {
+      ...trackingData,
       
       // IP tracking metadata  
       ip_address: extractedData.CIP || extractedData.PIP || extractedData.IP || 'unknown',
@@ -269,37 +291,62 @@ const handler = async (event, context) => {
       conversion_ip: extractedData.CIP || null,
       pageview_ip: extractedData.IP || null,
       
-      // Enhanced dual IP detection - check all IP combinations
+      // Enhanced dual IP detection
       dual_ip_scenario: isDualIPScenario,
       ip_addresses_detected: uniqueIPs.length,
       unique_ips: uniqueIPs
     };
 
-    console.log('Final tracking data:', trackingData);
+    console.log('Final tracking data prepared:', {
+      email: enhancedTrackingData.email,
+      attribution_found: enhancedTrackingData.attribution_found,
+      attribution_method: enhancedTrackingData.attribution_method,
+      source: enhancedTrackingData.source,
+      landing_page: enhancedTrackingData.landing_page ? 'PRESENT' : 'MISSING'  // ← Final verification
+    });
 
     // Store conversion data
     try {
-      const storageKey = `conversions:${trackingData.timestamp}:${Math.random().toString(36).substr(2, 9)}`;
-      await redis(`setex/${storageKey}/86400/${encodeURIComponent(JSON.stringify(trackingData))}`, 2000);
-      console.log('Conversion data stored');
+      const storageKey = `conversions:${enhancedTrackingData.timestamp}:${Math.random().toString(36).substr(2, 9)}`;
+      await redis(`setex/${storageKey}/86400/${encodeURIComponent(JSON.stringify(enhancedTrackingData))}`, 2000);
+      console.log('✅ Conversion data stored with key:', storageKey);
     } catch (storageError) {
-      console.log('Storage failed:', storageError.message);
+      console.log('⚠️ Storage failed:', storageError.message);
     }
 
-    // Return success
+    // Store attribution stats for monitoring
+    try {
+      const statsKey = `attribution_stats_${Date.now()}`;
+      const statsData = {
+        email: enhancedTrackingData.email,
+        timestamp: enhancedTrackingData.timestamp,
+        method: enhancedTrackingData.attribution_method,
+        score: enhancedTrackingData.attribution_score,
+        success: enhancedTrackingData.attribution_found,
+        dual_ip: isDualIPScenario,
+        fields_available: enhancedTrackingData.attribution_fields_present
+      };
+      await redis(`setex/${statsKey}/2592000/${encodeURIComponent(JSON.stringify(statsData))}`, 1000); // 30 days
+      console.log('✅ Attribution stats stored');
+    } catch (statsError) {
+      console.log('⚠️ Stats storage failed:', statsError.message);
+    }
+
+    // Return success response
     return {
       statusCode: 200,
       headers: { 'Access-Control-Allow-Origin': '*' },
       body: JSON.stringify({
         success: true,
-        message: isSubscriptionEvent ? 'Subscription tracked successfully' : 'Conversion tracked successfully',
-        attribution_found: trackingData.attribution_found,
-        attribution_method: trackingData.attribution_method,
-        attribution_score: trackingData.attribution_score || 0,
-        order_id: trackingData.order_id,
-        event_type: trackingData.event_type,
+        message: isSubscriptionEvent ? 
+          'Subscription tracked successfully' : 'Conversion tracked successfully',
+        attribution_found: enhancedTrackingData.attribution_found,
+        attribution_method: enhancedTrackingData.attribution_method,
+        attribution_score: enhancedTrackingData.attribution_score || 0,
+        order_id: enhancedTrackingData.order_id,
+        event_type: enhancedTrackingData.event_type,
         dual_ip_detected: isDualIPScenario,
-        attribution_fields_received: trackingData.attribution_fields_present,
+        attribution_fields_received: enhancedTrackingData.attribution_fields_present,
         
         // IP breakdown for verification (can remove in production)
         ip_details: {
@@ -314,6 +361,7 @@ const handler = async (event, context) => {
           data_extracted: true,
           attribution_attempted: true,
           storage_attempted: true,
+          landing_page_copied: !!enhancedTrackingData.landing_page,  // ← NEW: Verify fix
           missing_fields: [
             !extractedData.SSID && 'ssid',
             !extractedData.dsig && 'dsig', 
