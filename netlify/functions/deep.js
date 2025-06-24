@@ -131,6 +131,10 @@ async function filterNonDeep5Conversions(unattributedConversions) {
     
     console.log(`📊 Filtered out ${alreadyProcessedDeep5Count} already processed with deep5 system`);
     console.log(`🔄 Will reprocess ${unprocessedConversions.length} conversions (includes deep2/deep3/deep4 failures)`);
+    
+    // Ensure conversions remain in chronological order (most recent first)
+    unprocessedConversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
     return unprocessedConversions;
 }
 
@@ -235,19 +239,25 @@ function getUnattributedConversions(allConversions) {
         return hasNoAttribution;
     });
     
-    console.log(`🔍 Found ${unattributed.length} unattributed conversions out of ${allConversions.length} total`);
+    // Sort unattributed conversions by most recent first
+    const sortedUnattributed = unattributed.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    if (unattributed.length > 0) {
-        console.log('📋 Unattributed conversions:');
-        unattributed.slice(0, 5).forEach((conv, index) => {
+    console.log(`🔍 Found ${sortedUnattributed.length} unattributed conversions out of ${allConversions.length} total`);
+    
+    if (sortedUnattributed.length > 0) {
+        console.log('📋 Unattributed conversions (most recent first):');
+        sortedUnattributed.slice(0, 5).forEach((conv, index) => {
             console.log(`   ${index + 1}. [PRIVACY PROTECTED] | ${conv.timestamp}`);
         });
-        if (unattributed.length > 5) {
-            console.log(`   ... and ${unattributed.length - 5} more`);
+        if (sortedUnattributed.length > 5) {
+            console.log(`   ... and ${sortedUnattributed.length - 5} more`);
         }
+        
+        // Debug: Show processing order confirmation
+        console.log(`📅 Processing order: Most recent (${sortedUnattributed[0].timestamp}) → Oldest (${sortedUnattributed[sortedUnattributed.length - 1].timestamp})`);
     }
     
-    return unattributed;
+    return sortedUnattributed;
 }
 
 // ================================================================
@@ -1103,9 +1113,9 @@ exports.handler = async (event, context) => {
 
         console.log(`🎯 Found ${unprocessedDeep5Conversions.length} not yet processed with deep5 system`);
         
-        // Step 4: Process first conversion
+        // Step 4: Process first conversion (most recent unattributed)
         const conversionToProcess = unprocessedDeep5Conversions[0];
-        console.log(`🔍 Processing conversion: [PRIVACY PROTECTED] from ${conversionToProcess.timestamp}`);
+        console.log(`🔍 Processing conversion: [PRIVACY PROTECTED] from ${conversionToProcess.timestamp} (most recent unattributed)`);
         console.log(`   🔍 Using enhanced 8-tier system with 24-hour window (deep5 version)`);
         
         // Step 5: Prepare conversion data
