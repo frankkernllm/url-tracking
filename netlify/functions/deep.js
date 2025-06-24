@@ -92,16 +92,16 @@ async function redisRequest(command, ...args) {
 }
 
 // ================================================================
-// 2. DEEP4 FILTERING AND MARKING FUNCTIONS
+// 2. DEEP5 FILTERING AND MARKING FUNCTIONS
 // ================================================================
 
-async function filterNonDeep4Conversions(unattributedConversions) {
+async function filterNonDeep5Conversions(unattributedConversions) {
     const unprocessedConversions = [];
-    let alreadyProcessedDeep4Count = 0;
+    let alreadyProcessedDeep5Count = 0;
     const maxProcessingTime = 30000;
     const startTime = Date.now();
     
-    console.log(`🔍 Checking ${unattributedConversions.length} conversions for deep4 processing status...`);
+    console.log(`🔍 Checking ${unattributedConversions.length} conversions for deep5 processing status...`);
     
     for (const conversion of unattributedConversions) {
         if (Date.now() - startTime > maxProcessingTime) {
@@ -109,57 +109,57 @@ async function filterNonDeep4Conversions(unattributedConversions) {
             break;
         }
         
-        // ONLY check for deep4 marker (ignore deep2, deep3, process4, etc.)
-        const keyDeep4 = `deep4:${conversion.email}:${conversion.timestamp}`;
+        // ONLY check for deep5 marker (ignore deep2, deep3, deep4, process4, etc.)
+        const keyDeep5 = `deep5:${conversion.email}:${conversion.timestamp}`;
         
         try {
-            const processedData = await redisRequest('get', keyDeep4);
+            const processedData = await redisRequest('get', keyDeep5);
             
             if (processedData) {
-                alreadyProcessedDeep4Count++;
-                console.log(`   ⏭️ Skipping [PRIVACY PROTECTED] - already processed with deep4 system`);
+                alreadyProcessedDeep5Count++;
+                console.log(`   ⏭️ Skipping [PRIVACY PROTECTED] - already processed with deep5 system`);
             } else {
-                // No deep4 marker found - process this conversion
-                // (This includes conversions with deep2, deep3 markers that failed)
+                // No deep5 marker found - process this conversion
+                // (This includes conversions with deep2, deep3, deep4 markers that failed or need retesting)
                 unprocessedConversions.push(conversion);
             }
         } catch (error) {
-            console.log(`   ⚠️ Failed to check deep4 status: ${error.message}`);
+            console.log(`   ⚠️ Failed to check deep5 status: ${error.message}`);
             unprocessedConversions.push(conversion);
         }
     }
     
-    console.log(`📊 Filtered out ${alreadyProcessedDeep4Count} already processed with deep4 system`);
-    console.log(`🔄 Will reprocess ${unprocessedConversions.length} conversions (includes deep2/deep3 failures)`);
+    console.log(`📊 Filtered out ${alreadyProcessedDeep5Count} already processed with deep5 system`);
+    console.log(`🔄 Will reprocess ${unprocessedConversions.length} conversions (includes deep2/deep3/deep4 failures)`);
     return unprocessedConversions;
 }
 
-async function markConversionAsDeep4(conversion, attributionMethod, retryCount = 0) {
+async function markConversionAsDeep5(conversion, attributionMethod, retryCount = 0) {
     const maxRetries = 3;
     
     try {
-        const deep4Key = `deep4:${conversion.email}:${conversion.timestamp}`;
-        const deep4Data = {
+        const deep5Key = `deep5:${conversion.email}:${conversion.timestamp}`;
+        const deep5Data = {
             email: conversion.email,
             timestamp: conversion.timestamp,
             processed_at: new Date().toISOString(),
-            system: 'deep4_8tier_24hour_geocorr',
-            version: '4.0',
+            system: 'deep5_8tier_complete_geocorr',
+            version: '5.0',
             attribution_method: attributionMethod,
             processing_type: 'deep_dive_analysis',
             retry_count: retryCount
         };
         
-        await redisRequest('setex', deep4Key, 2592000, JSON.stringify(deep4Data));
-        console.log(`   ✅ Marked conversion as deep4 processed (attempt ${retryCount + 1})`);
+        await redisRequest('setex', deep5Key, 2592000, JSON.stringify(deep5Data));
+        console.log(`   ✅ Marked conversion as deep5 processed (attempt ${retryCount + 1})`);
         
     } catch (error) {
-        console.log(`   ⚠️ Could not mark conversion as deep4: ${error.message}`);
+        console.log(`   ⚠️ Could not mark conversion as deep5: ${error.message}`);
         
         if (retryCount < maxRetries) {
             console.log(`   🔄 Retrying mark operation (${retryCount + 1}/${maxRetries})...`);
             await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-            return markConversionAsDeep4(conversion, attributionMethod, retryCount + 1);
+            return markConversionAsDeep5(conversion, attributionMethod, retryCount + 1);
         } else {
             console.log(`   ❌ Failed to mark conversion after ${maxRetries} attempts`);
         }
@@ -254,7 +254,7 @@ function getUnattributedConversions(allConversions) {
 // 5. CONVERSION DATA PREPARATION
 // ================================================================
 
-function prepareConversionDataForDeep4(conversion) {
+function prepareConversionDataForDeep5(conversion) {
     const conversionAge = Math.floor((Date.now() - new Date(conversion.timestamp)) / (1000 * 60 * 60 * 24));
     
     return {
@@ -304,7 +304,7 @@ function hashString(str) {
 // 6. ENHANCED ATTRIBUTION ANALYSIS (8-TIER SYSTEM)
 // ================================================================
 
-async function analyzeConversionForAttributionDeep4(conversion, pageviews, conversionData, geoDataCache, cacheStats) {
+async function analyzeConversionForAttributionDeep5(conversion, pageviews, conversionData, geoDataCache, cacheStats) {
     console.log('   🔬 Using enhanced 8-tier attribution system with 24-hour window...');
     
     const results = {
@@ -326,24 +326,23 @@ async function analyzeConversionForAttributionDeep4(conversion, pageviews, conve
     };
     
     // Try enhanced 8-tier system first (Priorities 1-7: direct Redis lookups)
-    if (conversionData.has_enhanced_params) {
-        console.log('   🚀 Trying enhanced 8-tier attribution system (Priorities 1-7)...');
-        results.analysis.processing_path = '8_tier_direct_lookups';
+    // Always attempt all available priorities regardless of enhanced param status
+    console.log('   🚀 Trying enhanced 8-tier attribution system (Priorities 1-7)...');
+    results.analysis.processing_path = '8_tier_direct_lookups';
+    
+    const enhancedResult = await findEnhancedAttribution(conversionData);
+    
+    if (enhancedResult) {
+        results.matchFound = true;
+        results.newAttribution = enhancedResult.landing_page || enhancedResult.url;
+        results.match = enhancedResult;
+        results.attributionMethod = enhancedResult.method;
+        results.priorityLevel = getPriorityLevel(enhancedResult.method);
+        results.shouldUpdate = true;
+        results.improvementType = 'NEW_ATTRIBUTION_DIRECT';
         
-        const enhancedResult = await findEnhancedAttribution(conversionData);
-        
-        if (enhancedResult) {
-            results.matchFound = true;
-            results.newAttribution = enhancedResult.landing_page || enhancedResult.url;
-            results.match = enhancedResult;
-            results.attributionMethod = enhancedResult.method;
-            results.priorityLevel = getPriorityLevel(enhancedResult.method);
-            results.shouldUpdate = true;
-            results.improvementType = 'NEW_ATTRIBUTION_DIRECT';
-            
-            console.log(`   ✅ Direct match found: ${enhancedResult.method} (Priority ${results.priorityLevel})`);
-            return results;
-        }
+        console.log(`   ✅ Direct match found: ${enhancedResult.method} (Priority ${results.priorityLevel})`);
+        return results;
     }
     
     // Priority 8: Geographic correlation with 24-hour window
@@ -394,6 +393,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 1: SSID lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 1: No SSID available for matching');
     }
     
     // Priority 2: Primary IP Match (280 points)
@@ -416,6 +417,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 2: Primary IP lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 2: No Primary IP available for matching');
     }
     
     // Priority 3: Conversion IP Match (260 points)
@@ -438,6 +441,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 3: Conversion IP lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 3: No Conversion IP available for matching');
     }
     
     // Priority 4: Pageview IP Match (240 points)
@@ -460,6 +465,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 4: Pageview IP lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 4: No Pageview IP available for matching');
     }
     
     // Priority 5: Device Signature Match (220 points)
@@ -482,6 +489,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 5: Device signature lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 5: No Device signature available for matching');
     }
     
     // Priority 6: Screen Hash Match (200 points)
@@ -504,6 +513,8 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 6: Screen hash lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 6: No Screen hash available for matching');
     }
     
     // Priority 7: WebGL Signature Match (180 points)
@@ -526,9 +537,11 @@ async function findEnhancedAttribution(conversionData) {
             }
         }
         console.log('      ⚠️ Priority 7: WebGL signature lookup failed');
+    } else {
+        console.log('      ⚠️ Priority 7: No WebGL signature available for matching');
     }
     
-    console.log('      ❌ All 7 direct attribution methods failed');
+    console.log('      ❌ All 7 direct attribution methods exhausted - no matches found');
     return null;
 }
 
@@ -751,12 +764,12 @@ async function getOrFetchGeoData(ip, geoDataCache, cacheStats) {
     if (geoData) return geoData;
     
     // Only make API call if absolutely necessary and within rate limits
-    if (cacheStats.api_calls < 10) { // Limit API calls per deep dive run
+    if (cacheStats.api_calls < 50) { // Increased limit for deep dive analysis
         try {
             const ipinfoToken = process.env.IPINFO_TOKEN;
             if (!ipinfoToken) return getFailedLookupData(ip);
             
-            console.log(`   🌍 Making IPinfo API call for ${ip} (${cacheStats.api_calls + 1}/10)`);
+            console.log(`   🌍 Making IPinfo API call for ${ip} (${cacheStats.api_calls + 1}/50)`);
             const response = await fetch(`https://ipinfo.io/${ip}?token=${ipinfoToken}`, {
                 signal: AbortSignal.timeout(3000)
             });
@@ -787,7 +800,7 @@ async function getOrFetchGeoData(ip, geoDataCache, cacheStats) {
             console.log(`   ❌ IPinfo API call failed for ${ip}: ${error.message}`);
         }
     } else {
-        console.log(`   ⚠️ Skipping API call for ${ip} - rate limit reached (${cacheStats.api_calls}/10)`);
+        console.log(`   ⚠️ Skipping API call for ${ip} - rate limit reached (${cacheStats.api_calls}/50)`);
     }
     
     return getFailedLookupData(ip);
@@ -903,7 +916,7 @@ function normalizeISP(isp) {
 // 8. CONVERSION UPDATE FUNCTIONS
 // ================================================================
 
-async function updateConversionAttributionDeep4(conversion, improvementResults) {
+async function updateConversionAttributionDeep5(conversion, improvementResults) {
     try {
         const conversionKey = await findConversionKey(conversion);
         
@@ -915,7 +928,7 @@ async function updateConversionAttributionDeep4(conversion, improvementResults) 
                 ...conversionData,
                 attribution_found: true,
                 landing_page: improvementResults.newAttribution,
-                source: improvementResults.match.pageview?.source || improvementResults.match.source || 'deep4_enhanced',
+                source: improvementResults.match.pageview?.source || improvementResults.match.source || 'deep5_enhanced',
                 utm_campaign: improvementResults.match.pageview?.utm_campaign || improvementResults.match.utm_campaign || conversionData.utm_campaign,
                 utm_medium: improvementResults.match.pageview?.utm_medium || improvementResults.match.utm_medium || conversionData.utm_medium,
                 referrer_url: improvementResults.match.pageview?.referrer_url || improvementResults.match.referrer_url || conversionData.referrer_url,
@@ -928,8 +941,8 @@ async function updateConversionAttributionDeep4(conversion, improvementResults) 
                     score: improvementResults.match.score || 0,
                     time_difference_minutes: improvementResults.match.timeDiff || 0,
                     improved_at: new Date().toISOString(),
-                    system_version: '4.0',
-                    processing_path: improvementResults.analysis?.processing_path || 'deep4_enhanced',
+                    system_version: '5.0',
+                    processing_path: improvementResults.analysis?.processing_path || 'deep5_enhanced',
                     window_size: '24_hours',
                     
                     pageview_ip: improvementResults.match.pageview?.ip_address || improvementResults.match.ip_address,
@@ -1031,8 +1044,8 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🔍 Starting DEEP DIVE ATTRIBUTION SYSTEM v4.0 - Complete Geographic Correlation');
-        console.log('⚡ Enhanced: 8-tier priority system + 24-hour geo correlation + comprehensive error handling');
+        console.log('🔍 Starting DEEP DIVE ATTRIBUTION SYSTEM v5.0 - Complete Priority Coverage');
+        console.log('⚡ Enhanced: Complete 8-tier priority system + 24-hour geo correlation + comprehensive error handling');
         
         const startTime = Date.now();
         
@@ -1064,12 +1077,12 @@ exports.handler = async (event, context) => {
         const allConversions = getAllConversions(analyticsData.conversions);
         const unattributedConversions = getUnattributedConversions(allConversions);
         
-        // Step 3: Filter out already processed deep4 conversions
-        const unprocessedDeep4Conversions = await filterNonDeep4Conversions(unattributedConversions);
+        // Step 3: Filter out already processed deep5 conversions
+        const unprocessedDeep5Conversions = await filterNonDeep5Conversions(unattributedConversions);
         
-        if (unprocessedDeep4Conversions.length === 0) {
+        if (unprocessedDeep5Conversions.length === 0) {
             const message = unattributedConversions.length > 0 
-                ? `🎯 All ${unattributedConversions.length} unattributed conversions have been processed with deep4 system`
+                ? `🎯 All ${unattributedConversions.length} unattributed conversions have been processed with deep5 system`
                 : '🎉 All conversions have attribution! No unattributed conversions found';
                 
             return {
@@ -1081,29 +1094,29 @@ exports.handler = async (event, context) => {
                     results: { 
                         total_conversions: allConversions.length,
                         unattributed: unattributedConversions.length,
-                        unprocessed_deep4: 0,
-                        status: 'ALL_DEEP4_PROCESSED'
+                        unprocessed_deep5: 0,
+                        status: 'ALL_DEEP5_PROCESSED'
                     }
                 })
             };
         }
 
-        console.log(`🎯 Found ${unprocessedDeep4Conversions.length} not yet processed with deep4 system`);
+        console.log(`🎯 Found ${unprocessedDeep5Conversions.length} not yet processed with deep5 system`);
         
         // Step 4: Process first conversion
-        const conversionToProcess = unprocessedDeep4Conversions[0];
+        const conversionToProcess = unprocessedDeep5Conversions[0];
         console.log(`🔍 Processing conversion: [PRIVACY PROTECTED] from ${conversionToProcess.timestamp}`);
-        console.log(`   🔍 Using enhanced 8-tier system with 24-hour window (deep4 version)`);
+        console.log(`   🔍 Using enhanced 8-tier system with 24-hour window (deep5 version)`);
         
         // Step 5: Prepare conversion data
-        const conversionData = prepareConversionDataForDeep4(conversionToProcess);
+        const conversionData = prepareConversionDataForDeep5(conversionToProcess);
         
         console.log(`   📊 Conversion: ${conversionData.has_enhanced_params ? 'ENHANCED' : 'LEGACY'} (age: ${conversionData.conversion_age_days} days)`);
         console.log(`   📍 IPs: PIP=${conversionData.PIP || 'none'}, CIP=${conversionData.CIP || 'none'}, IP=${conversionData.IP || 'none'}`);
         console.log(`   🔐 Signatures: SSID=${!!conversionData.SSID}, dsig=${!!conversionData.dsig}, SVV=${!!conversionData.SVV}`);
         
         // Step 6: Analyze for attribution
-        const improvementResults = await analyzeConversionForAttributionDeep4(
+        const improvementResults = await analyzeConversionForAttributionDeep5(
             conversionToProcess, 
             analyticsData.page_views, 
             conversionData,
@@ -1116,7 +1129,7 @@ exports.handler = async (event, context) => {
         if (improvementResults.matchFound && improvementResults.shouldUpdate) {
             console.log(`📝 Updating attribution for conversion...`);
             try {
-                updateResult = await updateConversionAttributionDeep4(conversionToProcess, improvementResults);
+                updateResult = await updateConversionAttributionDeep5(conversionToProcess, improvementResults);
                 console.log(`   ✅ Attribution updated: ${improvementResults.attributionMethod}`);
             } catch (error) {
                 console.error(`   ❌ Failed to update conversion: ${error.message}`);
@@ -1124,21 +1137,21 @@ exports.handler = async (event, context) => {
             }
         }
         
-        // Step 8: Mark as processed with deep4
-        await markConversionAsDeep4(conversionToProcess, improvementResults.attributionMethod || 'none');
+        // Step 8: Mark as processed with deep5
+        await markConversionAsDeep5(conversionToProcess, improvementResults.attributionMethod || 'none');
         
         // Step 9: Generate response
-        const remainingUnprocessedDeep4 = unprocessedDeep4Conversions.length - 1;
+        const remainingUnprocessedDeep5 = unprocessedDeep5Conversions.length - 1;
         const processingTime = Date.now() - startTime;
         
         let summaryMessage;
         if (improvementResults.matchFound) {
-            summaryMessage = `✅ Found attribution using ${improvementResults.attributionMethod} (Priority ${improvementResults.priorityLevel})! ${remainingUnprocessedDeep4} conversions remaining.`;
+            summaryMessage = `✅ Found attribution using ${improvementResults.attributionMethod} (Priority ${improvementResults.priorityLevel})! ${remainingUnprocessedDeep5} conversions remaining.`;
         } else {
-            summaryMessage = `❌ No attribution found even with enhanced 8-tier system + 24-hour geo correlation. ${remainingUnprocessedDeep4} conversions remaining.`;
+            summaryMessage = `❌ No attribution found even with complete 8-tier system + 24-hour geo correlation. ${remainingUnprocessedDeep5} conversions remaining.`;
         }
         
-        console.log(`\n🏁 DEEP DIVE v4.0 COMPLETE:`);
+        console.log(`\n🏁 DEEP DIVE v5.0 COMPLETE:`);
         console.log(`   📧 Processed: [PRIVACY PROTECTED]`);
         console.log(`   ✅ Success: ${improvementResults.matchFound ? 'YES' : 'NO'}`);
         console.log(`   ⚡ Time: ${processingTime}ms`);
@@ -1153,9 +1166,9 @@ exports.handler = async (event, context) => {
                 results: {
                     total_conversions: allConversions.length,
                     unattributed: unattributedConversions.length,
-                    unprocessed_deep4: unprocessedDeep4Conversions.length,
+                    unprocessed_deep5: unprocessedDeep5Conversions.length,
                     processed_this_run: 1,
-                    remaining_unprocessed_deep4: remainingUnprocessedDeep4,
+                    remaining_unprocessed_deep5: remainingUnprocessedDeep5,
                     
                     match_found: improvementResults.matchFound,
                     attribution_method: improvementResults.attributionMethod,
@@ -1168,24 +1181,25 @@ exports.handler = async (event, context) => {
                     processing_time_ms: processingTime,
                     cache_stats: cacheStats,
                     
-                    status: remainingUnprocessedDeep4 > 0 ? 'MORE_TO_PROCESS' : 'ALL_DEEP4_PROCESSED',
-                    next_action: remainingUnprocessedDeep4 > 0 ? 'Press button again to process next conversion' : 'All unattributed conversions have been processed with deep4 system',
+                    status: remainingUnprocessedDeep5 > 0 ? 'MORE_TO_PROCESS' : 'ALL_DEEP5_PROCESSED',
+                    next_action: remainingUnprocessedDeep5 > 0 ? 'Press button again to process next conversion' : 'All unattributed conversions have been processed with deep5 system',
                     timeout_protection: 'enabled',
                     retry_logic: 'enabled',
-                    geographic_correlation: 'enabled_24h'
+                    geographic_correlation: 'enabled_24h',
+                    complete_priority_coverage: 'enabled'
                 }
             })
         };
         
     } catch (error) {
-        console.error('❌ Deep4 system error:', error);
+        console.error('❌ Deep5 system error:', error);
         
         return {
             statusCode: 500,
             headers,
             body: JSON.stringify({
                 success: false,
-                error: 'Deep4 system error',
+                error: 'Deep5 system error',
                 details: error.message,
                 stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
             })
