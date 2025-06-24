@@ -615,12 +615,42 @@ function findPageviewsIn24HourWindow(conversion, pageviews) {
     const conversionTime = new Date(conversion.timestamp);
     const windowStart = new Date(conversionTime.getTime() - 24 * 60 * 60 * 1000); // 24 hours before
     
+    console.log(`      🔍 DEBUGGING 24-hour window filter:`);
+    console.log(`      📅 Conversion time: ${conversion.timestamp}`);
+    console.log(`      📅 Window start: ${windowStart.toISOString()}`);
+    console.log(`      📅 Window end: ${conversionTime.toISOString()}`);
+    console.log(`      📊 Total pageviews to check: ${pageviews.length}`);
+    
+    // Debug: Check how many pageviews have IP addresses
+    const pageviewsWithIP = pageviews.filter(pv => pv.ip_address);
+    const pageviewsWithoutIP = pageviews.filter(pv => !pv.ip_address);
+    console.log(`      📊 Pageviews with IP: ${pageviewsWithIP.length}, without IP: ${pageviewsWithoutIP.length}`);
+    
+    // Debug: Check how many are in time window (regardless of IP)
+    const pageviewsInTimeWindow = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        return pvTime >= windowStart && pvTime <= conversionTime;
+    });
+    console.log(`      📊 Pageviews in time window (all): ${pageviewsInTimeWindow.length}`);
+    
+    // Debug: Check how many have IP AND are in time window
     const candidatePageviews = pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
-        return pvTime >= windowStart && 
-               pvTime <= conversionTime && 
-               pv.ip_address; // Must have IP address
+        const inTimeWindow = pvTime >= windowStart && pvTime <= conversionTime;
+        const hasIP = pv.ip_address;
+        
+        // Log first few that fail each filter
+        if (!inTimeWindow && pageviewsInTimeWindow.length < 50) {
+            console.log(`      ⏰ Outside time window: ${pv.timestamp} (${pvTime.toISOString()})`);
+        }
+        if (inTimeWindow && !hasIP && pageviewsWithoutIP.length < 10) {
+            console.log(`      🚫 In time window but no IP: ${pv.timestamp}`);
+        }
+        
+        return inTimeWindow && hasIP;
     });
+    
+    console.log(`      ✅ Final candidates (in window + has IP): ${candidatePageviews.length}`);
     
     // Sort by timestamp DESCENDING (newest first = closest to conversion)
     candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
