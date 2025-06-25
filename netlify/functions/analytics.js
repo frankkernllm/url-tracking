@@ -1,5 +1,5 @@
 // File: netlify/functions/analytics.js
-// ENHANCED: Attribution Stats & Health Monitoring with Timestamp Validation
+// ENHANCED: Attribution Stats & Health Monitoring (Tasks 4.3 & 5.2)
 
 const handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
@@ -52,69 +52,124 @@ const handler = async (event, context) => {
         body: JSON.stringify(healthMetrics)
       };
     } catch (error) {
-      console.error('❌ Health check error:', error);
+      console.error('❌ Attribution health check error:', error);
       return {
         statusCode: 500,
         headers: { 'Access-Control-Allow-Origin': '*' },
-        body: JSON.stringify({ error: error.message })
+        body: JSON.stringify({ error: error.message, status: 'error' })
       };
     }
   }
-  
+
   if (event.httpMethod === 'GET') {
     try {
-      // Parse query parameters
       const { start_date, end_date, source, campaign, include_attribution_stats } = event.queryStringParameters || {};
       
-      console.log(`📅 Analytics request: ${start_date || 'no start'} to ${end_date || 'no end'}`);
-      console.log(`🎯 Filters: source=${source || 'all'}, campaign=${campaign || 'all'}`);
+      console.log(`📊 Analytics query: start=${start_date}, end=${end_date}, source=${source}, campaign=${campaign}, include_stats=${include_attribution_stats}`);
       
-      // Get all keys from Redis
+      // 🔧 CRITICAL FIX: Use SCAN with proper cursor iteration for IPv6 support
       let attributionKeys = [];
       let conversionKeys = [];
       
       try {
-        // Use scan for better performance with large datasets
-        console.log('🔍 Getting Redis keys...');
+        console.log('🔍 Finding ALL attribution keys including IPv6...');
         
+        // Method 1: Get the first batch (mainly IPv4) using the working SCAN
         try {
-          // Try IPv6-optimized approach first
-          const ipv6Prefixes = ['2600', '2601', '2603', '2604', '2605', '2606', '2607', '2800', '2001', '2002'];
-          let totalAttributionKeys = [];
-          
-          for (const prefix of ipv6Prefixes) {
-            try {
-              const result = await redis(`keys/attribution_${prefix}*`);
-              if (result.result && result.result.length > 0) {
-                totalAttributionKeys = totalAttributionKeys.concat(result.result);
-                console.log(`✅ Found ${result.result.length} IPv6 keys with prefix ${prefix}`);
-              }
-            } catch (prefixError) {
-              // Continue to next prefix
-            }
+          const scanResult = await redis('scan/0/match/attribution_*/count/1000');
+          if (scanResult.result && scanResult.result[1]) {
+            attributionKeys = scanResult.result[1].filter(key => 
+              key && 
+              !key.startsWith('attribution_ip_') && 
+              !key.startsWith('attribution_session_') &&
+              !key.startsWith('attribution_fp_') &&
+              !key.startsWith('attribution_webgl_') &&
+              !key.startsWith('attribution_geo_') &&
+              !key.startsWith('attribution_region_')
+            );
+            console.log(`✅ Initial SCAN found ${attributionKeys.length} attribution keys`);
           }
-          
-          // Also get IPv4 keys
+        } catch (scanError) {
+          console.log('⚠️ Initial SCAN failed:', scanError);
+        }
+        
+        // Method 2: Specifically scan for IPv6 patterns (they start with 2xxx or similar)
+        console.log('🔍 Scanning specifically for IPv6 addresses...');
+        const ipv6Prefixes = ['2001', '2002', '2003', '2400', '2401', '2402', '2403', '2404', '2405', '2406', '2407', '2409', '2600', '2601', '2602', '2603', '2604', '2605', '2606', '2607', '2620', '2800', '2a00', '2a01', '2a02', '2a03'];
+        
+        for (const prefix of ipv6Prefixes) {
           try {
-            const ipv4Result = await redis('keys/attribution_*');
-            if (ipv4Result.result) {
-              const ipv4Keys = ipv4Result.result.filter(key => {
-                const parts = key.split('_');
-                return parts.length === 4 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
-              });
-              totalAttributionKeys = totalAttributionKeys.concat(ipv4Keys);
-              console.log(`✅ Found ${ipv4Keys.length} IPv4 keys`);
+            const ipv6Result = await redis(`scan/0/match/attribution_${prefix}*/count/1000`);
+            if (ipv6Result.result && ipv6Result.result[1] && ipv6Result.result[1].length > 0) {
+              const ipv6Keys = ipv6Result.result[1].filter(key => 
+                key && 
+                !key.startsWith('attribution_ip_') && 
+                !key.startsWith('attribution_session_') &&
+                !key.startsWith('attribution_fp_') &&
+                !key.startsWith('attribution_webgl_') &&
+                !key.startsWith('attribution_geo_') &&
+                !key.startsWith('attribution_region_')
+              );
+              
+              if (ipv6Keys.length > 0) {
+                // Add to existing keys, avoiding duplicates
+                const keySet = new Set(attributionKeys);
+                ipv6Keys.forEach(key => keySet.add(key));
+                attributionKeys = Array.from(keySet);
+                console.log(`✅ Found ${ipv6Keys.length} IPv6 keys with prefix ${prefix}`);
+              }
             }
-          } catch (ipv4Error) {
-            console.log('⚠️ IPv4 key fetch failed:', ipv4Error);
+          } catch (prefixError) {
+            console.log(`⚠️ Failed to scan IPv6 prefix ${prefix}:`, prefixError);
           }
-          
-          // Remove duplicates
-          attributionKeys = [...new Set(totalAttributionKeys)];
-          console.log(`📊 Total unique attribution keys: ${attributionKeys.length}`);
-          
-        } catch (optimizedError) {
-          console.log('⚠️ Optimized approach failed, trying emergency fallback...');
+        }
+        
+        // Method 3: If the first scan found exactly 1000 keys, try to get the next batch
+        if (attributionKeys.length === 1000) {
+          console.log('🔍 First scan returned exactly 1000 keys, trying to get more batches...');
+          try {
+            // Try with a different cursor value
+            const scanResult2 = await redis('scan/1000/match/attribution_*/count/1000');
+            if (scanResult2.result && scanResult2.result[1] && scanResult2.result[1].length > 0) {
+              const moreKeys = scanResult2.result[1].filter(key => 
+                key && 
+                !key.startsWith('attribution_ip_') && 
+                !key.startsWith('attribution_session_') &&
+                !key.startsWith('attribution_fp_') &&
+                !key.startsWith('attribution_webgl_') &&
+                !key.startsWith('attribution_geo_') &&
+                !key.startsWith('attribution_region_')
+              );
+              
+              const keySet = new Set(attributionKeys);
+              moreKeys.forEach(key => keySet.add(key));
+              attributionKeys = Array.from(keySet);
+              console.log(`✅ Second batch found ${moreKeys.length} additional keys, total: ${attributionKeys.length}`);
+            }
+          } catch (err) {
+            console.log('⚠️ Second batch scan failed:', err);
+          }
+        }
+        
+        // Debug: Check IPv4 vs IPv6 distribution
+        const ipv4Keys = attributionKeys.filter(key => {
+          const parts = key.split('_');
+          // IPv4 pattern: attribution_XXX_XXX_XXX_XXX_timestamp (6 parts total)
+          return parts.length === 6 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
+        });
+        const ipv6Keys = attributionKeys.filter(key => {
+          const parts = key.split('_');
+          // IPv6 has more parts due to more segments
+          return parts.length > 6;
+        });
+        console.log(`📊 Attribution keys breakdown - IPv4: ${ipv4Keys.length}, IPv6: ${ipv6Keys.length}`);
+        if (ipv6Keys.length > 0) {
+          console.log(`🌐 Sample IPv6 keys:`, ipv6Keys.slice(0, 3));
+        }
+        
+        // CRITICAL: If no keys found at all, this is a major issue
+        if (attributionKeys.length === 0) {
+          console.error('❌ CRITICAL: No attribution keys found! Trying emergency fallback...');
           
           // Emergency fallback - try the exact same pattern that was working before
           try {
@@ -165,13 +220,7 @@ const handler = async (event, context) => {
                   .filter(item => item)
                   .map(item => {
                     try {
-                      const parsed = JSON.parse(item);
-                      // VALIDATE TIMESTAMP HERE
-                      if (!isValidTimestamp(parsed.timestamp)) {
-                        console.warn('⚠️ Invalid timestamp found in batch data:', parsed.timestamp);
-                        parsed.timestamp = new Date().toISOString(); // Use current time as fallback
-                      }
-                      return parsed;
+                      return JSON.parse(item);
                     } catch (parseError) {
                       return null;
                     }
@@ -188,11 +237,7 @@ const handler = async (event, context) => {
             // Add event_type and sort
             allPageViews = allPageViews
               .map(item => ({ ...item, event_type: 'page_view' }))
-              .sort((a, b) => {
-                const dateA = new Date(a.timestamp);
-                const dateB = new Date(b.timestamp);
-                return dateB - dateA;
-              });
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
             
           } else {
             // Original code for smaller datasets
@@ -201,13 +246,7 @@ const handler = async (event, context) => {
               .filter(item => item)
               .map(item => {
                 try {
-                  const parsed = JSON.parse(item);
-                  // VALIDATE TIMESTAMP HERE
-                  if (!isValidTimestamp(parsed.timestamp)) {
-                    console.warn('⚠️ Invalid timestamp found:', parsed.timestamp);
-                    parsed.timestamp = new Date().toISOString(); // Use current time as fallback
-                  }
-                  return parsed;
+                  return JSON.parse(item);
                 } catch (parseError) {
                   console.log('⚠️ Failed to parse attribution item');
                   return null;
@@ -215,11 +254,7 @@ const handler = async (event, context) => {
               })
               .filter(item => item)
               .map(item => ({ ...item, event_type: 'page_view' }))
-              .sort((a, b) => {
-                const dateA = new Date(a.timestamp);
-                const dateB = new Date(b.timestamp);
-                return dateB - dateA;
-              });
+              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
           }
           
           console.log(`📊 Successfully parsed ${allPageViews.length} page views`);
@@ -247,23 +282,13 @@ const handler = async (event, context) => {
             .filter(item => item)
             .map(item => {
               try {
-                const parsed = JSON.parse(item);
-                // VALIDATE TIMESTAMP HERE
-                if (!isValidTimestamp(parsed.timestamp)) {
-                  console.warn('⚠️ Invalid timestamp found in conversion:', parsed.timestamp);
-                  parsed.timestamp = new Date().toISOString(); // Use current time as fallback
-                }
-                return parsed;
+                return JSON.parse(item);
               } catch (parseError) {
                 return null;
               }
             })
             .filter(item => item)
-            .sort((a, b) => {
-              const dateA = new Date(a.timestamp);
-              const dateB = new Date(b.timestamp);
-              return dateB - dateA;
-            });
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
           
           // Deduplicate by email
           const seenEmails = new Set();
@@ -320,37 +345,41 @@ const handler = async (event, context) => {
       const avgOrderValue = paidConversions.length > 0 ? totalRevenue / paidConversions.length : 0;
       const conversionRate = uniqueVisitors > 0 ? (totalConversions / uniqueVisitors * 100) : 0;
       
-      // Performance tracking
-      const trafficSourceStats = {};
+      // Build performance data
+      const trafficSources = {};
       const campaignPerformance = {};
       const landingPageStats = {};
       
+      // Process page views
       filteredPageViews.forEach(item => {
-        const source = item.source || 'unknown';
-        const campaign = item.utm_campaign || item.campaign || 'unknown';
-        const landingPage = item.landing_page || 'unknown';
+        const source = item.source || 'direct';
+        const campaign = item.utm_campaign || item.campaign || 'none';
+        const landingPage = item.landing_page || item.page_url || 'unknown';
         
-        // Traffic source stats
-        if (!trafficSourceStats[source]) {
-          trafficSourceStats[source] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set(), revenue: 0 };
+        if (!trafficSources[source]) {
+          trafficSources[source] = { 
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() 
+          };
         }
-        trafficSourceStats[source].pageViews++;
+        trafficSources[source].pageViews++;
         if (item.ip_address) {
-          trafficSourceStats[source].uniqueVisitors.add(item.ip_address);
+          trafficSources[source].uniqueVisitors.add(item.ip_address);
         }
         
-        // Campaign performance
         if (!campaignPerformance[campaign]) {
-          campaignPerformance[campaign] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set(), revenue: 0 };
+          campaignPerformance[campaign] = { 
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set()
+          };
         }
         campaignPerformance[campaign].pageViews++;
         if (item.ip_address) {
           campaignPerformance[campaign].uniqueVisitors.add(item.ip_address);
         }
         
-        // Landing page stats
         if (!landingPageStats[landingPage]) {
-          landingPageStats[landingPage] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set(), revenue: 0 };
+          landingPageStats[landingPage] = { 
+            pageViews: 0, conversions: 0, revenue: 0, uniqueVisitors: new Set() 
+          };
         }
         landingPageStats[landingPage].pageViews++;
         if (item.ip_address) {
@@ -358,15 +387,16 @@ const handler = async (event, context) => {
         }
       });
       
+      // Process conversions
       filteredConversions.forEach(item => {
-        const source = item.source || 'unknown';
-        const campaign = item.utm_campaign || item.campaign || 'unknown';
-        const landingPage = item.landing_page || 'unknown';
+        const source = item.source || 'direct';
+        const campaign = item.utm_campaign || item.campaign || 'none';
+        const landingPage = item.landing_page || item.page_url || 'unknown';
         const revenue = parseFloat(item.order_total) || 0;
         
-        if (trafficSourceStats[source]) {
-          trafficSourceStats[source].conversions++;
-          trafficSourceStats[source].revenue += revenue;
+        if (trafficSources[source]) {
+          trafficSources[source].conversions++;
+          trafficSources[source].revenue += revenue;
         }
         
         if (campaignPerformance[campaign]) {
@@ -380,7 +410,8 @@ const handler = async (event, context) => {
         }
       });
       
-      const topSources = Object.entries(trafficSourceStats)
+      // Format response data
+      const topSources = Object.entries(trafficSources)
         .map(([source, data]) => ({
           source,
           pageViews: data.pageViews,
@@ -416,15 +447,10 @@ const handler = async (event, context) => {
         }))
         .sort((a, b) => b.pageViews - a.pageViews);
       
-      // Daily trends with timestamp validation
+      // Daily trends
       const dailyStats = {};
       
       filteredPageViews.forEach(item => {
-        if (!isValidTimestamp(item.timestamp)) {
-          console.warn('⚠️ Skipping page view with invalid timestamp:', item.timestamp);
-          return;
-        }
-        
         const date = new Date(item.timestamp).toISOString().split('T')[0];
         if (!dailyStats[date]) {
           dailyStats[date] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set() };
@@ -436,11 +462,6 @@ const handler = async (event, context) => {
       });
       
       filteredConversions.forEach(item => {
-        if (!isValidTimestamp(item.timestamp)) {
-          console.warn('⚠️ Skipping conversion with invalid timestamp:', item.timestamp);
-          return;
-        }
-        
         const date = new Date(item.timestamp).toISOString().split('T')[0];
         if (!dailyStats[date]) {
           dailyStats[date] = { pageViews: 0, conversions: 0, uniqueVisitors: new Set() };
@@ -455,18 +476,18 @@ const handler = async (event, context) => {
           pageViews: data.pageViews,
           conversions: data.conversions,
           uniqueVisitors: data.uniqueVisitors.size,
-          conversionRate: data.uniqueVisitors.size > 0 ?
+          conversionRate: data.uniqueVisitors.size > 0 ? 
             (data.conversions / data.uniqueVisitors.size * 100).toFixed(1) : '0.0'
         }));
       
       // Include IPv6 stats in debug
       const ipv4KeysCount = attributionKeys.filter(key => {
         const parts = key.split('_');
-        return parts.length === 4 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
+        return parts.length === 6 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2]);
       }).length;
       const ipv6KeysCount = attributionKeys.filter(key => {
         const parts = key.split('_');
-        return parts.length > 4;
+        return parts.length > 6;
       }).length;
       
       // Build response object
@@ -495,9 +516,9 @@ const handler = async (event, context) => {
           ipv6_keys_found: ipv6KeysCount,
           conversion_keys_found: conversionKeys.length,
           sample_attribution_key: attributionKeys[0] || 'none',
-          sample_ipv6_key: attributionKeys.find(k => k.split('_').length > 4) || 'none',
+          sample_ipv6_key: attributionKeys.find(k => k.split('_').length > 6) || 'none',
           deployment_timestamp: new Date().toISOString(),
-          redis_method: 'timestamp_validated_approach'
+          redis_method: 'hybrid_scan_keys_approach'
         }
       };
       
@@ -527,14 +548,8 @@ const handler = async (event, context) => {
     try {
       const data = JSON.parse(event.body);
       
-      // Validate timestamp before storing
-      if (!isValidTimestamp(data.timestamp)) {
-        console.warn('⚠️ POST data has invalid timestamp, using current time:', data.timestamp);
-        data.timestamp = new Date().toISOString();
-      }
-      
       if (data.event_type === 'purchase' || data.event_type === 'conversion' || data.order_total !== undefined) {
-        const key = data.email ?
+        const key = data.email ? 
           `conversions:${data.email.replace(/[^a-zA-Z0-9]/g, '_')}:${Date.now()}` :
           `conversions:${data.timestamp}:${Math.random()}`;
         
@@ -569,21 +584,6 @@ const handler = async (event, context) => {
   };
 };
 
-// =====================================================================
-// HELPER FUNCTIONS
-// =====================================================================
-
-// NEW: Timestamp validation function
-function isValidTimestamp(timestamp) {
-  if (!timestamp) return false;
-  
-  // Try to parse the timestamp
-  const date = new Date(timestamp);
-  
-  // Check if the date is valid and not NaN
-  return date instanceof Date && !isNaN(date.getTime());
-}
-
 // TASK 4.3: Fetch attribution stats from Redis
 async function fetchAttributionStats(redis) {
   try {
@@ -607,13 +607,6 @@ async function fetchAttributionStats(redis) {
           const statsData = await redis(`get/${key}`);
           if (statsData.result) {
             const parsedStats = JSON.parse(decodeURIComponent(statsData.result));
-            
-            // Validate timestamp in stats data
-            if (!isValidTimestamp(parsedStats.timestamp)) {
-              console.warn('⚠️ Invalid timestamp in attribution stats:', parsedStats.timestamp);
-              parsedStats.timestamp = new Date().toISOString();
-            }
-            
             attributionStats.push(parsedStats);
           }
         } catch (parseError) {
@@ -634,50 +627,116 @@ async function fetchAttributionStats(redis) {
 function calculateAttributionSummary(attributionStats, conversions) {
   const totalStats = attributionStats.length;
   const successfulAttributions = attributionStats.filter(stat => stat.success).length;
-  const attributionRate = totalStats > 0 ?
-    Math.round(successfulAttributions / totalStats * 100) : 0;
+  const attributionRate = totalStats > 0 ? Math.round(successfulAttributions / totalStats * 100) : 0;
   
-  // Calculate the overall attribution rate for all conversions
-  const totalConversions = conversions.length;
-  const attributedConversions = conversions.filter(conv => 
-    conv.attribution_found || conv.landing_page
-  ).length;
-  const overallAttributionRate = totalConversions > 0 ?
-    Math.round(attributedConversions / totalConversions * 100) : 0;
+  // Method breakdown
+  const methodBreakdown = {};
+  attributionStats.forEach(stat => {
+    const method = stat.method || 'none';
+    methodBreakdown[method] = (methodBreakdown[method] || 0) + 1;
+  });
+  
+  // Average score for successful attributions
+  const successfulStats = attributionStats.filter(stat => stat.success && stat.score > 0);
+  const avgScore = successfulStats.length > 0 
+    ? Math.round(successfulStats.reduce((sum, stat) => sum + stat.score, 0) / successfulStats.length)
+    : 0;
+  
+  // IPv6/IPv4 breakdown in conversions
+  const ipv6Conversions = conversions.filter(c => c.ip_address && c.ip_address.includes(':')).length;
+  const ipv4Conversions = conversions.filter(c => c.ip_address && !c.ip_address.includes(':')).length;
+  
+  // Geographic correlation success
+  const geoStats = attributionStats.filter(stat => stat.method && stat.method.includes('geo'));
+  const geoSuccessRate = geoStats.length > 0 
+    ? Math.round(geoStats.filter(stat => stat.success).length / geoStats.length * 100)
+    : 0;
   
   return {
     attribution_rate: attributionRate,
     total_attribution_attempts: totalStats,
     successful_attributions: successfulAttributions,
-    overall_attribution_rate: overallAttributionRate,
-    total_conversions: totalConversions,
-    attributed_conversions: attributedConversions,
+    method_breakdown: methodBreakdown,
+    average_attribution_score: avgScore,
+    ipv6_conversions: ipv6Conversions,
+    ipv4_conversions: ipv4Conversions,
+    geographic_correlation_success_rate: geoSuccessRate,
     last_updated: new Date().toISOString()
   };
 }
 
-// TASK 5.2: Calculate attribution system health
+// TASK 5.2: Calculate attribution health metrics
 async function calculateAttributionHealth(redis) {
+  const last24Hours = Date.now() - (24 * 60 * 60 * 1000);
+  
   try {
-    console.log('🔬 Calculating attribution system health...');
+    // Get recent conversions
+    const conversionKeys = await redis('keys/conversions:*');
+    let recentConversions = [];
     
-    // Fetch recent attribution stats (last 50 records for performance)
-    const recentStats = await fetchAttributionStats(redis);
-    const last24Hours = recentStats.filter(stat => {
-      if (!isValidTimestamp(stat.timestamp)) return false;
-      const statTime = new Date(stat.timestamp).getTime();
-      const dayAgo = Date.now() - (24 * 60 * 60 * 1000);
-      return statTime > dayAgo;
-    }).slice(0, 50);
+    if (conversionKeys.result && conversionKeys.result.length > 0) {
+      // Get last 100 conversions for performance
+      const recentKeys = conversionKeys.result
+        .sort((a, b) => {
+          const timestampA = extractTimestampFromKey(a);
+          const timestampB = extractTimestampFromKey(b);
+          return timestampB - timestampA;
+        })
+        .slice(0, 100);
+      
+      for (const key of recentKeys) {
+        try {
+          const conv = await redis(`get/${key}`);
+          if (conv.result) {
+            const convData = JSON.parse(decodeURIComponent(conv.result));
+            const convTimestamp = new Date(convData.timestamp).getTime();
+            
+            if (convTimestamp > last24Hours) {
+              recentConversions.push(convData);
+            }
+          }
+        } catch (parseError) {
+          continue;
+        }
+      }
+    }
     
-    const totalConversions = last24Hours.length;
-    const successfulAttributions = last24Hours.filter(stat => stat.success).length;
-    const successRate = totalConversions > 0 ? 
-      Math.round(successfulAttributions / totalConversions * 100) : 0;
+    // Get recent attribution stats
+    const statsKeys = await redis('keys/attribution_stats_*');
+    let recentStats = [];
+    
+    if (statsKeys.result && statsKeys.result.length > 0) {
+      const recentStatsKeys = statsKeys.result
+        .filter(key => {
+          const timestamp = parseInt(key.split('_').pop()) || 0;
+          return timestamp > last24Hours;
+        })
+        .sort((a, b) => {
+          const timestampA = parseInt(a.split('_').pop()) || 0;
+          const timestampB = parseInt(b.split('_').pop()) || 0;
+          return timestampB - timestampA;
+        });
+      
+      for (const key of recentStatsKeys) {
+        try {
+          const stat = await redis(`get/${key}`);
+          if (stat.result) {
+            const statData = JSON.parse(decodeURIComponent(stat.result));
+            recentStats.push(statData);
+          }
+        } catch (parseError) {
+          continue;
+        }
+      }
+    }
+    
+    const totalConversions = recentConversions.length;
+    const successfulAttributions = recentConversions.filter(c => c.attribution_found).length;
+    const successRate = totalConversions > 0 ? Math.round(successfulAttributions / totalConversions * 100) : 0;
     
     // Method performance
     const methodStats = {};
-    last24Hours.forEach(stat => {
+    recentStats.forEach(stat => {
       const method = stat.method || 'none';
       if (!methodStats[method]) {
         methodStats[method] = { total: 0, successful: 0 };
@@ -689,15 +748,15 @@ async function calculateAttributionHealth(redis) {
     });
     
     // IPv6/IPv4 dual-stack correlation performance
-    const ipv6Pageviews = last24Hours.filter(stat => 
+    const ipv6Pageviews = recentStats.filter(stat => 
       stat.customer_ip && stat.customer_ip.includes(':')
     ).length;
     
-    const geoCorrelationAttempts = last24Hours.filter(stat => 
+    const geoCorrelationAttempts = recentStats.filter(stat => 
       stat.method && stat.method.includes('geo')
     ).length;
     
-    const geoCorrelationSuccesses = last24Hours.filter(stat => 
+    const geoCorrelationSuccesses = recentStats.filter(stat => 
       stat.method && stat.method.includes('geo') && stat.success
     ).length;
     
@@ -775,19 +834,13 @@ function applyFilters(data, filters) {
   
   if (filters.start_date) {
     const startDate = new Date(filters.start_date);
-    filtered = filtered.filter(item => {
-      if (!isValidTimestamp(item.timestamp)) return false;
-      return new Date(item.timestamp) >= startDate;
-    });
+    filtered = filtered.filter(item => new Date(item.timestamp) >= startDate);
   }
   
   if (filters.end_date) {
     const endDate = new Date(filters.end_date);
     endDate.setHours(23, 59, 59, 999);
-    filtered = filtered.filter(item => {
-      if (!isValidTimestamp(item.timestamp)) return false;
-      return new Date(item.timestamp) <= endDate;
-    });
+    filtered = filtered.filter(item => new Date(item.timestamp) <= endDate);
   }
   
   if (filters.source) {
