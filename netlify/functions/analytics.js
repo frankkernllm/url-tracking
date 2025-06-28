@@ -199,52 +199,111 @@ async function getComprehensiveAttributionKeys(redis) {
     }
 }
 
-// Enhanced conversion key scanning
+// ENHANCED CONVERSION SCANNING - COMPREHENSIVE FIX
 async function getConversionKeysEnhanced(redis) {
     let conversionKeys = [];
     
-    console.log('🔍 Starting enhanced conversion key scan...');
+    console.log('🔍 Starting COMPREHENSIVE conversion key scan...');
     
     try {
-        // 1. STANDARD PATTERN (this should work for most cases)
-        console.log('📊 Trying standard conversions:* pattern...');
-        try {
-            let cursor = '0';
-            do {
+        // PATTERN 1: Standard conversions with cursor continuation
+        console.log('📊 Scanning conversions:* with full cursor iteration...');
+        
+        let cursor = '0';
+        let totalFound = 0;
+        
+        do {
+            try {
                 const result = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
                 if (result.result && result.result[1]) {
                     cursor = result.result[0];
                     const keys = result.result[1];
                     conversionKeys = conversionKeys.concat(keys);
-                    console.log(`✅ Found ${keys.length} conversion keys (cursor: ${cursor})`);
+                    totalFound += keys.length;
+                    console.log(`✅ Found ${keys.length} conversion keys (cursor: ${cursor}, total: ${totalFound})`);
+                } else {
+                    console.log('⚠️ No more conversion keys found');
+                    break;
                 }
-            } while (cursor !== '0' && conversionKeys.length < 10000); // Safety limit
-        } catch (standardError) {
-            console.log('⚠️ Standard pattern scan failed:', standardError.message);
+            } catch (scanError) {
+                console.log('⚠️ Scan iteration failed:', scanError.message);
+                break;
+            }
+            
+            // Safety limits to prevent infinite loops
+            if (totalFound > 10000) {
+                console.log('🚨 Safety limit reached, stopping scan');
+                break;
+            }
+            
+        } while (cursor !== '0');
+        
+        console.log(`📊 Comprehensive scan complete: ${totalFound} conversion keys found`);
+        
+        // PATTERN 2: Email-based conversion keys (backup scan)
+        console.log('📊 Scanning for email-based conversion patterns...');
+        
+        try {
+            const emailResult = await redis(`scan/0/match/conversions:*@*/count/1000`);
+            if (emailResult.result && emailResult.result[1] && emailResult.result[1].length > 0) {
+                const emailKeys = emailResult.result[1];
+                // Only add if not already in our list
+                const newEmailKeys = emailKeys.filter(key => !conversionKeys.includes(key));
+                conversionKeys = conversionKeys.concat(newEmailKeys);
+                console.log(`✅ Found ${newEmailKeys.length} additional email-based keys`);
+            }
+        } catch (emailError) {
+            console.log('⚠️ Email pattern scan failed:', emailError.message);
         }
         
-        // 2. Alternative pattern scanning if needed
-        if (conversionKeys.length < 50) {
-            console.log('📊 Standard pattern found limited data, trying alternative patterns...');
-            
-            const alternativePatterns = ['conversions_*', 'conversion:*'];
-            
-            for (const pattern of alternativePatterns) {
-                try {
-                    const result = await redis(`scan/0/match/${pattern}/count/1000`);
-                    if (result.result && result.result[1] && result.result[1].length > 0) {
-                        conversionKeys = conversionKeys.concat(result.result[1]);
-                        console.log(`✅ Found ${result.result[1].length} keys with pattern ${pattern}`);
-                    }
-                } catch (patternError) {
-                    console.log(`⚠️ Pattern ${pattern} failed:`, patternError.message);
+        // PATTERN 3: Alternative conversion patterns
+        console.log('📊 Scanning for alternative conversion patterns...');
+        
+        const alternativePatterns = [
+            'conversion:*',   // Singular form
+            'purchase:*',     // Purchase-specific
+            'trial:*',        // Trial-specific
+            'subscription:*'  // Subscription-specific
+        ];
+        
+        for (const pattern of alternativePatterns) {
+            try {
+                const result = await redis(`scan/0/match/${pattern}/count/1000`);
+                if (result.result && result.result[1] && result.result[1].length > 0) {
+                    const altKeys = result.result[1];
+                    conversionKeys = conversionKeys.concat(altKeys);
+                    console.log(`✅ Found ${altKeys.length} keys with pattern ${pattern}`);
                 }
+            } catch (patternError) {
+                console.log(`⚠️ Pattern ${pattern} scan failed:`, patternError.message);
             }
         }
         
         // Remove duplicates
         const uniqueKeys = [...new Set(conversionKeys)];
-        console.log(`📊 Conversion scanning complete: ${uniqueKeys.length} unique keys found`);
+        console.log(`📊 Total conversion keys before deduplication: ${conversionKeys.length}`);
+        console.log(`📊 Unique conversion keys found: ${uniqueKeys.length}`);
+        
+        // Log pattern distribution
+        const timestampKeys = uniqueKeys.filter(key => key.match(/conversions:2025-\d{2}-\d{2}T/)).length;
+        const emailKeys = uniqueKeys.filter(key => key.includes('_gmail_com') || key.includes('@')).length;
+        const otherKeys = uniqueKeys.length - timestampKeys - emailKeys;
+        
+        console.log(`📊 Conversion pattern distribution:`);
+        console.log(`  - Timestamp-based: ${timestampKeys}`);
+        console.log(`  - Email-based: ${emailKeys}`);
+        console.log(`  - Other patterns: ${otherKeys}`);
+        
+        // Log sample keys for verification
+        if (uniqueKeys.length > 0) {
+            console.log('📝 Sample conversion keys found:');
+            uniqueKeys.slice(0, 10).forEach((key, i) => {
+                let pattern = 'OTHER';
+                if (key.match(/conversions:2025-\d{2}-\d{2}T/)) pattern = 'TIMESTAMP';
+                if (key.includes('_gmail_com') || key.includes('@')) pattern = 'EMAIL';
+                console.log(`  ${i+1}. [${pattern}] ${key}`);
+            });
+        }
         
         return uniqueKeys;
         
@@ -252,6 +311,76 @@ async function getConversionKeysEnhanced(redis) {
         console.error('❌ Enhanced conversion key scanning failed:', error);
         return [];
     }
+}
+
+// Enhanced conversion data fetching with nil handling
+async function fetchConversionDataSafely(redis, conversionKeys) {
+    console.log(`💰 Fetching conversion data for ${conversionKeys.length} keys...`);
+    
+    let allConversions = [];
+    let nilCount = 0;
+    let parseErrors = 0;
+    let validConversions = 0;
+    
+    // Process in smaller batches to handle large datasets
+    const batchSize = 500;
+    
+    for (let i = 0; i < conversionKeys.length; i += batchSize) {
+        const batch = conversionKeys.slice(i, i + batchSize);
+        
+        try {
+            const batchResults = await Promise.all(
+                batch.map(async (key) => {
+                    try {
+                        const result = await redis(`get/${key}`);
+                        return {
+                            key: key,
+                            data: result.result ? decodeURIComponent(result.result) : null
+                        };
+                    } catch (e) {
+                        return { key: key, data: null, error: e.message };
+                    }
+                })
+            );
+            
+            batchResults.forEach(item => {
+                if (!item.data) {
+                    nilCount++;
+                    console.warn(`⚠️ Key returned nil: ${item.key}`);
+                    return;
+                }
+                
+                try {
+                    const parsed = JSON.parse(item.data);
+                    
+                    // Enhanced timestamp validation with fallback
+                    if (!isValidTimestamp(parsed.timestamp)) {
+                        console.warn('⚠️ Invalid timestamp found, using current time');
+                        parsed.timestamp = new Date().toISOString();
+                    }
+                    
+                    allConversions.push(parsed);
+                    validConversions++;
+                } catch (parseError) {
+                    parseErrors++;
+                    console.warn(`⚠️ Failed to parse conversion data for ${item.key}:`, parseError.message);
+                }
+            });
+            
+            console.log(`✅ Batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(conversionKeys.length/batchSize)}: processed ${batch.length} keys`);
+            
+        } catch (batchError) {
+            console.error(`❌ Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
+        }
+    }
+    
+    console.log(`📊 Conversion data processing complete:`);
+    console.log(`  - Valid conversions: ${validConversions}`);
+    console.log(`  - Nil/missing data: ${nilCount}`);
+    console.log(`  - Parse errors: ${parseErrors}`);
+    console.log(`  - Total processed: ${conversionKeys.length}`);
+    
+    return allConversions;
 }
 
 // Attribution health calculation
@@ -612,40 +741,12 @@ const handler = async (event, context) => {
                     }
                 }
                 
-                // Fetch conversion data
+                // Fetch conversion data with enhanced processing
                 let allConversions = [];
                 if (conversionKeys.length > 0) {
                     try {
-                        console.log('💰 Fetching conversion data...');
-                        
-                        const conversionResults = await Promise.all(
-                            conversionKeys.map(async (key) => {
-                                try {
-                                    const result = await redis(`get/${key}`);
-                                    return result.result ? decodeURIComponent(result.result) : null;
-                                } catch (e) {
-                                    return null;
-                                }
-                            })
-                        );
-                        
-                        conversionResults.forEach(item => {
-                            if (item) {
-                                try {
-                                    const parsed = JSON.parse(item);
-                                    
-                                    // Enhanced timestamp validation with fallback
-                                    if (!isValidTimestamp(parsed.timestamp)) {
-                                        console.warn('⚠️ Invalid timestamp found, using current time');
-                                        parsed.timestamp = new Date().toISOString();
-                                    }
-                                    
-                                    allConversions.push(parsed);
-                                } catch (parseError) {
-                                    console.warn('⚠️ Failed to parse conversion data:', parseError.message);
-                                }
-                            }
-                        });
+                        // Use the new safe conversion data fetching
+                        allConversions = await fetchConversionDataSafely(redis, conversionKeys);
                         
                         // Deduplicate conversions by email and timestamp
                         const uniqueConversions = [];
