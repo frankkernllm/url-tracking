@@ -225,20 +225,49 @@ async function getComprehensiveAttributionKeys(redis) {
     }
 }
 
-// Enhanced conversion key scanning
+// FIXED: Enhanced conversion key scanning - resolves the "309 to 2 conversions" issue
 async function getConversionKeysEnhanced(redis) {
     let conversionKeys = [];
     
-    console.log('🔍 Starting enhanced conversion key scan...');
+    console.log('🔍 Starting FIXED conversion key scan...');
     
     try {
+        // 1. STANDARD PATTERN (this should work for most cases)
+        console.log('📊 Trying standard conversions:* pattern...');
         const standardResult = await redis('keys/conversions:*');
         if (standardResult.result && standardResult.result.length > 0) {
             conversionKeys = standardResult.result;
             console.log(`✅ Found ${conversionKeys.length} keys with standard pattern`);
-            return conversionKeys;
+            
+            // If we found a good amount, return immediately (don't complicate it)
+            if (conversionKeys.length > 50) {
+                console.log(`🎯 Standard pattern found substantial data (${conversionKeys.length}), using this`);
+                return [...new Set(conversionKeys)]; // Remove duplicates and return
+            }
         }
         
+        // 2. ONLY if standard pattern failed, try enhanced scanning
+        console.log('📊 Standard pattern found limited data, trying enhanced patterns...');
+        
+        // Try email-based patterns (newer format)
+        const emailPatterns = [
+            'conversions:*_*:*',  // email-based keys
+            'conversions:*@*',    // direct email keys
+        ];
+        
+        for (const pattern of emailPatterns) {
+            try {
+                const emailResult = await redis(`keys/${pattern}`);
+                if (emailResult.result && emailResult.result.length > 0) {
+                    conversionKeys = conversionKeys.concat(emailResult.result);
+                    console.log(`✅ Found ${emailResult.result.length} keys with email pattern ${pattern}`);
+                }
+            } catch (patternError) {
+                console.log(`⚠️ Email pattern ${pattern} failed:`, patternError.message);
+            }
+        }
+        
+        // 3. Try date-based patterns (fallback)
         const today = new Date().toISOString().split('T')[0];
         const yesterday = new Date(Date.now() - 24*60*60*1000).toISOString().split('T')[0];
         
@@ -247,7 +276,13 @@ async function getConversionKeysEnhanced(redis) {
             `conversions:${yesterday}*`,
             `conversions:2025-06-28*`,
             `conversions:2025-06-27*`,
-            `conversions:2025-06-26*`
+            `conversions:2025-06-26*`,
+            `conversions:2025-06-25*`,
+            `conversions:2025-06-24*`,
+            `conversions:2025-06-23*`,
+            `conversions:2025-06-22*`,
+            `conversions:2025-06-21*`,
+            `conversions:2025-06-20*`
         ];
         
         for (const pattern of datePatterns) {
@@ -255,14 +290,16 @@ async function getConversionKeysEnhanced(redis) {
                 const dateResult = await redis(`keys/${pattern}`);
                 if (dateResult.result && dateResult.result.length > 0) {
                     conversionKeys = conversionKeys.concat(dateResult.result);
-                    console.log(`✅ Found ${dateResult.result.length} keys with pattern ${pattern}`);
+                    console.log(`✅ Found ${dateResult.result.length} keys with date pattern ${pattern}`);
                 }
             } catch (patternError) {
-                console.log(`⚠️ Pattern ${pattern} failed:`, patternError.message);
+                console.log(`⚠️ Date pattern ${pattern} failed:`, patternError.message);
             }
         }
         
+        // 4. SCAN approach (broad search)
         try {
+            console.log('📊 Trying SCAN approach...');
             const scanResult = await redis('scan/0/match/conversions:*/count/1000');
             if (scanResult.result && scanResult.result[1] && scanResult.result[1].length > 0) {
                 const scanKeys = scanResult.result[1];
@@ -273,13 +310,50 @@ async function getConversionKeysEnhanced(redis) {
             console.log('⚠️ SCAN approach failed:', scanError.message);
         }
         
-        conversionKeys = [...new Set(conversionKeys)];
-        console.log(`📊 Total conversion keys found: ${conversionKeys.length}`);
+        // 5. Fallback: Try alternative key formats
+        if (conversionKeys.length < 10) {
+            console.log('🚨 Very low conversion count, trying alternative formats...');
+            
+            const alternativePatterns = [
+                'conversion:*',      // singular form
+                'order:*',           // order-based keys
+                'purchase:*',        // purchase-based keys
+                'ecommerce:*',       // ecommerce keys
+                'webhook:*'          // webhook-based keys
+            ];
+            
+            for (const altPattern of alternativePatterns) {
+                try {
+                    const altResult = await redis(`keys/${altPattern}`);
+                    if (altResult.result && altResult.result.length > 0) {
+                        conversionKeys = conversionKeys.concat(altResult.result);
+                        console.log(`✅ Found ${altResult.result.length} keys with alternative pattern ${altPattern}`);
+                    }
+                } catch (altError) {
+                    console.log(`⚠️ Alternative pattern ${altPattern} failed:`, altError.message);
+                }
+            }
+        }
         
-        return conversionKeys;
+        // 6. Remove duplicates and validate
+        const uniqueConversionKeys = [...new Set(conversionKeys)];
+        console.log(`📊 Total conversion keys before deduplication: ${conversionKeys.length}`);
+        console.log(`📊 Unique conversion keys found: ${uniqueConversionKeys.length}`);
+        
+        // Log sample keys for verification
+        if (uniqueConversionKeys.length > 0) {
+            console.log('📝 Sample conversion keys found:');
+            uniqueConversionKeys.slice(0, 3).forEach((key, i) => {
+                console.log(`  ${i+1}. ${key}`);
+            });
+        } else {
+            console.warn('⚠️ NO CONVERSION KEYS FOUND - This indicates a serious issue with conversion data storage');
+        }
+        
+        return uniqueConversionKeys;
         
     } catch (error) {
-        console.log('❌ Enhanced conversion key scan failed:', error.message);
+        console.error('❌ FIXED conversion key scan failed:', error.message);
         return [];
     }
 }
