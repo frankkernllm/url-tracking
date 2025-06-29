@@ -1,6 +1,6 @@
 // File: netlify/functions/analytics.js
-// 🔧 COMPLETE FIXED VERSION - Comprehensive Conversion Scanning deployed a 0411 on june 28
-// This version should find all 36 missing conversions from June 26-28
+// 🔧 COMPLETE FIXED VERSION - Comprehensive Conversion Scanning with Concurrency Control
+// Deployed at five thirty six on june twenty eighth This version fixes Redis EBUSY errors and should find all 36 missing conversions from June 26-28
 
 // Enhanced timestamp validation function
 function isValidTimestamp(timestamp) {
@@ -39,7 +39,12 @@ function safeProcessTimestamp(timestamp, fallbackTimestamp = null) {
     return currentTimestamp;
 }
 
-// DUAL-PATTERN ATTRIBUTION KEY SCANNING (existing)
+// Sleep function for batch delays
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// DUAL-PATTERN ATTRIBUTION KEY SCANNING
 async function getComprehensiveAttributionKeys(redis) {
     console.log('🔍 Starting DUAL PATTERN attribution key scanning...');
     
@@ -371,37 +376,55 @@ async function getConversionKeysEnhanced(redis) {
     }
 }
 
-// Enhanced conversion data fetching with better error handling
+// 🔧 FIXED: Enhanced conversion data fetching with controlled concurrency to avoid Redis EBUSY
 async function fetchConversionDataSafely(redis, conversionKeys) {
     console.log(`💰 Fetching conversion data for ${conversionKeys.length} keys...`);
     
     const allConversions = [];
-    const batchSize = 500; // Smaller batches for conversions
+    const batchSize = 50; // REDUCED from 500 to avoid connection overload
+    const delayMs = 100; // Add small delay between batches
     
     try {
-        // Process in batches to avoid timeouts
+        // Process in smaller batches with delays
         for (let i = 0; i < conversionKeys.length; i += batchSize) {
             const batch = conversionKeys.slice(i, i + batchSize);
-            console.log(`📦 Processing conversion batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(conversionKeys.length/batchSize)}`);
+            const batchNumber = Math.floor(i/batchSize) + 1;
+            const totalBatches = Math.ceil(conversionKeys.length/batchSize);
+            
+            console.log(`📦 Processing conversion batch ${batchNumber}/${totalBatches} (${batch.length} keys)`);
             
             try {
-                const batchResults = await Promise.all(
-                    batch.map(async (key) => {
-                        try {
-                            const result = await redis(`get/${key}`);
-                            if (result.result) {
-                                return {
-                                    key: key,
-                                    data: decodeURIComponent(result.result)
-                                };
+                // Process batch with reduced concurrency - 10 keys at a time
+                const batchResults = [];
+                
+                for (let j = 0; j < batch.length; j += 10) {
+                    const subBatch = batch.slice(j, j + 10);
+                    
+                    const subBatchResults = await Promise.all(
+                        subBatch.map(async (key) => {
+                            try {
+                                const result = await redis(`get/${key}`);
+                                if (result.result) {
+                                    return {
+                                        key: key,
+                                        data: decodeURIComponent(result.result)
+                                    };
+                                }
+                                return null;
+                            } catch (e) {
+                                console.warn(`⚠️ Failed to fetch conversion key: ${key.substring(0, 50)}...`);
+                                return null;
                             }
-                            return null;
-                        } catch (e) {
-                            console.warn(`⚠️ Failed to fetch conversion key: ${key}`);
-                            return null;
-                        }
-                    })
-                );
+                        })
+                    );
+                    
+                    batchResults.push(...subBatchResults);
+                    
+                    // Small delay between sub-batches
+                    if (j + 10 < batch.length) {
+                        await sleep(50);
+                    }
+                }
                 
                 // Parse the results
                 batchResults.forEach(item => {
@@ -425,8 +448,14 @@ async function fetchConversionDataSafely(redis, conversionKeys) {
                     }
                 });
                 
+                // Delay between main batches to avoid overwhelming Redis
+                if (i + batchSize < conversionKeys.length) {
+                    await sleep(delayMs);
+                }
+                
             } catch (batchError) {
-                console.error(`❌ Conversion batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
+                console.error(`❌ Conversion batch ${batchNumber} failed:`, batchError);
+                // Continue with next batch instead of failing completely
             }
         }
         
@@ -456,6 +485,91 @@ async function fetchConversionDataSafely(redis, conversionKeys) {
         
     } catch (error) {
         console.error('❌ Conversion data fetching failed:', error);
+        return [];
+    }
+}
+
+// 🔧 FIXED: Enhanced attribution data fetching with controlled concurrency
+async function fetchAttributionDataSafely(redis, attributionKeys) {
+    console.log(`📦 Fetching attribution data for ${attributionKeys.length} keys...`);
+    
+    const allPageViews = [];
+    const batchSize = 100; // Smaller batches
+    const delayMs = 100;
+    
+    try {
+        if (attributionKeys.length > 5000) {
+            console.log(`⚠️ Large dataset: ${attributionKeys.length} keys. Processing in controlled batches...`);
+        }
+        
+        // Process in batches to avoid timeouts and connection overload
+        for (let i = 0; i < attributionKeys.length; i += batchSize) {
+            const batch = attributionKeys.slice(i, i + batchSize);
+            const batchNumber = Math.floor(i/batchSize) + 1;
+            const totalBatches = Math.ceil(attributionKeys.length/batchSize);
+            
+            console.log(`📦 Processing attribution batch ${batchNumber}/${totalBatches} (${batch.length} keys)`);
+            
+            try {
+                // Process 20 keys at a time within each batch
+                const batchResults = [];
+                
+                for (let j = 0; j < batch.length; j += 20) {
+                    const subBatch = batch.slice(j, j + 20);
+                    
+                    const subBatchResults = await Promise.all(
+                        subBatch.map(async (key) => {
+                            try {
+                                const result = await redis(`get/${key}`);
+                                return result.result ? decodeURIComponent(result.result) : null;
+                            } catch (e) {
+                                return null;
+                            }
+                        })
+                    );
+                    
+                    batchResults.push(...subBatchResults);
+                    
+                    // Small delay between sub-batches
+                    if (j + 20 < batch.length) {
+                        await sleep(25);
+                    }
+                }
+                
+                batchResults.forEach(item => {
+                    if (item) {
+                        try {
+                            const parsed = JSON.parse(item);
+                            
+                            // Enhanced timestamp validation with fallback
+                            if (!isValidTimestamp(parsed.timestamp)) {
+                                console.warn('⚠️ Invalid timestamp found, using current time');
+                                parsed.timestamp = new Date().toISOString();
+                            }
+                            
+                            allPageViews.push(parsed);
+                        } catch (parseError) {
+                            console.warn('⚠️ Failed to parse attribution data:', parseError.message);
+                        }
+                    }
+                });
+                
+                // Delay between main batches
+                if (i + batchSize < attributionKeys.length) {
+                    await sleep(delayMs);
+                }
+                
+            } catch (batchError) {
+                console.error(`❌ Attribution batch ${batchNumber} failed:`, batchError);
+                // Continue with next batch
+            }
+        }
+        
+        console.log(`📊 Attribution data fetch complete: ${allPageViews.length} page views processed`);
+        return allPageViews;
+        
+    } catch (error) {
+        console.error('❌ Attribution data fetching failed:', error);
         return [];
     }
 }
@@ -703,94 +817,18 @@ const handler = async (event, context) => {
                     conversionKeys = [];
                 }
                 
-                // Fetch attribution data
+                // 🔧 FIXED: Fetch attribution data with controlled concurrency
                 let allPageViews = [];
                 if (attributionKeys.length > 0) {
                     try {
-                        console.log('📦 Fetching attribution data...');
-                        
-                        if (attributionKeys.length > 5000) {
-                            console.log(`⚠️ Large dataset: ${attributionKeys.length} keys. Processing in batches...`);
-                            
-                            // Process in batches to avoid timeouts
-                            const batchSize = 1000;
-                            for (let i = 0; i < attributionKeys.length; i += batchSize) {
-                                const batch = attributionKeys.slice(i, i + batchSize);
-                                
-                                try {
-                                    const batchResults = await Promise.all(
-                                        batch.map(async (key) => {
-                                            try {
-                                                const result = await redis(`get/${key}`);
-                                                return result.result ? decodeURIComponent(result.result) : null;
-                                            } catch (e) {
-                                                return null;
-                                            }
-                                        })
-                                    );
-                                    
-                                    batchResults.forEach(item => {
-                                        if (item) {
-                                            try {
-                                                const parsed = JSON.parse(item);
-                                                
-                                                // Enhanced timestamp validation with fallback
-                                                if (!isValidTimestamp(parsed.timestamp)) {
-                                                    console.warn('⚠️ Invalid timestamp found, using current time');
-                                                    parsed.timestamp = new Date().toISOString();
-                                                }
-                                                
-                                                allPageViews.push(parsed);
-                                            } catch (parseError) {
-                                                console.warn('⚠️ Failed to parse attribution data:', parseError.message);
-                                            }
-                                        }
-                                    });
-                                    
-                                    console.log(`✅ Batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(attributionKeys.length/batchSize)}: processed ${batch.length} records`);
-                                } catch (batchError) {
-                                    console.error(`❌ Batch ${Math.floor(i/batchSize) + 1} failed:`, batchError);
-                                }
-                            }
-                        } else {
-                            // Process normally for smaller datasets
-                            const attributionResults = await Promise.all(
-                                attributionKeys.map(async (key) => {
-                                    try {
-                                        const result = await redis(`get/${key}`);
-                                        return result.result ? decodeURIComponent(result.result) : null;
-                                    } catch (e) {
-                                        return null;
-                                    }
-                                })
-                            );
-                            
-                            attributionResults.forEach(item => {
-                                if (item) {
-                                    try {
-                                        const parsed = JSON.parse(item);
-                                        
-                                        // Enhanced timestamp validation with fallback
-                                        if (!isValidTimestamp(parsed.timestamp)) {
-                                            console.warn('⚠️ Invalid timestamp found, using current time');
-                                            parsed.timestamp = new Date().toISOString();
-                                        }
-                                        
-                                        allPageViews.push(parsed);
-                                    } catch (parseError) {
-                                        console.warn('⚠️ Failed to parse attribution data:', parseError.message);
-                                    }
-                                }
-                            });
-                        }
-                        
+                        allPageViews = await fetchAttributionDataSafely(redis, attributionKeys);
                     } catch (attributionError) {
                         console.error('❌ Attribution data fetch error:', attributionError);
                         allPageViews = [];
                     }
                 }
                 
-                // 🔧 CRITICAL FIX: Fetch conversion data using enhanced method
+                // 🔧 CRITICAL FIX: Fetch conversion data using enhanced method with controlled concurrency
                 let allConversions = [];
                 if (conversionKeys.length > 0) {
                     try {
