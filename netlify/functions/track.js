@@ -1,6 +1,6 @@
 // File: netlify/functions/track.js
 // ENHANCED VERSION with Redis write verification and proper error handling
-// Fixes silent Redis storage failures that started 24 hours ago
+// 🔧 UPDATED: Removed TTL for conversion data - conversions now stored permanently
 
 const handler = async (event, context) => {
   console.log('Enhanced track function started');
@@ -91,17 +91,19 @@ const handler = async (event, context) => {
     }
   };
 
-  // ENHANCED: Redis storage with verification
+  // 🔧 FIXED: Redis storage with verification - CONVERSION DATA NOW PERMANENT
   async function storeConversionWithVerification(trackingData) {
     const storageKey = `conversions:${trackingData.timestamp}:${Math.random().toString(36).substr(2, 9)}`;
     
     try {
-      console.log('🔄 Attempting Redis setex for key:', storageKey);
+      console.log('🔄 Attempting Redis set for key (PERMANENT STORAGE):', storageKey);
       console.log('📦 Data size:', JSON.stringify(trackingData).length, 'characters');
       
-      // Step 1: Attempt the write with longer timeout
-      const setResult = await redis(`setex/${storageKey}/86400/${encodeURIComponent(JSON.stringify(trackingData))}`, 8000);
-      console.log('📋 Redis setex returned:', JSON.stringify(setResult));
+      // 🔧 CRITICAL CHANGE: Removed TTL - conversion data now stored permanently
+      // OLD: setex/${storageKey}/86400/${data} (expired after 24 hours)
+      // NEW: set/${storageKey}/${data} (permanent storage)
+      const setResult = await redis(`set/${storageKey}/${encodeURIComponent(JSON.stringify(trackingData))}`, 8000);
+      console.log('📋 Redis set returned:', JSON.stringify(setResult));
       
       // Step 2: Verify the write actually worked by reading it back
       console.log('🔍 Verifying write with get command...');
@@ -109,10 +111,10 @@ const handler = async (event, context) => {
       console.log('📋 Redis get verification:', verifyResult ? 'DATA FOUND ✅' : 'DATA NOT FOUND ❌');
       
       if (verifyResult && verifyResult.result) {
-        console.log('✅ VERIFIED: Data successfully written and readable');
+        console.log('✅ VERIFIED: Conversion data successfully written and readable (PERMANENT STORAGE)');
         return { success: true, key: storageKey, verified: true };
       } else {
-        console.log('❌ CRITICAL: Data not found after setex command - Redis write failed silently');
+        console.log('❌ CRITICAL: Data not found after set command - Redis write failed silently');
         return { success: false, error: 'Data not found after write attempt - silent Redis failure', verified: false };
       }
       
@@ -328,16 +330,16 @@ const handler = async (event, context) => {
       landing_page: enhancedTrackingData.landing_page || 'MISSING'
     });
 
-    // ENHANCED: Store conversion data with verification
+    // ENHANCED: Store conversion data with verification (NOW WITH PERMANENT STORAGE)
     const conversionResult = await storeConversionWithVerification(enhancedTrackingData);
     
     if (conversionResult.success) {
-      console.log('✅ Conversion storage verified successful with key:', conversionResult.key);
+      console.log('✅ Conversion storage verified successful with key (PERMANENT):', conversionResult.key);
     } else {
       console.log('❌ CRITICAL: Conversion storage failed:', conversionResult.error);
     }
 
-    // Store attribution stats for monitoring
+    // Store attribution stats for monitoring (30-day TTL is fine for stats)
     try {
       const statsKey = `attribution_stats_${Date.now()}`;
       const statsData = {
@@ -349,7 +351,7 @@ const handler = async (event, context) => {
         dual_ip: isDualIPScenario,
         fields_available: enhancedTrackingData.attribution_fields_present
       };
-      await redis(`setex/${statsKey}/2592000/${encodeURIComponent(JSON.stringify(statsData))}`, 3000); // 30 days
+      await redis(`setex/${statsKey}/2592000/${encodeURIComponent(JSON.stringify(statsData))}`, 3000); // 30 days (kept TTL for stats)
       console.log('✅ Attribution stats stored');
     } catch (statsError) {
       console.log('⚠️ Stats storage failed:', statsError.message);
@@ -377,6 +379,7 @@ const handler = async (event, context) => {
         storage_verified: conversionResult.success,
         storage_key: conversionResult.key || null,
         storage_error: conversionResult.error || null,
+        storage_type: 'PERMANENT', // NEW: Indicates no TTL
         
         // Additional debugging info
         dual_ip_detected: isDualIPScenario,
@@ -396,6 +399,7 @@ const handler = async (event, context) => {
           attribution_attempted: true,
           storage_attempted: true,
           storage_verified: conversionResult.success, // CRITICAL FIELD
+          storage_permanent: true, // NEW: Confirms no TTL
           landing_page_copied: !!enhancedTrackingData.landing_page,
           missing_fields: [
             !extractedData.SSID && 'ssid',
