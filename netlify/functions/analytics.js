@@ -1,14 +1,18 @@
-// analytics.js - Optimized Performance Version 555 on june28
-// Netlify Function for oJoy Analytics Dashboard
+// analytics.js - Optimized Performance Version
+// Netlify Function for oJoy Analytics Dashboard 558 june28
 // Fixes: 7-day default, dual pattern scanning, complete cursor iteration
 
-const { createClient } = require('@upstash/redis');
-
-// Initialize Redis client
-const redis = createClient({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+// Initialize Redis client using the existing pattern from the original system
+const redis = async (command) => {
+  const url = `${process.env.UPSTASH_REDIS_REST_URL}/${command}`;
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  return await response.json();
+};
 
 // Performance optimization: Limit maximum date range
 const MAX_DAYS_ALLOWED = 7;
@@ -145,13 +149,10 @@ async function getIPv6AttributionData(startTimestamp, endTimestamp) {
 
   for (const prefix of ipv6Prefixes) {
     try {
-      const result = await redis.scan(0, {
-        match: `attribution_${prefix}*`,
-        count: 1000
-      });
+      const result = await redis(`scan/0/match/attribution_${prefix}*/count/1000`);
 
-      if (result[1] && result[1].length > 0) {
-        const batchData = await processBatchAttributionKeys(result[1], startTimestamp, endTimestamp);
+      if (result.result && result.result[1] && result.result[1].length > 0) {
+        const batchData = await processBatchAttributionKeys(result.result[1], startTimestamp, endTimestamp);
         attributionData.push(...batchData);
       }
     } catch (error) {
@@ -165,23 +166,24 @@ async function getIPv6AttributionData(startTimestamp, endTimestamp) {
 // IPv4 attribution pattern scanning (attribution:*)
 async function getIPv4AttributionData(startTimestamp, endTimestamp) {
   const attributionData = [];
-  let cursor = 0;
+  let cursor = '0';
   let totalProcessed = 0;
 
   try {
     do {
-      const result = await redis.scan(cursor, {
-        match: 'attribution:*',
-        count: 1000
-      });
+      const result = await redis(`scan/${cursor}/match/attribution:*/count/1000`);
 
-      cursor = result[0];
-      const keys = result[1];
+      if (result.result && result.result[0]) {
+        cursor = result.result[0];
+        const keys = result.result[1];
 
-      if (keys && keys.length > 0) {
-        const batchData = await processBatchAttributionKeys(keys, startTimestamp, endTimestamp);
-        attributionData.push(...batchData);
-        totalProcessed += keys.length;
+        if (keys && keys.length > 0) {
+          const batchData = await processBatchAttributionKeys(keys, startTimestamp, endTimestamp);
+          attributionData.push(...batchData);
+          totalProcessed += keys.length;
+        }
+      } else {
+        break;
       }
 
       // Safety limit for cursor iteration
@@ -190,7 +192,7 @@ async function getIPv4AttributionData(startTimestamp, endTimestamp) {
         break;
       }
 
-    } while (cursor !== 0);
+    } while (cursor !== '0');
 
   } catch (error) {
     console.warn('⚠️ IPv4 pattern scan error:', error.message);
@@ -212,8 +214,8 @@ async function processBatchAttributionKeys(keys, startTimestamp, endTimestamp) {
       const batchResults = await Promise.all(
         batch.map(async (key) => {
           try {
-            const data = await redis.get(key);
-            return data ? { key, data: decodeURIComponent(data) } : null;
+            const result = await redis(`get/${key}`);
+            return result.result ? { key, data: decodeURIComponent(result.result) } : null;
           } catch (e) {
             return null;
           }
@@ -255,22 +257,23 @@ async function getComprehensiveConversionData(startDate, endDate) {
 
   try {
     // Complete cursor iteration for conversions:*
-    let cursor = 0;
+    let cursor = '0';
     let totalFound = 0;
 
     do {
-      const result = await redis.scan(cursor, {
-        match: 'conversions:*',
-        count: 1000
-      });
+      const result = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
 
-      cursor = result[0];
-      const keys = result[1];
+      if (result.result && result.result[0]) {
+        cursor = result.result[0];
+        const keys = result.result[1];
 
-      if (keys && keys.length > 0) {
-        const batchData = await processBatchConversionKeys(keys, startTimestamp, endTimestamp);
-        conversionData.push(...batchData);
-        totalFound += keys.length;
+        if (keys && keys.length > 0) {
+          const batchData = await processBatchConversionKeys(keys, startTimestamp, endTimestamp);
+          conversionData.push(...batchData);
+          totalFound += keys.length;
+        }
+      } else {
+        break;
       }
 
       // Safety limit
@@ -279,7 +282,7 @@ async function getComprehensiveConversionData(startDate, endDate) {
         break;
       }
 
-    } while (cursor !== 0);
+    } while (cursor !== '0');
 
     return conversionData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
@@ -301,8 +304,8 @@ async function processBatchConversionKeys(keys, startTimestamp, endTimestamp) {
       const batchResults = await Promise.all(
         batch.map(async (key) => {
           try {
-            const data = await redis.get(key);
-            return data ? { key, data: decodeURIComponent(data) } : null;
+            const result = await redis(`get/${key}`);
+            return result.result ? { key, data: decodeURIComponent(result.result) } : null;
           } catch (e) {
             return null;
           }
