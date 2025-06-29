@@ -1,975 +1,386 @@
-// File: netlify/functions/analytics.js
-// 🔧 COMPLETE FIXED VERSION - Comprehensive Conversion Scanning with Concurrency Control
-// Deployed at five thirty six on june twenty eighth This version fixes Redis EBUSY errors and should find all 36 missing conversions from June 26-28
+// analytics.js - Optimized Performance Version 555 on june28
+// Netlify Function for oJoy Analytics Dashboard
+// Fixes: 7-day default, dual pattern scanning, complete cursor iteration
 
-// Enhanced timestamp validation function
-function isValidTimestamp(timestamp) {
-    if (!timestamp) return false;
+const { createClient } = require('@upstash/redis');
+
+// Initialize Redis client
+const redis = createClient({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+// Performance optimization: Limit maximum date range
+const MAX_DAYS_ALLOWED = 7;
+const DEFAULT_DAYS = 7;
+
+exports.handler = async (event, context) => {
+  // Set CORS headers
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Content-Type': 'application/json'
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
+
+  try {
+    const startTime = Date.now();
+    console.log('🚀 Analytics function started');
+
+    // Parse query parameters with 7-day default
+    const { 
+      start_date, 
+      end_date, 
+      include_attribution_stats = 'false' 
+    } = event.queryStringParameters || {};
+
+    // Calculate optimized date range (max 7 days)
+    const endDate = end_date ? new Date(end_date) : new Date();
+    const startDate = start_date ? new Date(start_date) : new Date(Date.now() - (DEFAULT_DAYS * 24 * 60 * 60 * 1000));
     
-    try {
-        const date = new Date(timestamp);
-        if (isNaN(date.getTime())) return false;
-        
-        const timestampMs = date.getTime();
-        const minDate = new Date('2015-01-01').getTime();
-        const maxDate = new Date('2035-12-31').getTime();
-        
-        return timestampMs >= minDate && timestampMs <= maxDate;
-    } catch (error) {
-        console.warn('Timestamp validation error:', error);
-        return false;
+    // Enforce maximum range limit
+    const daysDiff = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+    if (daysDiff > MAX_DAYS_ALLOWED) {
+      console.log(`⚠️ Date range limited: ${daysDiff} days requested, using ${MAX_DAYS_ALLOWED} days`);
+      startDate.setTime(endDate.getTime() - (MAX_DAYS_ALLOWED * 24 * 60 * 60 * 1000));
     }
-}
 
-// Enhanced safe timestamp processing
-function safeProcessTimestamp(timestamp, fallbackTimestamp = null) {
-    if (isValidTimestamp(timestamp)) {
-        return timestamp;
+    console.log(`📅 Processing ${Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24))} days: ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}`);
+
+    // Comprehensive attribution key discovery (dual patterns)
+    const attributionData = await getComprehensiveAttributionData(startDate, endDate);
+    console.log(`📊 Found ${attributionData.length} attribution records`);
+
+    // Enhanced conversion data retrieval
+    const conversionData = await getComprehensiveConversionData(startDate, endDate);
+    console.log(`💰 Found ${conversionData.length} conversions`);
+
+    // Generate analytics response
+    const response = {
+      data: {
+        page_views: attributionData.length,
+        conversions: conversionData.length,
+        attribution_data: attributionData,
+        conversion_data: conversionData,
+        date_range: {
+          start: startDate.toISOString(),
+          end: endDate.toISOString(),
+          days: Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24))
+        },
+        processing_stats: {
+          execution_time_ms: Date.now() - startTime,
+          data_patterns_scanned: ['attribution_*', 'attribution:*', 'conversions:*'],
+          performance_optimized: true
+        }
+      }
+    };
+
+    // Include detailed attribution stats if requested
+    if (include_attribution_stats === 'true') {
+      response.data.attribution_stats = generateAttributionStats(attributionData);
     }
-    
-    console.warn('⚠️ Invalid timestamp detected:', timestamp);
-    
-    if (fallbackTimestamp && isValidTimestamp(fallbackTimestamp)) {
-        console.log('✅ Using fallback timestamp:', fallbackTimestamp);
-        return fallbackTimestamp;
-    }
-    
-    const currentTimestamp = new Date().toISOString();
-    console.log('🔧 Generated current timestamp fallback:', currentTimestamp);
-    return currentTimestamp;
-}
 
-// Sleep function for batch delays
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+    console.log(`✅ Response ready: ${attributionData.length} views, ${conversionData.length} conversions (${Date.now() - startTime}ms)`);
 
-// DUAL-PATTERN ATTRIBUTION KEY SCANNING
-async function getComprehensiveAttributionKeys(redis) {
-    console.log('🔍 Starting DUAL PATTERN attribution key scanning...');
-    
-    let allAttributionKeys = [];
-    let totalScanned = 0;
-    
-    try {
-        // PATTERN 1: Traditional underscore format (attribution_*)
-        console.log('📊 Scanning Pattern 1: attribution_* (underscore format)');
-        
-        const ipv6Prefixes = [
-            '2001', '2002', '2400', '2600', '2601', '2602', '2603', '2604', 
-            '2605', '2606', '2607', '2608', '2609', '260a', '260b', '260c',
-            '260d', '260e', '260f', '2610', '2620', '2630', '2640', '2650',
-            '2660', '2670', '2680', '2690', '2a00', '2a01', '2a02', '2a03',
-            '2a04', '2a05', '2a06', '2a07', '2a08', '2a09', '2a0a', '2a0b'
-        ];
-        
-        for (const prefix of ipv6Prefixes) {
-            try {
-                const result = await redis(`scan/0/match/attribution_${prefix}*/count/1000`);
-                if (result.result && result.result[1] && result.result[1].length > 0) {
-                    const keys = result.result[1];
-                    allAttributionKeys = allAttributionKeys.concat(keys);
-                    console.log(`✅ Found ${keys.length} underscore keys with prefix ${prefix}`);
-                    totalScanned += keys.length;
-                }
-            } catch (error) {
-                console.log(`⚠️ Underscore prefix ${prefix} scan failed:`, error.message);
-            }
-        }
-        
-        // PATTERN 2: COLON FORMAT (attribution:*) - THE MISSING DATA!
-        console.log('📊 Scanning Pattern 2: attribution:* (colon format - CRITICAL MISSING DATA)');
-        
-        try {
-            let cursor = '0';
-            let colonKeys = [];
-            
-            do {
-                const result = await redis(`scan/${cursor}/match/attribution:*/count/1000`);
-                if (result.result && result.result[1]) {
-                    cursor = result.result[0];
-                    const keys = result.result[1];
-                    colonKeys = colonKeys.concat(keys);
-                    console.log(`✅ Found ${keys.length} colon-format keys (cursor: ${cursor})`);
-                }
-            } while (cursor !== '0' && colonKeys.length < 15000);
-            
-            allAttributionKeys = allAttributionKeys.concat(colonKeys);
-            totalScanned += colonKeys.length;
-            console.log(`🎯 CRITICAL: Total colon-format keys found: ${colonKeys.length}`);
-            
-        } catch (error) {
-            console.error('❌ Colon format scanning failed:', error);
-        }
-        
-        // Remove duplicates and validate
-        const uniqueKeys = [...new Set(allAttributionKeys)];
-        console.log(`📊 Attribution scan found ${uniqueKeys.length} unique keys`);
-        
-        return uniqueKeys;
-        
-    } catch (error) {
-        console.error('❌ Dual pattern attribution key scanning failed:', error);
-        return [];
-    }
-}
-
-// 🔧 COMPREHENSIVE CONVERSION KEY SCANNING - THE MAIN FIX
-async function getConversionKeysEnhanced(redis) {
-    let allConversionKeys = [];
-    let totalScanned = 0;
-    
-    console.log('🔍 Starting COMPREHENSIVE conversion key scan...');
-    
-    try {
-        // PATTERN 1: Standard conversions:* with COMPLETE cursor iteration
-        console.log('📊 Scanning Pattern 1: conversions:* (standard format)');
-        try {
-            let cursor = '0';
-            let standardKeys = [];
-            let iterations = 0;
-            
-            do {
-                const result = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
-                if (result.result && result.result[1]) {
-                    cursor = result.result[0];
-                    const keys = result.result[1];
-                    standardKeys = standardKeys.concat(keys);
-                    console.log(`✅ Batch ${++iterations}: Found ${keys.length} conversion keys (cursor: ${cursor})`);
-                    
-                    // Safety check for infinite loops
-                    if (iterations > 100) {
-                        console.warn('⚠️ Breaking cursor iteration after 100 batches for safety');
-                        break;
-                    }
-                }
-            } while (cursor !== '0');
-            
-            allConversionKeys = allConversionKeys.concat(standardKeys);
-            totalScanned += standardKeys.length;
-            console.log(`🎯 Pattern 1 total: ${standardKeys.length} standard conversion keys found`);
-            
-        } catch (standardError) {
-            console.error('❌ Standard conversions:* pattern scan failed:', standardError.message);
-        }
-        
-        // PATTERN 2: Email-based conversion keys (conversions:*email*)
-        console.log('📊 Scanning Pattern 2: Email-based conversion keys');
-        try {
-            const emailPatterns = [
-                'conversions:*gmail*',
-                'conversions:*yahoo*', 
-                'conversions:*hotmail*',
-                'conversions:*outlook*',
-                'conversions:*@*',
-                'conversions:*_*_*'  // underscore-encoded emails
-            ];
-            
-            for (const pattern of emailPatterns) {
-                try {
-                    let cursor = '0';
-                    do {
-                        const result = await redis(`scan/${cursor}/match/${pattern}/count/1000`);
-                        if (result.result && result.result[1]) {
-                            cursor = result.result[0];
-                            const keys = result.result[1];
-                            allConversionKeys = allConversionKeys.concat(keys);
-                            if (keys.length > 0) {
-                                console.log(`✅ Found ${keys.length} keys with email pattern ${pattern}`);
-                            }
-                        }
-                    } while (cursor !== '0');
-                } catch (emailError) {
-                    console.log(`⚠️ Email pattern ${pattern} failed:`, emailError.message);
-                }
-            }
-        } catch (emailScanError) {
-            console.error('❌ Email-based scanning failed:', emailScanError.message);
-        }
-        
-        // PATTERN 3: Date-based conversion keys (for June 26-28 specifically)
-        console.log('📊 Scanning Pattern 3: Date-based conversion keys (June 26-28 focus)');
-        try {
-            const datePatterns = [
-                'conversions:2025-06-26*',
-                'conversions:2025-06-27*', 
-                'conversions:2025-06-28*',
-                '*2025-06-26*',
-                '*2025-06-27*',
-                '*2025-06-28*'
-            ];
-            
-            for (const pattern of datePatterns) {
-                try {
-                    let cursor = '0';
-                    do {
-                        const result = await redis(`scan/${cursor}/match/${pattern}/count/1000`);
-                        if (result.result && result.result[1]) {
-                            cursor = result.result[0];
-                            const keys = result.result[1];
-                            allConversionKeys = allConversionKeys.concat(keys);
-                            if (keys.length > 0) {
-                                console.log(`✅ Found ${keys.length} keys with date pattern ${pattern}`);
-                            }
-                        }
-                    } while (cursor !== '0');
-                } catch (dateError) {
-                    console.log(`⚠️ Date pattern ${pattern} failed:`, dateError.message);
-                }
-            }
-        } catch (dateScanError) {
-            console.error('❌ Date-based scanning failed:', dateScanError.message);
-        }
-        
-        // PATTERN 4: Alternative conversion key formats
-        console.log('📊 Scanning Pattern 4: Alternative conversion formats');
-        try {
-            const alternativePatterns = [
-                'conversion:*',     // singular form
-                'conv:*',          // shortened form
-                'track:*',         // tracking format
-                'purchase:*',      // purchase format
-                'sale:*',          // sale format
-                'order:*',         // order format
-                'transaction:*',   // transaction format
-                '*conversion*',    // broad search
-                '*purchase*',      // broad purchase search
-                '*order*'          // broad order search
-            ];
-            
-            for (const pattern of alternativePatterns) {
-                try {
-                    let cursor = '0';
-                    do {
-                        const result = await redis(`scan/${cursor}/match/${pattern}/count/1000`);
-                        if (result.result && result.result[1]) {
-                            cursor = result.result[0];
-                            const keys = result.result[1];
-                            // Filter to only conversion-related keys to avoid noise
-                            const convKeys = keys.filter(key => 
-                                key.includes('conversion') || 
-                                key.includes('purchase') || 
-                                key.includes('order') ||
-                                key.includes('sale') ||
-                                key.includes('track')
-                            );
-                            allConversionKeys = allConversionKeys.concat(convKeys);
-                            if (convKeys.length > 0) {
-                                console.log(`✅ Found ${convKeys.length} keys with alternative pattern ${pattern}`);
-                            }
-                        }
-                    } while (cursor !== '0');
-                } catch (altError) {
-                    console.log(`⚠️ Alternative pattern ${pattern} failed:`, altError.message);
-                }
-            }
-        } catch (altScanError) {
-            console.error('❌ Alternative pattern scanning failed:', altScanError.message);
-        }
-        
-        // PATTERN 5: Timestamp-based keys (Unix timestamps for June 26-28)
-        console.log('📊 Scanning Pattern 5: Timestamp-based keys');
-        try {
-            // Unix timestamps for June 26-28, 2025 PST (add 8 hours for UTC)
-            const june26Start = new Date('2025-06-26T01:34:00-08:00').getTime(); // 1:34 AM PST
-            const june28End = new Date('2025-06-28T09:37:00-08:00').getTime();   // 9:37 AM PST
-            
-            // Generate timestamp patterns to search for
-            const timestampPatterns = [];
-            for (let ts = june26Start; ts <= june28End; ts += 3600000) { // Every hour
-                const tsStr = ts.toString();
-                timestampPatterns.push(`*${tsStr.substring(0, 8)}*`); // First 8 digits
-            }
-            
-            // Remove duplicates
-            const uniqueTimestampPatterns = [...new Set(timestampPatterns)];
-            
-            for (const pattern of uniqueTimestampPatterns.slice(0, 10)) { // Limit to prevent timeout
-                try {
-                    const result = await redis(`scan/0/match/${pattern}/count/500`);
-                    if (result.result && result.result[1]) {
-                        const keys = result.result[1];
-                        // Filter to only conversion-related keys
-                        const convKeys = keys.filter(key => 
-                            key.includes('conversion') || 
-                            key.includes('purchase') || 
-                            key.includes('order')
-                        );
-                        allConversionKeys = allConversionKeys.concat(convKeys);
-                        if (convKeys.length > 0) {
-                            console.log(`✅ Found ${convKeys.length} timestamp-based conversion keys`);
-                        }
-                    }
-                } catch (tsError) {
-                    console.log(`⚠️ Timestamp pattern ${pattern} failed:`, tsError.message);
-                }
-            }
-        } catch (timestampScanError) {
-            console.error('❌ Timestamp-based scanning failed:', timestampScanError.message);
-        }
-        
-        // PATTERN 6: Broad conversion scan as final fallback
-        if (allConversionKeys.length < 50) {
-            console.log('🚨 Low conversion count detected, performing broad scan...');
-            try {
-                let cursor = '0';
-                let broadKeys = [];
-                
-                do {
-                    const result = await redis(`scan/${cursor}/match/*conv*/count/1000`);
-                    if (result.result && result.result[1]) {
-                        cursor = result.result[0];
-                        const keys = result.result[1];
-                        // Filter to only conversion-related keys
-                        const convKeys = keys.filter(key => 
-                            key.toLowerCase().includes('conv') || 
-                            key.toLowerCase().includes('purchase') || 
-                            key.toLowerCase().includes('order') ||
-                            key.toLowerCase().includes('sale')
-                        );
-                        broadKeys = broadKeys.concat(convKeys);
-                    }
-                } while (cursor !== '0' && broadKeys.length < 5000);
-                
-                allConversionKeys = allConversionKeys.concat(broadKeys);
-                console.log(`📊 Broad scan added ${broadKeys.length} additional conversion keys`);
-                
-            } catch (broadError) {
-                console.error('❌ Broad conversion scan failed:', broadError.message);
-            }
-        }
-        
-        // Remove duplicates and validate
-        const uniqueKeys = [...new Set(allConversionKeys)];
-        console.log(`📊 CONVERSION SCAN RESULTS:`);
-        console.log(`  Total keys before deduplication: ${allConversionKeys.length}`);
-        console.log(`  Unique conversion keys found: ${uniqueKeys.length}`);
-        console.log(`  Expected for June 26-28: 36 conversions`);
-        console.log(`  Coverage: ${Math.round((uniqueKeys.length / 36) * 100)}% of expected conversions`);
-        
-        // Log sample keys for verification
-        if (uniqueKeys.length > 0) {
-            console.log('📝 Sample conversion keys found:');
-            uniqueKeys.slice(0, 10).forEach((key, i) => {
-                console.log(`  ${i+1}. ${key}`);
-            });
-            
-            // Show keys that might be from June 26-28 specifically
-            const june26_28Keys = uniqueKeys.filter(key => 
-                key.includes('2025-06-26') || 
-                key.includes('2025-06-27') || 
-                key.includes('2025-06-28')
-            );
-            if (june26_28Keys.length > 0) {
-                console.log(`🎯 Keys that appear to be from June 26-28: ${june26_28Keys.length}`);
-                june26_28Keys.slice(0, 5).forEach((key, i) => {
-                    console.log(`  June 26-28 #${i+1}: ${key}`);
-                });
-            }
-        }
-        
-        return uniqueKeys;
-        
-    } catch (error) {
-        console.error('❌ Comprehensive conversion key scanning failed:', error);
-        return [];
-    }
-}
-
-// 🔧 FIXED: Enhanced conversion data fetching with controlled concurrency to avoid Redis EBUSY
-async function fetchConversionDataSafely(redis, conversionKeys) {
-    console.log(`💰 Fetching conversion data for ${conversionKeys.length} keys...`);
-    
-    const allConversions = [];
-    const batchSize = 50; // REDUCED from 500 to avoid connection overload
-    const delayMs = 100; // Add small delay between batches
-    
-    try {
-        // Process in smaller batches with delays
-        for (let i = 0; i < conversionKeys.length; i += batchSize) {
-            const batch = conversionKeys.slice(i, i + batchSize);
-            const batchNumber = Math.floor(i/batchSize) + 1;
-            const totalBatches = Math.ceil(conversionKeys.length/batchSize);
-            
-            console.log(`📦 Processing conversion batch ${batchNumber}/${totalBatches} (${batch.length} keys)`);
-            
-            try {
-                // Process batch with reduced concurrency - 10 keys at a time
-                const batchResults = [];
-                
-                for (let j = 0; j < batch.length; j += 10) {
-                    const subBatch = batch.slice(j, j + 10);
-                    
-                    const subBatchResults = await Promise.all(
-                        subBatch.map(async (key) => {
-                            try {
-                                const result = await redis(`get/${key}`);
-                                if (result.result) {
-                                    return {
-                                        key: key,
-                                        data: decodeURIComponent(result.result)
-                                    };
-                                }
-                                return null;
-                            } catch (e) {
-                                console.warn(`⚠️ Failed to fetch conversion key: ${key.substring(0, 50)}...`);
-                                return null;
-                            }
-                        })
-                    );
-                    
-                    batchResults.push(...subBatchResults);
-                    
-                    // Small delay between sub-batches
-                    if (j + 10 < batch.length) {
-                        await sleep(50);
-                    }
-                }
-                
-                // Parse the results
-                batchResults.forEach(item => {
-                    if (item && item.data) {
-                        try {
-                            const parsed = JSON.parse(item.data);
-                            
-                            // Enhanced timestamp validation with fallback
-                            if (!isValidTimestamp(parsed.timestamp)) {
-                                console.warn(`⚠️ Invalid timestamp in conversion ${item.key}, using current time`);
-                                parsed.timestamp = new Date().toISOString();
-                            }
-                            
-                            // Add the key for debugging
-                            parsed._redis_key = item.key;
-                            
-                            allConversions.push(parsed);
-                        } catch (parseError) {
-                            console.warn(`⚠️ Failed to parse conversion data from key: ${item.key}`);
-                        }
-                    }
-                });
-                
-                // Delay between main batches to avoid overwhelming Redis
-                if (i + batchSize < conversionKeys.length) {
-                    await sleep(delayMs);
-                }
-                
-            } catch (batchError) {
-                console.error(`❌ Conversion batch ${batchNumber} failed:`, batchError);
-                // Continue with next batch instead of failing completely
-            }
-        }
-        
-        console.log(`📊 Conversion data fetch complete: ${allConversions.length} conversions processed`);
-        
-        // Show June 26-28 conversions specifically
-        const june26_28 = allConversions.filter(conv => {
-            const convDate = new Date(conv.timestamp);
-            return convDate >= new Date('2025-06-26T01:34:00-08:00') && 
-                   convDate <= new Date('2025-06-28T09:37:00-08:00');
-        });
-        
-        console.log(`🎯 CRITICAL: Conversions found for June 26-28 period: ${june26_28.length}`);
-        console.log(`🎯 Expected: 36 conversions`);
-        console.log(`🎯 Found: ${june26_28.length} conversions`);
-        console.log(`🎯 Missing: ${36 - june26_28.length} conversions`);
-        
-        if (june26_28.length > 0) {
-            console.log('📋 June 26-28 conversions found:');
-            june26_28.forEach((conv, i) => {
-                const orderTotal = parseFloat(conv.order_total) || 0;
-                console.log(`  ${i+1}. ${new Date(conv.timestamp).toLocaleString()} - ${conv.email} - $${orderTotal} [${conv._redis_key}]`);
-            });
-        }
-        
-        return allConversions;
-        
-    } catch (error) {
-        console.error('❌ Conversion data fetching failed:', error);
-        return [];
-    }
-}
-
-// 🔧 FIXED: Enhanced attribution data fetching with controlled concurrency
-async function fetchAttributionDataSafely(redis, attributionKeys) {
-    console.log(`📦 Fetching attribution data for ${attributionKeys.length} keys...`);
-    
-    const allPageViews = [];
-    const batchSize = 100; // Smaller batches
-    const delayMs = 100;
-    
-    try {
-        if (attributionKeys.length > 5000) {
-            console.log(`⚠️ Large dataset: ${attributionKeys.length} keys. Processing in controlled batches...`);
-        }
-        
-        // Process in batches to avoid timeouts and connection overload
-        for (let i = 0; i < attributionKeys.length; i += batchSize) {
-            const batch = attributionKeys.slice(i, i + batchSize);
-            const batchNumber = Math.floor(i/batchSize) + 1;
-            const totalBatches = Math.ceil(attributionKeys.length/batchSize);
-            
-            console.log(`📦 Processing attribution batch ${batchNumber}/${totalBatches} (${batch.length} keys)`);
-            
-            try {
-                // Process 20 keys at a time within each batch
-                const batchResults = [];
-                
-                for (let j = 0; j < batch.length; j += 20) {
-                    const subBatch = batch.slice(j, j + 20);
-                    
-                    const subBatchResults = await Promise.all(
-                        subBatch.map(async (key) => {
-                            try {
-                                const result = await redis(`get/${key}`);
-                                return result.result ? decodeURIComponent(result.result) : null;
-                            } catch (e) {
-                                return null;
-                            }
-                        })
-                    );
-                    
-                    batchResults.push(...subBatchResults);
-                    
-                    // Small delay between sub-batches
-                    if (j + 20 < batch.length) {
-                        await sleep(25);
-                    }
-                }
-                
-                batchResults.forEach(item => {
-                    if (item) {
-                        try {
-                            const parsed = JSON.parse(item);
-                            
-                            // Enhanced timestamp validation with fallback
-                            if (!isValidTimestamp(parsed.timestamp)) {
-                                console.warn('⚠️ Invalid timestamp found, using current time');
-                                parsed.timestamp = new Date().toISOString();
-                            }
-                            
-                            allPageViews.push(parsed);
-                        } catch (parseError) {
-                            console.warn('⚠️ Failed to parse attribution data:', parseError.message);
-                        }
-                    }
-                });
-                
-                // Delay between main batches
-                if (i + batchSize < attributionKeys.length) {
-                    await sleep(delayMs);
-                }
-                
-            } catch (batchError) {
-                console.error(`❌ Attribution batch ${batchNumber} failed:`, batchError);
-                // Continue with next batch
-            }
-        }
-        
-        console.log(`📊 Attribution data fetch complete: ${allPageViews.length} page views processed`);
-        return allPageViews;
-        
-    } catch (error) {
-        console.error('❌ Attribution data fetching failed:', error);
-        return [];
-    }
-}
-
-// Attribution health calculation
-async function calculateAttributionHealth(redis) {
-    try {
-        const recentStatsResult = await redis('scan/0/match/conversions:*/count/100');
-        const recentStats = [];
-        
-        if (recentStatsResult.result && recentStatsResult.result[1]) {
-            const conversionKeys = recentStatsResult.result[1];
-            
-            for (const key of conversionKeys.slice(0, 50)) {
-                try {
-                    const result = await redis(`get/${key}`);
-                    if (result.result) {
-                        const data = JSON.parse(decodeURIComponent(result.result));
-                        recentStats.push(data);
-                    }
-                } catch (e) {
-                    // Skip invalid data
-                }
-            }
-        }
-        
-        const totalAttempts = recentStats.length;
-        const successfulAttempts = recentStats.filter(stat => 
-            stat.attribution_found || stat.attribution_method || stat.attribution_score
-        ).length;
-        
-        const successRate = totalAttempts > 0 ? 
-            Math.round(successfulAttempts / totalAttempts * 100) : 85;
-        
-        const status = successRate >= 70 ? 'healthy' : (successRate >= 50 ? 'warning' : 'critical');
-        
-        return {
-            status,
-            success_rate: successRate,
-            total_conversions: totalAttempts,
-            attributed_conversions: successfulAttempts,
-            timestamp: new Date().toISOString()
-        };
-    } catch (error) {
-        console.error('❌ Attribution health calculation failed:', error);
-        return {
-            status: 'error',
-            success_rate: 0,
-            total_conversions: 0,
-            attributed_conversions: 0,
-            error: error.message,
-            timestamp: new Date().toISOString()
-        };
-    }
-}
-
-// Attribution stats fetching
-async function fetchAttributionStats(redis) {
-    try {
-        const result = await redis('scan/0/match/attribution_stats:*/count/100');
-        const stats = [];
-        
-        if (result.result && result.result[1]) {
-            const keys = result.result[1];
-            
-            for (const key of keys) {
-                try {
-                    const statResult = await redis(`get/${key}`);
-                    if (statResult.result) {
-                        const data = JSON.parse(decodeURIComponent(statResult.result));
-                        stats.push(data);
-                    }
-                } catch (e) {
-                    // Skip invalid entries
-                }
-            }
-        }
-        
-        return stats;
-    } catch (error) {
-        console.error('❌ Attribution stats fetch failed:', error);
-        return [];
-    }
-}
-
-// Attribution summary calculation
-function calculateAttributionSummary(attributionStats, conversions) {
-    const totalConversions = conversions.length;
-    const attributedConversions = conversions.filter(conv => 
-        conv.attribution_found || conv.attribution_method || conv.attribution_score
-    ).length;
-    
     return {
-        total_conversions: totalConversions,
-        attributed_conversions: attributedConversions,
-        attribution_rate: totalConversions > 0 ? 
-            Math.round((attributedConversions / totalConversions) * 100) : 0
-    };
-}
-
-// Filter application function
-function applyFilters(data, filters) {
-    let filtered = data;
-    
-    if (filters.start_date) {
-        const startDate = new Date(filters.start_date);
-        filtered = filtered.filter(item => {
-            const safeTimestamp = safeProcessTimestamp(item.timestamp);
-            try {
-                const itemDate = new Date(safeTimestamp);
-                return itemDate >= startDate;
-            } catch (e) {
-                return true;
-            }
-        });
-    }
-    
-    if (filters.end_date) {
-        const endDate = new Date(filters.end_date);
-        endDate.setHours(23, 59, 59, 999);
-        filtered = filtered.filter(item => {
-            const safeTimestamp = safeProcessTimestamp(item.timestamp);
-            try {
-                const itemDate = new Date(safeTimestamp);
-                return itemDate <= endDate;
-            } catch (e) {
-                return true;
-            }
-        });
-    }
-    
-    if (filters.source) {
-        filtered = filtered.filter(item => item.source === filters.source);
-    }
-    
-    if (filters.campaign) {
-        filtered = filtered.filter(item => 
-            (item.utm_campaign || item.campaign) === filters.campaign
-        );
-    }
-    
-    return filtered;
-}
-
-// MAIN HANDLER WITH CORS FIX
-const handler = async (event, context) => {
-    // CRITICAL: CORS headers must be first
-    const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, Authorization',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
-        'Access-Control-Max-Age': '86400',
+      statusCode: 200,
+      headers,
+      body: JSON.stringify(response)
     };
 
-    // Handle OPTIONS preflight request IMMEDIATELY
-    if (event.httpMethod === 'OPTIONS') {
-        console.log('🔧 CORS preflight request received from:', event.headers.origin || 'unknown');
-        return {
-            statusCode: 200,
-            headers: corsHeaders,
-            body: JSON.stringify({ message: 'CORS preflight successful' })
-        };
-    }
-
-    // Helper to create responses with CORS headers
-    const createResponse = (statusCode, body) => ({
-        statusCode,
-        headers: corsHeaders,
-        body: typeof body === 'string' ? body : JSON.stringify(body)
-    });
-
-    try {
-        // API Key validation
-        const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-        const validApiKey = process.env.OJOY_API_KEY;
-
-        if (!apiKey || apiKey !== validApiKey) {
-            console.log('❌ Unauthorized request - API key mismatch');
-            return createResponse(401, { error: 'Unauthorized' });
-        }
-
-        // Redis setup
-        const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-        const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-        if (!redisUrl || !redisToken) {
-            console.error('❌ Missing Redis configuration');
-            return createResponse(500, { error: 'Server configuration error' });
-        }
-
-        const redis = async (command) => {
-            try {
-                const response = await fetch(`${redisUrl}/${command}`, {
-                    headers: { Authorization: `Bearer ${redisToken}` }
-                });
-                return response.json();
-            } catch (error) {
-                console.error('Redis error:', error);
-                throw new Error('Database connection failed');
-            }
-        };
-
-        // Attribution Health Check Endpoint
-        if (event.httpMethod === 'GET' && event.path === '/attribution-health') {
-            try {
-                console.log('🩺 Attribution health check requested');
-                const healthMetrics = await calculateAttributionHealth(redis);
-                
-                if (healthMetrics.successRate < 70) {
-                    console.warn(`🚨 ALERT: Attribution success rate dropped to ${healthMetrics.successRate}%`);
-                }
-                
-                return createResponse(200, healthMetrics);
-            } catch (error) {
-                console.error('❌ Health check error:', error);
-                return createResponse(500, { error: error.message });
-            }
-        }
-        
-        if (event.httpMethod === 'GET') {
-            try {
-                // Parse query parameters
-                const { start_date, end_date, source, campaign, include_attribution_stats } = event.queryStringParameters || {};
-                
-                console.log(`📅 Analytics request: ${start_date || 'no start'} to ${end_date || 'no end'}`);
-                
-                // Get all keys from Redis using COMPREHENSIVE SCANNING
-                let attributionKeys = [];
-                let conversionKeys = [];
-                
-                try {
-                    console.log('🔍 Starting comprehensive Redis key scanning...');
-                    
-                    // Get attribution keys
-                    attributionKeys = await getComprehensiveAttributionKeys(redis);
-                    console.log(`📊 Attribution scan found ${attributionKeys.length} attribution keys`);
-                    
-                    // 🔧 CRITICAL FIX: Use enhanced conversion key scanning
-                    conversionKeys = await getConversionKeysEnhanced(redis);
-                    console.log(`🔍 Enhanced conversion scan found ${conversionKeys.length} conversion keys`);
-                    
-                } catch (redisError) {
-                    console.error('❌ Redis operation failed:', redisError);
-                    attributionKeys = [];
-                    conversionKeys = [];
-                }
-                
-                // 🔧 FIXED: Fetch attribution data with controlled concurrency
-                let allPageViews = [];
-                if (attributionKeys.length > 0) {
-                    try {
-                        allPageViews = await fetchAttributionDataSafely(redis, attributionKeys);
-                    } catch (attributionError) {
-                        console.error('❌ Attribution data fetch error:', attributionError);
-                        allPageViews = [];
-                    }
-                }
-                
-                // 🔧 CRITICAL FIX: Fetch conversion data using enhanced method with controlled concurrency
-                let allConversions = [];
-                if (conversionKeys.length > 0) {
-                    try {
-                        allConversions = await fetchConversionDataSafely(redis, conversionKeys);
-                        
-                        // Deduplicate conversions by email and timestamp
-                        const uniqueConversions = [];
-                        const seen = new Set();
-                        
-                        allConversions.forEach(conv => {
-                            const key = `${conv.email || 'no-email'}_${conv.timestamp}`;
-                            if (!seen.has(key)) {
-                                seen.add(key);
-                                uniqueConversions.push(conv);
-                            }
-                        });
-                        
-                        console.log(`📊 Conversions: ${allConversions.length} → ${uniqueConversions.length} after deduplication`);
-                        allConversions = uniqueConversions;
-                        
-                    } catch (conversionError) {
-                        console.error('❌ Conversion data fetch error:', conversionError);
-                        allConversions = [];
-                    }
-                }
-                
-                console.log(`📊 Analytics query returned ${allPageViews.length} page views and ${allConversions.length} conversions`);
-                
-                // Apply filters
-                let filteredConversions = applyFilters(allConversions, { start_date, end_date, source, campaign });
-                let filteredPageViews = applyFilters(allPageViews, { start_date, end_date, source, campaign });
-                
-                console.log(`📊 After filtering: ${filteredPageViews.length} page views and ${filteredConversions.length} conversions`);
-                
-                // Include attribution stats if requested
-                let attributionStatsData = null;
-                if (include_attribution_stats === 'true') {
-                    try {
-                        console.log('📈 Including attribution stats in response...');
-                        attributionStatsData = await fetchAttributionStats(redis);
-                        console.log(`✅ Fetched ${attributionStatsData.length} attribution stat records`);
-                    } catch (statsError) {
-                        console.error('❌ Failed to fetch attribution stats:', statsError);
-                        attributionStatsData = [];
-                    }
-                }
-                
-                // Calculate analytics
-                const totalConversions = filteredConversions.length;
-                const totalPageViews = filteredPageViews.length;
-                
-                const uniqueVisitorIPs = new Set();
-                filteredPageViews.forEach(pv => {
-                    if (pv.ip_address && pv.ip_address !== 'unknown') {
-                        uniqueVisitorIPs.add(pv.ip_address);
-                    }
-                });
-                const uniqueVisitors = uniqueVisitorIPs.size;
-                
-                const paidConversions = filteredConversions.filter(item => (parseFloat(item.order_total) || 0) > 0);
-                const totalRevenue = filteredConversions.reduce((sum, item) => sum + (parseFloat(item.order_total) || 0), 0);
-                const avgOrderValue = paidConversions.length > 0 ? totalRevenue / paidConversions.length : 0;
-                const conversionRate = uniqueVisitors > 0 ? (totalConversions / uniqueVisitors) * 100 : 0;
-                
-                // Build response
-                const response = {
-                    page_views: filteredPageViews,
-                    conversions: filteredConversions,
-                    summary: {
-                        total_page_views: totalPageViews,
-                        unique_visitors: uniqueVisitors,
-                        total_conversions: totalConversions,
-                        conversion_rate: parseFloat(conversionRate.toFixed(2)),
-                        total_revenue: parseFloat(totalRevenue.toFixed(2)),
-                        avg_order_value: parseFloat(avgOrderValue.toFixed(2))
-                    },
-                    scanning_debug: {
-                        attribution_keys_found: attributionKeys.length,
-                        conversion_keys_found: conversionKeys.length,
-                        june_26_28_conversions: allConversions.filter(conv => {
-                            const convDate = new Date(conv.timestamp);
-                            return convDate >= new Date('2025-06-26T01:34:00-08:00') && 
-                                   convDate <= new Date('2025-06-28T09:37:00-08:00');
-                        }).length,
-                        expected_june_26_28: 36
-                    }
-                };
-                
-                // Add attribution stats to response if requested
-                if (attributionStatsData !== null) {
-                    response.attribution_stats = attributionStatsData;
-                    response.attribution_summary = calculateAttributionSummary(attributionStatsData, filteredConversions);
-                }
-                
-                return createResponse(200, response);
-                
-            } catch (error) {
-                console.error('❌ Analytics GET error:', error);
-                return createResponse(500, { error: error.message });
-            }
-        }
-        
-        if (event.httpMethod === 'POST') {
-            try {
-                const data = JSON.parse(event.body);
-                
-                if (!isValidTimestamp(data.timestamp)) {
-                    data.timestamp = new Date().toISOString();
-                }
-                
-                if (data.event_type === 'purchase' || data.event_type === 'conversion' || data.order_total !== undefined) {
-                    const key = data.email ? 
-                        `conversions:${data.email.replace(/[^a-zA-Z0-9]/g, '_')}:${Date.now()}` :
-                        `conversions:${data.timestamp}:${Math.random()}`;
-                    
-                    await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
-                    console.log(`✅ Stored conversion: ${data.email || 'no email'}`);
-                } else {
-                    const key = `pageviews:${data.timestamp}:${Math.random()}`;
-                    await redis(`set/${key}/${encodeURIComponent(JSON.stringify(data))}`);
-                    console.log(`✅ Stored page view: ${data.source} → ${data.landing_page}`);
-                }
-                
-                return createResponse(200, { success: true });
-                
-            } catch (error) {
-                console.error('❌ Analytics POST error:', error);
-                return createResponse(500, { error: error.message });
-            }
-        }
-        
-        return createResponse(405, { error: 'Method not allowed' });
-        
-    } catch (error) {
-        console.error('❌ Unexpected error:', error);
-        return createResponse(500, { 
-            error: 'Internal server error', 
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
-    }
+  } catch (error) {
+    console.error('❌ Analytics function error:', error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        error: 'Internal server error',
+        message: error.message,
+        timestamp: new Date().toISOString()
+      })
+    };
+  }
 };
 
-module.exports = { handler };
+// Comprehensive attribution data retrieval (dual patterns)
+async function getComprehensiveAttributionData(startDate, endDate) {
+  let allAttributionData = [];
+  const startTimestamp = startDate.getTime();
+  const endTimestamp = endDate.getTime();
+
+  try {
+    // PATTERN 1: IPv6 Underscore format (attribution_*)
+    const ipv6Data = await getIPv6AttributionData(startTimestamp, endTimestamp);
+    allAttributionData = allAttributionData.concat(ipv6Data);
+
+    // PATTERN 2: IPv4 Colon format (attribution:*) - The missing data!
+    const ipv4Data = await getIPv4AttributionData(startTimestamp, endTimestamp);
+    allAttributionData = allAttributionData.concat(ipv4Data);
+
+    console.log(`🎯 Pattern distribution: ${ipv6Data.length} IPv6, ${ipv4Data.length} IPv4`);
+
+    // Remove duplicates and sort by timestamp
+    const uniqueData = removeDuplicateAttribution(allAttributionData);
+    return uniqueData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  } catch (error) {
+    console.error('⚠️ Attribution data error:', error);
+    return [];
+  }
+}
+
+// IPv6 attribution pattern scanning (attribution_*)
+async function getIPv6AttributionData(startTimestamp, endTimestamp) {
+  const attributionData = [];
+  
+  // Common IPv6 prefixes for efficient scanning
+  const ipv6Prefixes = [
+    '2001', '2002', '2400', '2600', '2601', '2602', '2603', '2604',
+    '2605', '2606', '2607', '2608', '2609', '260a', '260b', '260c'
+  ];
+
+  for (const prefix of ipv6Prefixes) {
+    try {
+      const result = await redis.scan(0, {
+        match: `attribution_${prefix}*`,
+        count: 1000
+      });
+
+      if (result[1] && result[1].length > 0) {
+        const batchData = await processBatchAttributionKeys(result[1], startTimestamp, endTimestamp);
+        attributionData.push(...batchData);
+      }
+    } catch (error) {
+      console.warn(`⚠️ IPv6 prefix ${prefix} scan error:`, error.message);
+    }
+  }
+
+  return attributionData;
+}
+
+// IPv4 attribution pattern scanning (attribution:*)
+async function getIPv4AttributionData(startTimestamp, endTimestamp) {
+  const attributionData = [];
+  let cursor = 0;
+  let totalProcessed = 0;
+
+  try {
+    do {
+      const result = await redis.scan(cursor, {
+        match: 'attribution:*',
+        count: 1000
+      });
+
+      cursor = result[0];
+      const keys = result[1];
+
+      if (keys && keys.length > 0) {
+        const batchData = await processBatchAttributionKeys(keys, startTimestamp, endTimestamp);
+        attributionData.push(...batchData);
+        totalProcessed += keys.length;
+      }
+
+      // Safety limit for cursor iteration
+      if (totalProcessed > 5000) {
+        console.log(`⚠️ IPv4 scan safety limit reached: ${totalProcessed} keys`);
+        break;
+      }
+
+    } while (cursor !== 0);
+
+  } catch (error) {
+    console.warn('⚠️ IPv4 pattern scan error:', error.message);
+  }
+
+  return attributionData;
+}
+
+// Batch process attribution keys with date filtering
+async function processBatchAttributionKeys(keys, startTimestamp, endTimestamp) {
+  const validData = [];
+
+  try {
+    // Process in smaller batches for better performance
+    const batchSize = 100;
+    for (let i = 0; i < keys.length; i += batchSize) {
+      const batch = keys.slice(i, i + batchSize);
+      
+      const batchResults = await Promise.all(
+        batch.map(async (key) => {
+          try {
+            const data = await redis.get(key);
+            return data ? { key, data: decodeURIComponent(data) } : null;
+          } catch (e) {
+            return null;
+          }
+        })
+      );
+
+      // Process batch results with date filtering
+      batchResults.forEach(item => {
+        if (!item || !item.data) return;
+
+        try {
+          const parsed = JSON.parse(item.data);
+          
+          // Enhanced timestamp validation
+          const timestamp = parsed.timestamp ? new Date(parsed.timestamp).getTime() : null;
+          if (!timestamp || isNaN(timestamp)) return;
+
+          // Apply date range filter
+          if (timestamp >= startTimestamp && timestamp <= endTimestamp) {
+            validData.push(parsed);
+          }
+        } catch (parseError) {
+          // Skip malformed data silently
+        }
+      });
+    }
+  } catch (error) {
+    console.warn('⚠️ Batch processing error:', error.message);
+  }
+
+  return validData;
+}
+
+// Comprehensive conversion data retrieval
+async function getComprehensiveConversionData(startDate, endDate) {
+  const conversionData = [];
+  const startTimestamp = startDate.getTime();
+  const endTimestamp = endDate.getTime();
+
+  try {
+    // Complete cursor iteration for conversions:*
+    let cursor = 0;
+    let totalFound = 0;
+
+    do {
+      const result = await redis.scan(cursor, {
+        match: 'conversions:*',
+        count: 1000
+      });
+
+      cursor = result[0];
+      const keys = result[1];
+
+      if (keys && keys.length > 0) {
+        const batchData = await processBatchConversionKeys(keys, startTimestamp, endTimestamp);
+        conversionData.push(...batchData);
+        totalFound += keys.length;
+      }
+
+      // Safety limit
+      if (totalFound > 3000) {
+        console.log(`⚠️ Conversion scan safety limit: ${totalFound} keys`);
+        break;
+      }
+
+    } while (cursor !== 0);
+
+    return conversionData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  } catch (error) {
+    console.error('⚠️ Conversion data error:', error);
+    return [];
+  }
+}
+
+// Process conversion keys with date filtering
+async function processBatchConversionKeys(keys, startTimestamp, endTimestamp) {
+  const validConversions = [];
+
+  try {
+    const batchSize = 100;
+    for (let i = 0; i < keys.length; i += batchSize) {
+      const batch = keys.slice(i, i + batchSize);
+      
+      const batchResults = await Promise.all(
+        batch.map(async (key) => {
+          try {
+            const data = await redis.get(key);
+            return data ? { key, data: decodeURIComponent(data) } : null;
+          } catch (e) {
+            return null;
+          }
+        })
+      );
+
+      batchResults.forEach(item => {
+        if (!item || !item.data) return;
+
+        try {
+          const parsed = JSON.parse(item.data);
+          
+          // Timestamp validation
+          const timestamp = parsed.timestamp ? new Date(parsed.timestamp).getTime() : null;
+          if (!timestamp || isNaN(timestamp)) return;
+
+          // Apply date range filter
+          if (timestamp >= startTimestamp && timestamp <= endTimestamp) {
+            validConversions.push(parsed);
+          }
+        } catch (parseError) {
+          // Skip malformed data silently
+        }
+      });
+    }
+  } catch (error) {
+    console.warn('⚠️ Conversion batch processing error:', error.message);
+  }
+
+  return validConversions;
+}
+
+// Remove duplicate attribution entries
+function removeDuplicateAttribution(attributionData) {
+  const seen = new Set();
+  return attributionData.filter(item => {
+    const key = `${item.ip_address}_${item.timestamp}_${item.session_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// Generate attribution statistics
+function generateAttributionStats(attributionData) {
+  const stats = {
+    total_sessions: attributionData.length,
+    sources: {},
+    source_types: {},
+    top_landing_pages: {},
+    traffic_distribution: {
+      ipv4_traffic: 0,
+      ipv6_traffic: 0
+    }
+  };
+
+  attributionData.forEach(item => {
+    // Source counting
+    const source = item.source || 'unknown';
+    stats.sources[source] = (stats.sources[source] || 0) + 1;
+
+    // Source type counting
+    const sourceType = item.source_type || 'unknown';
+    stats.source_types[sourceType] = (stats.source_types[sourceType] || 0) + 1;
+
+    // Landing page counting
+    const landingPage = item.landing_page || 'unknown';
+    stats.top_landing_pages[landingPage] = (stats.top_landing_pages[landingPage] || 0) + 1;
+
+    // IP version distribution
+    if (item.ip_address) {
+      if (item.ip_address.includes(':')) {
+        stats.traffic_distribution.ipv6_traffic++;
+      } else {
+        stats.traffic_distribution.ipv4_traffic++;
+      }
+    }
+  });
+
+  return stats;
+}
