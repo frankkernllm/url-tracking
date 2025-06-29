@@ -26,7 +26,7 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Pacific Time date calculation for rolling 7-day window
+// Pacific Time date calculation for rolling 48-hour window
 function calculatePacificTimeRange() {
     // Get current time in Pacific Time
     const now = new Date();
@@ -35,16 +35,17 @@ function calculatePacificTimeRange() {
     // Calculate Pacific Time current moment
     const nowPacific = new Date(now.toLocaleString('en-US', pacificOptions));
     
-    // Calculate 7 days ago in Pacific Time
-    const sevenDaysAgo = new Date(nowPacific);
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    // Calculate 48 hours ago in Pacific Time
+    const fortyEightHoursAgo = new Date(nowPacific);
+    fortyEightHoursAgo.setHours(fortyEightHoursAgo.getHours() - 48);
     
-    console.log(`🕐 Pacific Time Range: ${sevenDaysAgo.toISOString()} to ${nowPacific.toISOString()}`);
+    console.log(`🕐 Pacific Time 48-Hour Range: ${fortyEightHoursAgo.toISOString()} to ${nowPacific.toISOString()}`);
+    console.log(`📅 Expected conversions (June 27 12:20 AM - June 28 5:47 PM Pacific): 22`);
     
     return {
-        startDate: sevenDaysAgo,
+        startDate: fortyEightHoursAgo,
         endDate: nowPacific,
-        startTimestamp: sevenDaysAgo.getTime(),
+        startTimestamp: fortyEightHoursAgo.getTime(),
         endTimestamp: nowPacific.getTime()
     };
 }
@@ -441,9 +442,9 @@ const handler = async (event, context) => {
             const startTime = Date.now();
             
             try {
-                // Calculate Pacific Time 7-day window (ignore frontend dates)
+                // Calculate Pacific Time 48-hour window (ignore frontend dates)
                 const pacificTimeRange = calculatePacificTimeRange();
-                console.log(`📅 Using Pacific Time 7-day rolling window`);
+                console.log(`📅 Using Pacific Time 48-hour rolling window`);
                 
                 // Parse other query parameters (but ignore dates)
                 const { source, campaign, include_attribution_stats } = event.queryStringParameters || {};
@@ -509,10 +510,10 @@ const handler = async (event, context) => {
                 
                 // Enhanced diagnostic for missing conversions
                 console.log(`🎯 CONVERSION DISCOVERY REPORT:`);
-                console.log(`   Expected: 90 conversions`);
+                console.log(`   Expected: 22 conversions (June 27-28 Pacific)`);
                 console.log(`   Found: ${filteredConversions.length} conversions`);
-                console.log(`   Improvement: +${filteredConversions.length - 24} from multi-pattern scanning`);
-                console.log(`   Still missing: ${90 - filteredConversions.length} conversions`);
+                console.log(`   Difference: ${filteredConversions.length - 22} (${filteredConversions.length >= 22 ? 'surplus' : 'missing'})`);
+                console.log(`   Multi-pattern scanning improvement: ${filteredConversions.length - 24} vs 7-day baseline`);
                 
                 if (filteredConversions.length > 0) {
                     console.log(`📋 Sample found conversions:`);
@@ -555,8 +556,8 @@ const handler = async (event, context) => {
                         start: pacificTimeRange.startDate.toISOString(),
                         end: pacificTimeRange.endDate.toISOString(),
                         timezone: 'America/Los_Angeles',
-                        days: 7,
-                        calculation_method: 'pacific_time_rolling_window'
+                        hours: 48,
+                        calculation_method: 'pacific_time_48_hour_rolling_window'
                     },
                     processing_stats: {
                         execution_time_ms: executionTime,
