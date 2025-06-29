@@ -1,5 +1,5 @@
 // File: netlify/functions/analytics.js
-// 🔧 FIXED VERSION - Pacific Time 7-Day Rolling Window + Comprehensive Scanning six o nine on june28
+// 🔧 FIXED VERSION - Pacific Time 7-Day Rolling Window + Comprehensive Scanning
 // Automatically retrieves the past 7 days from current Pacific Time moment
 
 // Enhanced timestamp validation function
@@ -599,15 +599,18 @@ const handler = async (event, context) => {
                 const conversionRate = uniqueVisitors > 0 ? ((totalConversions / uniqueVisitors) * 100).toFixed(2) : '0.00';
                 
                 const response = {
-                    page_views: totalPageViews,
-                    conversions: totalConversions,
+                    // Dashboard expects arrays directly (not nested under 'data')
+                    page_views: filteredPageViews,     // Array of page view objects
+                    conversions: filteredConversions,  // Array of conversion objects
+                    
+                    // Summary statistics
+                    total_page_views: totalPageViews,
+                    total_conversions: totalConversions,
                     unique_visitors: uniqueVisitors,
                     conversion_rate: conversionRate,
                     total_revenue: totalRevenue.toFixed(2),
-                    data: {
-                        page_views: filteredPageViews,
-                        conversions: filteredConversions
-                    },
+                    
+                    // Date and processing info
                     date_range: {
                         start: pacificTimeRange.startDate.toISOString(),
                         end: pacificTimeRange.endDate.toISOString(),
