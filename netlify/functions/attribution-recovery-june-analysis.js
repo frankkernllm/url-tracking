@@ -182,6 +182,23 @@ const handler = async (event, context) => {
           console.log(`📅 Date: ${params.timestamp}`);
           console.log(`📊 Current Status: ${params.current_attribution_found ? '✅ ATTRIBUTED' : '❌ UNATTRIBUTED'}`);
           
+          // 🔧 DEBUG: Show raw conversion data structure
+          if (totalConversions <= 3) {
+            console.log(`🔍 DEBUG - Raw conversion fields:`, Object.keys(conversion));
+            console.log(`🔍 DEBUG - Raw conversion sample:`, {
+              email: conversion.email,
+              timestamp: conversion.timestamp,
+              attribution_found: conversion.attribution_found,
+              session_id: conversion.session_id,
+              ssid: conversion.ssid,
+              dsig: conversion.dsig,
+              device_signature: conversion.device_signature,
+              primary_ip: conversion.primary_ip,
+              SVV: conversion.SVV,
+              SVVV: conversion.SVVV
+            });
+          }
+          
           if (params.current_attribution_found) {
             console.log(`🎯 Current Method: ${params.current_attribution_method} (${params.current_attribution_score} points)`);
             currentlyAttributed++;
@@ -203,39 +220,56 @@ const handler = async (event, context) => {
           let bestAttribution = null;
           let bestScore = params.current_attribution_score;
 
-          for (const priority of attributionPriorities) {
-            const fieldValue = params[priority.field];
-            if (!fieldValue) continue;
-
-            // Create lookup key
-            let lookupKey;
-            if (priority.keyPrefix === 'attribution_ip_') {
-              lookupKey = `${priority.keyPrefix}${fieldValue.replace(/\./g, '_').replace(/:/g, '_')}`;
-            } else {
-              lookupKey = `${priority.keyPrefix}${fieldValue}`;
-            }
-
-            console.log(`🌐 ${priority.name}: Trying ${priority.field}: ${fieldValue}`);
-
-            try {
-              const attributionResult = await redis(`get/${lookupKey}`);
-              const attributionData = attributionResult.result;
-              if (attributionData) {
-                const parsed = JSON.parse(attributionData);
-                console.log(`✅ ATTRIBUTION FOUND: ${priority.name} (${priority.points} points)`);
-                
-                if (priority.points > bestScore) {
-                  bestAttribution = {
-                    method: priority.name,
-                    score: priority.points,
-                    data: parsed,
-                    lookup_key: lookupKey
-                  };
-                  bestScore = priority.points;
-                }
+          // Only try recovery for unattributed conversions or first few for debugging
+          if (!params.current_attribution_found || totalConversions <= 3) {
+            console.log(`🔍 Attempting recovery for: ${params.email}`);
+            
+            for (const priority of attributionPriorities) {
+              const fieldValue = params[priority.field];
+              if (!fieldValue) {
+                console.log(`⚠️ ${priority.name}: No ${priority.field} data available`);
+                continue;
               }
-            } catch (error) {
-              console.log(`❌ Error looking up ${lookupKey}:`, error.message);
+
+              // Create lookup key
+              let lookupKey;
+              if (priority.keyPrefix === 'attribution_ip_') {
+                lookupKey = `${priority.keyPrefix}${fieldValue.replace(/\./g, '_').replace(/:/g, '_')}`;
+              } else {
+                lookupKey = `${priority.keyPrefix}${fieldValue}`;
+              }
+
+              console.log(`🌐 ${priority.name}: Trying ${priority.field}: ${fieldValue}`);
+              console.log(`🔑 Looking up key: ${lookupKey}`);
+
+              try {
+                const attributionResult = await redis(`get/${lookupKey}`);
+                const attributionData = attributionResult.result;
+                
+                if (attributionData) {
+                  const parsed = JSON.parse(attributionData);
+                  console.log(`✅ ATTRIBUTION FOUND: ${priority.name} (${priority.points} points)`);
+                  console.log(`📋 Attribution data:`, {
+                    source: parsed.source,
+                    landing_page: parsed.landing_page?.substring(0, 50),
+                    utm_source: parsed.utm_source
+                  });
+                  
+                  if (priority.points > bestScore) {
+                    bestAttribution = {
+                      method: priority.name,
+                      score: priority.points,
+                      data: parsed,
+                      lookup_key: lookupKey
+                    };
+                    bestScore = priority.points;
+                  }
+                } else {
+                  console.log(`❌ No attribution data found for key: ${lookupKey}`);
+                }
+              } catch (error) {
+                console.log(`❌ Error looking up ${lookupKey}:`, error.message);
+              }
             }
           }
 
