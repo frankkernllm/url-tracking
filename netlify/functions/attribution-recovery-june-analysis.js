@@ -1,8 +1,8 @@
 // File: netlify/functions/attribution-recovery-june-analysis.js
-// SIMPLE DEBUG VERSION - Let's see what's actually in Redis
+// COMPLETELY REWRITTEN - Safe results object construction
 
 const handler = async (event, context) => {
-  console.log('🔍 SIMPLE DEBUG: Starting Redis investigation...');
+  console.log('🚀 Starting June 23-30 conversion analysis...');
   
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -30,162 +30,165 @@ const handler = async (event, context) => {
     const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
     const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
     
-    console.log('📋 Redis URL configured:', !!redisUrl);
-    console.log('📋 Redis Token configured:', !!redisToken);
-    
     const redis = async (command) => {
-      console.log(`🔍 Executing Redis command: ${command}`);
       const response = await fetch(`${redisUrl}/${command}`, {
         headers: { Authorization: `Bearer ${redisToken}` }
       });
-      const result = await response.json();
-      console.log(`📋 Redis response:`, result);
-      return result;
+      return response.json();
     };
 
-    // Test 1: Basic Redis connection
-    console.log('🧪 TEST 1: Basic Redis ping');
-    try {
-      const pingResult = await redis('ping');
-      console.log('✅ Redis ping successful:', pingResult);
-    } catch (pingError) {
-      console.log('❌ Redis ping failed:', pingError);
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({ 
-          error: 'Redis connection failed',
-          details: pingError.message
-        })
-      };
-    }
-
-    // Test 2: Try to find ANY keys with common patterns
-    console.log('🧪 TEST 2: Searching for ANY keys');
-    const testPatterns = [
-      'keys/*',           // All keys
-      'keys/conv*',       // Any conversion-related
-      'keys/*2025*',      // Any 2025 keys
-      'keys/attribution*' // Any attribution keys
-    ];
-    
-    let totalKeysFound = 0;
-    let sampleKeys = [];
-    
-    for (const pattern of testPatterns) {
-      try {
-        console.log(`🔍 Testing pattern: ${pattern}`);
-        const result = await redis(pattern);
-        const keys = result.result || [];
-        totalKeysFound += keys.length;
-        
-        console.log(`📋 Pattern ${pattern}: Found ${keys.length} keys`);
-        if (keys.length > 0) {
-          console.log(`📋 Sample keys: ${keys.slice(0, 3).join(', ')}`);
-          sampleKeys = sampleKeys.concat(keys.slice(0, 5));
-        }
-      } catch (error) {
-        console.log(`⚠️ Pattern ${pattern} failed:`, error.message);
+    // Initialize results object early to avoid undefined errors
+    let results = {
+      total_conversions_analyzed: 0,
+      currently_attributed: 0,
+      currently_unattributed: 0,
+      attribution_rate: 0,
+      recovery_successful: 0,
+      sample_conversions: [],
+      redis_keys_found: 0,
+      date_range: {
+        start: '2025-06-23T00:00:00.000Z',
+        end: '2025-06-30T23:59:59.999Z'
       }
-    }
+    };
 
-    console.log(`📊 TOTAL KEYS FOUND: ${totalKeysFound}`);
+    // Date range
+    const startDate = new Date('2025-06-23T00:00:00.000Z');
+    const endDate = new Date('2025-06-30T23:59:59.999Z');
+    const startTimestamp = startDate.getTime();
+    const endTimestamp = endDate.getTime();
 
-    // Test 3: If we found keys, examine them
-    let conversionSamples = [];
-    if (sampleKeys.length > 0) {
-      console.log('🧪 TEST 3: Examining sample keys');
-      
-      for (const key of sampleKeys.slice(0, 3)) {
-        try {
-          console.log(`🔍 Examining key: ${key}`);
-          const result = await redis(`get/${key}`);
-          const data = result.result;
-          
-          if (data) {
-            const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-            conversionSamples.push({
-              key: key,
-              has_email: !!parsed.email,
-              has_timestamp: !!parsed.timestamp,
-              timestamp: parsed.timestamp,
-              structure: Object.keys(parsed).slice(0, 10)
-            });
-            console.log(`📋 Key ${key}: email=${!!parsed.email}, timestamp=${parsed.timestamp}`);
-          }
-        } catch (error) {
-          console.log(`⚠️ Failed to examine key ${key}:`, error.message);
-        }
-      }
-    }
+    console.log(`📅 Analyzing conversions from ${startDate.toISOString()} to ${endDate.toISOString()}`);
 
-    // Test 4: Try SCAN method (like analytics.js)
-    console.log('🧪 TEST 4: Trying SCAN method like analytics.js');
-    let scanKeys = [];
+    // Get conversion keys using CORRECT pattern: conversions:*
+    console.log('🔍 Scanning for conversions using CORRECT pattern: conversions:*');
+    
+    let allKeys = [];
+    
     try {
       let cursor = '0';
       let iterations = 0;
       
       do {
-        const result = await redis(`scan/${cursor}/match/*/count/100`);
+        const result = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
         if (result.result && result.result[1]) {
           cursor = result.result[0];
           const keys = result.result[1];
-          scanKeys = scanKeys.concat(keys);
+          allKeys = allKeys.concat(keys);
           iterations++;
           
-          console.log(`📋 SCAN iteration ${iterations}: Found ${keys.length} keys, cursor=${cursor}`);
+          console.log(`✅ Batch ${iterations}: Found ${keys.length} conversion keys (total: ${allKeys.length}, cursor: ${cursor})`);
           
-          if (iterations >= 3) break; // Limit for debug
+          if (allKeys.length > 10000) {
+            console.warn('⚠️ Breaking after 10,000 keys for memory safety');
+            break;
+          }
+          
+          if (iterations % 10 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
         } else {
+          console.log(`⚠️ No results from SCAN at cursor ${cursor}, stopping iteration`);
           break;
         }
       } while (cursor !== '0');
       
-      console.log(`📊 SCAN method found ${scanKeys.length} total keys`);
+      console.log(`🎯 SCAN COMPLETE: ${allKeys.length} conversion keys found using pattern 'conversions:*'`);
+      results.redis_keys_found = allKeys.length;
       
-      // Look for conversion-like keys
-      const conversionLikeKeys = scanKeys.filter(key => 
-        key.includes('conversion') || 
-        key.includes('conv') || 
-        key.includes('2025-06')
-      );
-      
-      console.log(`📊 Conversion-like keys: ${conversionLikeKeys.length}`);
-      if (conversionLikeKeys.length > 0) {
-        console.log(`📋 Conversion keys found: ${conversionLikeKeys.slice(0, 5).join(', ')}`);
-      }
-      
-    } catch (scanError) {
-      console.log('❌ SCAN method failed:', scanError.message);
+    } catch (error) {
+      console.error('❌ SCAN failed:', error.message);
     }
+
+    // Process conversions for June 23-30 analysis
+    let totalConversions = 0;
+    let currentlyAttributed = 0;
+    let sampleConversions = [];
+    
+    console.log('🔍 Processing conversions for date range analysis...');
+    
+    for (const key of allKeys) {
+      try {
+        const conversionResult = await redis(`get/${key}`);
+        const conversionData = conversionResult.result;
+        if (!conversionData) continue;
+        
+        let conversion;
+        try {
+          conversion = typeof conversionData === 'string' ? JSON.parse(conversionData) : conversionData;
+        } catch (parseError) {
+          console.log(`⚠️ Failed to parse conversion data from ${key}`);
+          continue;
+        }
+        
+        if (!conversion.timestamp) continue;
+        
+        const conversionTimestamp = new Date(conversion.timestamp).getTime();
+        
+        // Check if conversion is in our date range
+        if (conversionTimestamp >= startTimestamp && conversionTimestamp <= endTimestamp) {
+          totalConversions++;
+          
+          if (conversion.attribution_found) {
+            currentlyAttributed++;
+          }
+          
+          // Store sample for debugging
+          if (sampleConversions.length < 5) {
+            sampleConversions.push(key.substring(0, 50));
+          }
+          
+          console.log(`📧 Conversion ${totalConversions}: ${conversion.email} - ${conversion.timestamp} - ${conversion.attribution_found ? 'ATTRIBUTED' : 'UNATTRIBUTED'}`);
+        }
+      } catch (error) {
+        console.log(`⚠️ Error processing conversion ${key}:`, error.message);
+      }
+    }
+    
+    // Update results object with final values
+    results.total_conversions_analyzed = totalConversions;
+    results.currently_attributed = currentlyAttributed;
+    results.currently_unattributed = totalConversions - currentlyAttributed;
+    results.attribution_rate = totalConversions > 0 ? Math.round((currentlyAttributed/totalConversions)*100) : 0;
+    results.sample_conversions = sampleConversions;
+
+    console.log('📊 FINAL ANALYSIS RESULTS:');
+    console.log(`Total Conversions: ${results.total_conversions_analyzed}`);
+    console.log(`Currently Attributed: ${results.currently_attributed} (${results.attribution_rate}%)`);
+    console.log(`Redis Keys Found: ${results.redis_keys_found}`);
+    console.log(`Sample Keys: ${results.sample_conversions.join(', ')}`);
 
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        message: 'Redis debug completed',
-        debug_results: {
-          redis_connection: 'OK',
-          total_keys_found: totalKeysFound,
-          sample_keys: sampleKeys.slice(0, 10),
-          conversion_samples: conversionSamples,
-          scan_keys_found: scanKeys.length,
-          redis_url_configured: !!redisUrl,
-          redis_token_configured: !!redisToken
-        }
+        message: 'June 23-30 conversion analysis completed',
+        results: results
       })
     };
 
   } catch (error) {
-    console.error('❌ Debug error:', error);
+    console.error('❌ Analysis error:', error);
+    
+    // Return safe fallback results even on error
+    const fallbackResults = {
+      total_conversions_analyzed: 0,
+      currently_attributed: 0,
+      currently_unattributed: 0,
+      attribution_rate: 0,
+      recovery_successful: 0,
+      error_message: error.message
+    };
+    
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Debug failed', 
-        details: error.message 
+        success: false,
+        error: 'Analysis failed', 
+        details: error.message,
+        results: fallbackResults
       })
     };
   }
