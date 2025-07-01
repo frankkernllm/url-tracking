@@ -1,6 +1,7 @@
 // File: netlify/functions/track.js
 // ENHANCED VERSION with Redis write verification and proper error handling
 // 🔧 UPDATED: Removed TTL for conversion data - conversions now stored permanently
+// 🔧 CRITICAL FIX: Corrected IP extraction paths for Spiffy webhook structure
 
 const handler = async (event, context) => {
   console.log('Enhanced track function started');
@@ -129,12 +130,25 @@ const handler = async (event, context) => {
     return ip.replace(/:/g, '_');
   }
 
+  // 🔧 FIXED: Helper function for safe nested IP extraction
+  function getNestedPageviewIP(data) {
+    try {
+      return data.checkoutview?.pageviewcheckout?.pageview?.ip;
+    } catch (error) {
+      console.log('⚠️ Error accessing nested pageview IP:', error.message);
+      return null;
+    }
+  }
+
   try {
     // Parse webhook data
     const data = JSON.parse(event.body || '{}');
     console.log('Webhook data received:', Object.keys(data));
 
-    // Extract data safely with comprehensive field mapping
+    // 🔧 CRITICAL FIX: Get nested IP safely
+    const nestedPageviewIP = getNestedPageviewIP(data);
+
+    // Extract data safely with CORRECTED field mapping for Spiffy webhook structure
     const extractedData = {
       email: data.email || data.customer?.email || 'unknown',
       order_total: parseFloat(data.order_total) || 0,
@@ -146,10 +160,10 @@ const handler = async (event, context) => {
       offer_name: data.offer_name,
       event_name: data.event_name,
       
-      // IP addresses - CORRECTED mapping based on Spiffy webhook structure
-      PIP: data.ip,                                           // Primary/Original pageview IP (top-level)
-      CIP: data.customer?.ip_address,                         // Conversion/Checkout IP (nested)
-      IP: data.customer?.ip_address || data.ip,               // Fallback IP
+      // 🔧 FIXED: IP addresses with CORRECT Spiffy webhook paths
+      PIP: data.ip,                                           // Primary IP (top-level in webhook)
+      CIP: nestedPageviewIP,                                  // FIXED: Nested pageview IP from correct path
+      IP: nestedPageviewIP || data.ip,                        // FIXED: Proper fallback logic
       
       // Enhanced attribution parameters (may be missing)
       SSID: data.ssid || data.session_id,                     // Session ID from custom field
@@ -158,7 +172,7 @@ const handler = async (event, context) => {
       gsig: data.gsig || data.gpu_signature                   // GPU signature from custom field
     };
 
-    console.log('Enhanced data extraction complete:', {
+    console.log('🔧 FIXED - Enhanced data extraction complete:', {
       email: extractedData.email,
       has_session_id: !!extractedData.SSID,
       has_device_signature: !!extractedData.dsig,
@@ -168,22 +182,30 @@ const handler = async (event, context) => {
         primary: extractedData.PIP,
         conversion: extractedData.CIP,
         fallback: extractedData.IP
+      },
+      webhook_structure_detected: {
+        top_level_ip: !!data.ip,
+        nested_pageview_ip: !!nestedPageviewIP,
+        customer_object: !!data.customer,
+        old_customer_ip_field: data.customer?.ip_address // Should be undefined
       }
     });
 
     // Detect event type
     const isSubscriptionEvent = !!(data.subscription_id || data.event_name?.includes('subscription'));
     
-    // Detect dual IP scenario
+    // 🔧 FIXED: Detect dual IP scenario with corrected extraction
     const uniqueIPs = [...new Set([extractedData.PIP, extractedData.CIP, extractedData.IP].filter(Boolean))];
     const isDualIPScenario = uniqueIPs.length > 1;
     
-    console.log('IP Analysis:', {
+    console.log('🔧 FIXED - IP Analysis:', {
       primary_ip: extractedData.PIP,
       conversion_ip: extractedData.CIP,
       pageview_ip: extractedData.IP,
       unique_count: uniqueIPs.length,
-      dual_ip_detected: isDualIPScenario
+      dual_ip_detected: isDualIPScenario,
+      unique_ips_list: uniqueIPs,
+      fix_status: nestedPageviewIP ? 'NESTED_IP_FOUND ✅' : 'NESTED_IP_MISSING ⚠️'
     });
 
     // 8-Tier Attribution System
@@ -237,7 +259,7 @@ const handler = async (event, context) => {
       }
     }
 
-    // Priority 3 & 4: IP Address Matches (280-240 points)
+    // Priority 3 & 4: IP Address Matches (280-240 points) - NOW WITH CORRECTED IPs
     const ipAddressesToTry = [
       { ip: extractedData.PIP, method: 'primary_ip_match', score: 280 },
       { ip: extractedData.CIP, method: 'conversion_ip_match', score: 260 },
@@ -247,8 +269,9 @@ const handler = async (event, context) => {
     for (const ipData of ipAddressesToTry) {
       if (ipData.ip && !attributionResult) {
         try {
-          console.log('Trying IP lookup:', ipData.ip);
+          console.log(`🔧 FIXED - Trying IP lookup: ${ipData.method} with IP:`, ipData.ip);
           const ipKey = `attribution_ip_${encodeIPForKey(ipData.ip)}`;
+          console.log(`🔧 FIXED - Redis key for ${ipData.method}:`, ipKey);
           const ipResult = await redis(`get/${ipKey}`, 3000);
           
           if (ipResult.result) {
@@ -260,9 +283,11 @@ const handler = async (event, context) => {
                 method: ipData.method,
                 score: ipData.score
               };
-              console.log(`✅ ${ipData.method} attribution found`);
+              console.log(`✅ ${ipData.method} attribution found with IP: ${ipData.ip}`);
               break;
             }
+          } else {
+            console.log(`⚠️ No attribution found for ${ipData.method} with IP: ${ipData.ip}`);
           }
         } catch (ipError) {
           console.log(`IP lookup failed for ${ipData.ip}:`, ipError.message);
@@ -301,22 +326,31 @@ const handler = async (event, context) => {
         gpu_signature: !!extractedData.gsig
       },
       
-      // IP tracking metadata  
+      // 🔧 FIXED: IP tracking metadata with corrected values
       ip_address: extractedData.CIP || extractedData.PIP || extractedData.IP || 'unknown',
       primary_ip: extractedData.PIP || null,
       conversion_ip: extractedData.CIP || null,
       pageview_ip: extractedData.IP || null,
       
-      // Enhanced dual IP detection
+      // Enhanced dual IP detection (now should work correctly)
       dual_ip_scenario: isDualIPScenario,
       ip_addresses_detected: uniqueIPs.length,
-      unique_ips: uniqueIPs
+      unique_ips: uniqueIPs,
+      
+      // 🔧 NEW: IP extraction status for debugging
+      ip_extraction_status: {
+        nested_ip_found: !!nestedPageviewIP,
+        webhook_path_used: 'data.checkoutview.pageviewcheckout.pageview.ip',
+        old_customer_ip_path: data.customer?.ip_address, // Should be undefined
+        extraction_successful: isDualIPScenario
+      }
     };
 
-    console.log('Attribution attempt summary:', {
+    console.log('🔧 FIXED - Attribution attempt summary:', {
       session_id_attempted: !!extractedData.SSID,
       device_signature_attempted: !!extractedData.dsig,
       ip_addresses_attempted: ipAddressesToTry.filter(ip => ip.ip).length,
+      unique_ips_to_try: uniqueIPs,
       attribution_found: enhancedTrackingData.attribution_found,
       attribution_method: enhancedTrackingData.attribution_method,
       attribution_score: enhancedTrackingData.attribution_score
@@ -327,7 +361,9 @@ const handler = async (event, context) => {
       attribution_found: enhancedTrackingData.attribution_found,
       attribution_method: enhancedTrackingData.attribution_method,
       source: enhancedTrackingData.source,
-      landing_page: enhancedTrackingData.landing_page || 'MISSING'
+      landing_page: enhancedTrackingData.landing_page || 'MISSING',
+      dual_ip_scenario: enhancedTrackingData.dual_ip_scenario,
+      ip_count: enhancedTrackingData.ip_addresses_detected
     });
 
     // ENHANCED: Store conversion data with verification (NOW WITH PERMANENT STORAGE)
@@ -349,7 +385,8 @@ const handler = async (event, context) => {
         score: enhancedTrackingData.attribution_score,
         success: enhancedTrackingData.attribution_found,
         dual_ip: isDualIPScenario,
-        fields_available: enhancedTrackingData.attribution_fields_present
+        fields_available: enhancedTrackingData.attribution_fields_present,
+        ip_extraction_fixed: !!nestedPageviewIP
       };
       await redis(`setex/${statsKey}/2592000/${encodeURIComponent(JSON.stringify(statsData))}`, 3000); // 30 days (kept TTL for stats)
       console.log('✅ Attribution stats stored');
@@ -381,17 +418,19 @@ const handler = async (event, context) => {
         storage_error: conversionResult.error || null,
         storage_type: 'PERMANENT', // NEW: Indicates no TTL
         
-        // Additional debugging info
+        // 🔧 FIXED: Additional debugging info with IP extraction status
         dual_ip_detected: isDualIPScenario,
         attribution_fields_received: enhancedTrackingData.attribution_fields_present,
         
-        // IP breakdown for verification
+        // 🔧 FIXED: IP breakdown for verification
         ip_details: {
           primary_ip: extractedData.PIP,
           conversion_ip: extractedData.CIP,
           pageview_ip: extractedData.IP,
           unique_ips: uniqueIPs,
-          ip_count: uniqueIPs.length
+          ip_count: uniqueIPs.length,
+          nested_ip_extraction_successful: !!nestedPageviewIP,
+          webhook_path_working: 'data.checkoutview.pageviewcheckout.pageview.ip'
         },
         
         webhook_health: {
@@ -401,6 +440,8 @@ const handler = async (event, context) => {
           storage_verified: conversionResult.success, // CRITICAL FIELD
           storage_permanent: true, // NEW: Confirms no TTL
           landing_page_copied: !!enhancedTrackingData.landing_page,
+          ip_extraction_fixed: !!nestedPageviewIP, // NEW: IP fix status
+          dual_ip_detection_working: isDualIPScenario, // NEW: Dual IP status
           missing_fields: [
             !extractedData.SSID && 'ssid',
             !extractedData.dsig && 'dsig', 
