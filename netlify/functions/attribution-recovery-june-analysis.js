@@ -52,7 +52,8 @@ const handler = async (event, context) => {
       },
       analysis_summary: {},
       method_breakdown: {},
-      attribution_improvements: []
+      attribution_improvements: [],
+      debug_samples: []
     };
 
     // Date range
@@ -110,6 +111,7 @@ const handler = async (event, context) => {
     let sampleConversions = [];
     const attributionImprovements = [];
     const methodBreakdown = {};
+    const debugSamples = []; // Store debug info for response
     
     console.log('🔍 Processing conversions for date range analysis WITH RECOVERY...');
     
@@ -184,19 +186,32 @@ const handler = async (event, context) => {
           
           // 🔧 DEBUG: Show raw conversion data structure
           if (totalConversions <= 3) {
-            console.log(`🔍 DEBUG - Raw conversion fields:`, Object.keys(conversion));
-            console.log(`🔍 DEBUG - Raw conversion sample:`, {
-              email: conversion.email,
-              timestamp: conversion.timestamp,
-              attribution_found: conversion.attribution_found,
-              session_id: conversion.session_id,
-              ssid: conversion.ssid,
-              dsig: conversion.dsig,
-              device_signature: conversion.device_signature,
-              primary_ip: conversion.primary_ip,
-              SVV: conversion.SVV,
-              SVVV: conversion.SVVV
-            });
+            const debugInfo = {
+              conversion_number: totalConversions,
+              email: params.email,
+              raw_fields: Object.keys(conversion),
+              raw_values: {
+                email: conversion.email,
+                timestamp: conversion.timestamp,
+                attribution_found: conversion.attribution_found,
+                session_id: conversion.session_id || 'MISSING',
+                ssid: conversion.ssid || 'MISSING',
+                dsig: conversion.dsig || 'MISSING',
+                device_signature: conversion.device_signature || 'MISSING',
+                primary_ip: conversion.primary_ip || 'MISSING',
+                SVV: conversion.SVV || 'MISSING',
+                SVVV: conversion.SVVV || 'MISSING'
+              },
+              extracted_params: {
+                SSID: params.SSID || 'MISSING',
+                dsig: params.dsig || 'MISSING',
+                PIP: params.PIP || 'MISSING',
+                CIP: params.CIP || 'MISSING',
+                SVV: params.SVV || 'MISSING'
+              }
+            };
+            debugSamples.push(debugInfo);
+            console.log(`🔍 DEBUG - Conversion ${totalConversions}:`, debugInfo);
           }
           
           if (params.current_attribution_found) {
@@ -224,10 +239,19 @@ const handler = async (event, context) => {
           if (!params.current_attribution_found || totalConversions <= 3) {
             console.log(`🔍 Attempting recovery for: ${params.email}`);
             
+            // Store lookup attempts for debug
+            const lookupAttempts = [];
+            
             for (const priority of attributionPriorities) {
               const fieldValue = params[priority.field];
               if (!fieldValue) {
                 console.log(`⚠️ ${priority.name}: No ${priority.field} data available`);
+                lookupAttempts.push({
+                  method: priority.name,
+                  field: priority.field,
+                  value: 'MISSING',
+                  result: 'SKIPPED'
+                });
                 continue;
               }
 
@@ -255,6 +279,18 @@ const handler = async (event, context) => {
                     utm_source: parsed.utm_source
                   });
                   
+                  lookupAttempts.push({
+                    method: priority.name,
+                    field: priority.field,
+                    value: fieldValue,
+                    lookup_key: lookupKey,
+                    result: 'FOUND',
+                    data: {
+                      source: parsed.source,
+                      landing_page: parsed.landing_page?.substring(0, 50)
+                    }
+                  });
+                  
                   if (priority.points > bestScore) {
                     bestAttribution = {
                       method: priority.name,
@@ -266,10 +302,30 @@ const handler = async (event, context) => {
                   }
                 } else {
                   console.log(`❌ No attribution data found for key: ${lookupKey}`);
+                  lookupAttempts.push({
+                    method: priority.name,
+                    field: priority.field,
+                    value: fieldValue,
+                    lookup_key: lookupKey,
+                    result: 'NOT_FOUND'
+                  });
                 }
               } catch (error) {
                 console.log(`❌ Error looking up ${lookupKey}:`, error.message);
+                lookupAttempts.push({
+                  method: priority.name,
+                  field: priority.field,
+                  value: fieldValue,
+                  lookup_key: lookupKey,
+                  result: 'ERROR',
+                  error: error.message
+                });
               }
+            }
+            
+            // Add lookup attempts to debug info for first few conversions
+            if (totalConversions <= 3 && debugSamples.length > 0) {
+              debugSamples[debugSamples.length - 1].lookup_attempts = lookupAttempts;
             }
           }
 
@@ -351,6 +407,7 @@ const handler = async (event, context) => {
     results.analysis_summary = analysisStats;
     results.method_breakdown = methodBreakdown;
     results.attribution_improvements = attributionImprovements;
+    results.debug_samples = debugSamples; // Include debug info in response
 
     console.log('📊 FINAL RECOVERY ANALYSIS RESULTS:');
     console.log(`Total Conversions: ${results.total_conversions_analyzed}`);
@@ -358,6 +415,7 @@ const handler = async (event, context) => {
     console.log(`Recovery Successful: ${results.recovery_successful} conversions`);
     console.log(`Potential Attribution Rate: ${analysisStats.potential_attribution_rate}%`);
     console.log(`Improvement Methods:`, methodBreakdown);
+    console.log(`Debug Samples:`, debugSamples);
     console.log(`Redis Keys Found: ${results.redis_keys_found}`);
     console.log(`Sample Keys: ${results.sample_conversions.join(', ')}`);
 
