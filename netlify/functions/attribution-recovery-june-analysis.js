@@ -49,7 +49,10 @@ const handler = async (event, context) => {
       date_range: {
         start: '2025-06-23T00:00:00.000Z',
         end: '2025-06-30T23:59:59.999Z'
-      }
+      },
+      analysis_summary: {},
+      method_breakdown: {},
+      attribution_improvements: []
     };
 
     // Date range
@@ -100,12 +103,55 @@ const handler = async (event, context) => {
       console.error('❌ SCAN failed:', error.message);
     }
 
-    // Process conversions for June 23-30 analysis
+    // Process conversions for June 23-30 analysis WITH FULL RECOVERY LOGIC
     let totalConversions = 0;
     let currentlyAttributed = 0;
+    let recoverySuccessful = 0;
     let sampleConversions = [];
+    const attributionImprovements = [];
+    const methodBreakdown = {};
     
-    console.log('🔍 Processing conversions for date range analysis...');
+    console.log('🔍 Processing conversions for date range analysis WITH RECOVERY...');
+    
+    // Attribution priority system (same as track.js)
+    const attributionPriorities = [
+      { name: 'session_id_match', field: 'SSID', keyPrefix: 'attribution_session_', points: 300 },
+      { name: 'primary_ip_match', field: 'PIP', keyPrefix: 'attribution_ip_', points: 280 },
+      { name: 'conversion_ip_match', field: 'CIP', keyPrefix: 'attribution_ip_', points: 260 },
+      { name: 'pageview_ip_match', field: 'IP', keyPrefix: 'attribution_ip_', points: 240 },
+      { name: 'device_signature_match', field: 'dsig', keyPrefix: 'attribution_fp_', points: 220 },
+      { name: 'screen_hash_match', field: 'SVV', keyPrefix: 'attribution_screen_', points: 200 },
+      { name: 'webgl_match', field: 'gsig', keyPrefix: 'attribution_webgl_', points: 180 }
+    ];
+
+    // Helper function to extract conversion parameters
+    function extractConversionParameters(conversion) {
+      return {
+        email: conversion.email || 'unknown',
+        
+        // IP field names (corrected)
+        PIP: conversion.primary_ip || null,
+        CIP: conversion.conversion_ip || null, 
+        IP: conversion.pageview_ip || conversion.primary_ip || null,
+        
+        // Attribution parameter field names (corrected)
+        SSID: conversion.ssid || conversion.session_id || null,
+        dsig: conversion.dsig || conversion.device_signature || null,
+        SVV: conversion.SVV || conversion.SVVV || conversion.screen_value || null,
+        gsig: conversion.gsig || conversion.gpu_signature || null,
+        
+        // Current attribution status
+        current_attribution_found: conversion.attribution_found || false,
+        current_attribution_method: conversion.attribution_method || 'none',
+        current_attribution_score: conversion.attribution_score || 0,
+        current_source: conversion.source || 'direct',
+        current_landing_page: conversion.landing_page || 'none',
+        
+        // Metadata
+        timestamp: conversion.timestamp,
+        order_total: conversion.order_total || 0
+      };
+    }
     
     for (const key of allKeys) {
       try {
@@ -129,8 +175,117 @@ const handler = async (event, context) => {
         if (conversionTimestamp >= startTimestamp && conversionTimestamp <= endTimestamp) {
           totalConversions++;
           
-          if (conversion.attribution_found) {
+          // Extract conversion parameters for analysis
+          const params = extractConversionParameters(conversion);
+          
+          console.log(`📧 CONVERSION ${totalConversions}/108: ${params.email}`);
+          console.log(`📅 Date: ${params.timestamp}`);
+          console.log(`📊 Current Status: ${params.current_attribution_found ? '✅ ATTRIBUTED' : '❌ UNATTRIBUTED'}`);
+          
+          if (params.current_attribution_found) {
+            console.log(`🎯 Current Method: ${params.current_attribution_method} (${params.current_attribution_score} points)`);
             currentlyAttributed++;
+          }
+
+          // Show available data for debugging
+          const availableData = {
+            SSID: !!params.SSID,
+            PIP: !!params.PIP,
+            CIP: !!params.CIP,
+            IP: !!params.IP,
+            dsig: !!params.dsig,
+            SVV: !!params.SVV,
+            gsig: !!params.gsig
+          };
+          console.log(`🔍 Available Data:`, availableData);
+
+          // 🔧 RECOVERY LOGIC: Try attribution methods in priority order
+          let bestAttribution = null;
+          let bestScore = params.current_attribution_score;
+
+          for (const priority of attributionPriorities) {
+            const fieldValue = params[priority.field];
+            if (!fieldValue) continue;
+
+            // Create lookup key
+            let lookupKey;
+            if (priority.keyPrefix === 'attribution_ip_') {
+              lookupKey = `${priority.keyPrefix}${fieldValue.replace(/\./g, '_').replace(/:/g, '_')}`;
+            } else {
+              lookupKey = `${priority.keyPrefix}${fieldValue}`;
+            }
+
+            console.log(`🌐 ${priority.name}: Trying ${priority.field}: ${fieldValue}`);
+
+            try {
+              const attributionResult = await redis(`get/${lookupKey}`);
+              const attributionData = attributionResult.result;
+              if (attributionData) {
+                const parsed = JSON.parse(attributionData);
+                console.log(`✅ ATTRIBUTION FOUND: ${priority.name} (${priority.points} points)`);
+                
+                if (priority.points > bestScore) {
+                  bestAttribution = {
+                    method: priority.name,
+                    score: priority.points,
+                    data: parsed,
+                    lookup_key: lookupKey
+                  };
+                  bestScore = priority.points;
+                }
+              }
+            } catch (error) {
+              console.log(`❌ Error looking up ${lookupKey}:`, error.message);
+            }
+          }
+
+          // Determine improvement type
+          if (bestAttribution) {
+            let improvementType = '';
+            
+            if (!params.current_attribution_found) {
+              improvementType = 'NEW_ATTRIBUTION';
+              recoverySuccessful++;
+            } else if (bestScore > params.current_attribution_score) {
+              improvementType = 'BETTER_ATTRIBUTION';
+              recoverySuccessful++;
+            } else {
+              improvementType = 'ALTERNATIVE_FOUND'; // Not actually an improvement
+            }
+
+            // Only count as improvement if it's actually better
+            if (improvementType === 'NEW_ATTRIBUTION' || improvementType === 'BETTER_ATTRIBUTION') {
+              // Track method breakdown
+              methodBreakdown[bestAttribution.method] = (methodBreakdown[bestAttribution.method] || 0) + 1;
+
+              attributionImprovements.push({
+                conversion_key: key,
+                email: params.email,
+                timestamp: params.timestamp,
+                improvement_type: improvementType,
+                score_improvement: bestScore - params.current_attribution_score,
+                previous_status: {
+                  attribution_found: params.current_attribution_found,
+                  attribution_method: params.current_attribution_method,
+                  attribution_score: params.current_attribution_score,
+                  source: params.current_source,
+                  landing_page: params.current_landing_page
+                },
+                new_attribution: {
+                  attribution_method: bestAttribution.method,
+                  attribution_score: bestAttribution.score,
+                  source: bestAttribution.data.source || 'direct',
+                  landing_page: bestAttribution.data.landing_page || 'none',
+                  utm_source: bestAttribution.data.utm_source || null,
+                  utm_campaign: bestAttribution.data.utm_campaign || null,
+                  lookup_key_used: bestAttribution.lookup_key
+                }
+              });
+
+              console.log(`📈 Improvement: ${improvementType} (+${bestScore - params.current_attribution_score} points)`);
+            }
+          } else {
+            console.log(`⚠️ No attribution found for this conversion`);
           }
           
           // Store sample for debugging
@@ -138,23 +293,37 @@ const handler = async (event, context) => {
             sampleConversions.push(key.substring(0, 50));
           }
           
-          console.log(`📧 Conversion ${totalConversions}: ${conversion.email} - ${conversion.timestamp} - ${conversion.attribution_found ? 'ATTRIBUTED' : 'UNATTRIBUTED'}`);
+          console.log('---');
         }
       } catch (error) {
         console.log(`⚠️ Error processing conversion ${key}:`, error.message);
       }
     }
     
-    // Update results object with final values
+    // Update results object with recovery analysis
+    const analysisStats = {
+      attribution_rate_before: totalConversions > 0 ? Math.round((currentlyAttributed / totalConversions) * 100) : 0,
+      potential_attribution_rate: totalConversions > 0 ? Math.round(((currentlyAttributed + recoverySuccessful) / totalConversions) * 100) : 0,
+      improvements_possible: recoverySuccessful,
+      improvement_percentage: totalConversions > 0 ? Math.round((recoverySuccessful / totalConversions) * 100) : 0
+    };
+
     results.total_conversions_analyzed = totalConversions;
     results.currently_attributed = currentlyAttributed;
     results.currently_unattributed = totalConversions - currentlyAttributed;
-    results.attribution_rate = totalConversions > 0 ? Math.round((currentlyAttributed/totalConversions)*100) : 0;
+    results.attribution_rate = analysisStats.attribution_rate_before;
+    results.recovery_successful = recoverySuccessful;
     results.sample_conversions = sampleConversions;
+    results.analysis_summary = analysisStats;
+    results.method_breakdown = methodBreakdown;
+    results.attribution_improvements = attributionImprovements;
 
-    console.log('📊 FINAL ANALYSIS RESULTS:');
+    console.log('📊 FINAL RECOVERY ANALYSIS RESULTS:');
     console.log(`Total Conversions: ${results.total_conversions_analyzed}`);
     console.log(`Currently Attributed: ${results.currently_attributed} (${results.attribution_rate}%)`);
+    console.log(`Recovery Successful: ${results.recovery_successful} conversions`);
+    console.log(`Potential Attribution Rate: ${analysisStats.potential_attribution_rate}%`);
+    console.log(`Improvement Methods:`, methodBreakdown);
     console.log(`Redis Keys Found: ${results.redis_keys_found}`);
     console.log(`Sample Keys: ${results.sample_conversions.join(', ')}`);
 
@@ -163,7 +332,7 @@ const handler = async (event, context) => {
       headers,
       body: JSON.stringify({
         success: true,
-        message: 'June 23-30 conversion analysis completed',
+        message: 'June 23-30 conversion recovery analysis completed',
         results: results
       })
     };
