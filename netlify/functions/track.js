@@ -1,5 +1,6 @@
 // File: netlify/functions/track.js
-// CORRECTED VERSION with proper Redis key pattern: conversions:[timestamp]:[random_id]
+// ENHANCED VERSION: Best practices from all versions combined
+// Features: Cascading IP extraction, robust attribution logic, storage verification, no API key requirement
 
 const handler = async (event, context) => {
   console.log('Enhanced track function started');
@@ -16,19 +17,6 @@ const handler = async (event, context) => {
     return { statusCode: 200, headers, body: '' };
   }
 
-  // Authentication check
-  const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-  const validApiKey = process.env.OJOY_API_KEY;
-  
-  if (!apiKey || apiKey !== validApiKey) {
-    console.log('❌ Invalid or missing API key');
-    return {
-      statusCode: 401,
-      headers,
-      body: JSON.stringify({ error: 'Invalid or missing API key' })
-    };
-  }
-
   if (event.httpMethod !== 'POST') {
     return {
       statusCode: 405,
@@ -37,36 +25,162 @@ const handler = async (event, context) => {
     };
   }
 
-  try {
-    const data = JSON.parse(event.body);
-    console.log('Webhook data received:', JSON.stringify(data, null, 2));
+  // Environment variable validation (from June 28th - recommended for production)
+  const requiredEnvVars = [
+    'UPSTASH_REDIS_REST_URL',
+    'UPSTASH_REDIS_REST_TOKEN'
+  ];
+  
+  const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+  if (missingEnvVars.length > 0) {
+    console.log('Missing environment variables:', missingEnvVars);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ 
+        error: 'Configuration error',
+        missing: missingEnvVars
+      })
+    };
+  }
 
-    // 🔧 FIXED: Enhanced nested IP extraction function
-    function getNestedPageviewIP(data) {
-      try {
-        return data.checkoutview?.pageviewcheckout?.pageview?.ip || null;
-      } catch (error) {
-        console.log('Error extracting nested pageview IP:', error);
-        return null;
+  // Enhanced Redis helper with better error handling and timeouts (from June 28th)
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  const redis = async (command, timeoutMs = 5000) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+      console.log(`⏰ Redis timeout after ${timeoutMs}ms for command: ${command.split('/')[0]}`);
+    }, timeoutMs);
+    
+    try {
+      const response = await fetch(`${redisUrl}/${command}`, {
+        headers: { 
+          Authorization: `Bearer ${redisToken}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`❌ Redis HTTP error ${response.status}: ${errorText}`);
+        throw new Error(`Redis HTTP error: ${response.status} ${errorText}`);
       }
+      
+      const result = await response.json();
+      console.log(`✅ Redis command success: ${command.split('/')[0]} -> ${JSON.stringify(result).substring(0, 100)}`);
+      
+      return result;
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      if (error.name === 'AbortError') {
+        console.log(`⏰ Redis command timed out: ${command.split('/')[0]}`);
+        throw new Error(`Redis timeout after ${timeoutMs}ms`);
+      }
+      
+      console.log(`❌ Redis command failed: ${command.split('/')[0]} - ${error.message}`);
+      throw error;
     }
+  };
 
-    // Enhanced data extraction with FIXED field mapping
+  // Enhanced IP extraction function with cascading fallbacks
+  function getConversionIP(data) {
+    try {
+      // Method 1: July 1st approach (deeper nested path)
+      const july1stIP = data.checkoutview?.pageviewcheckout?.pageview?.ip;
+      if (july1stIP) {
+        console.log('✅ IP extracted using July 1st method (deep nested):', july1stIP);
+        return july1stIP;
+      }
+      
+      // Method 2: June 28th approach (customer nested path)
+      const june28thIP = data.customer?.ip_address;
+      if (june28thIP) {
+        console.log('✅ IP extracted using June 28th fallback (customer nested):', june28thIP);
+        return june28thIP;
+      }
+      
+      // Method 3: Final fallback to top-level
+      const topLevelIP = data.ip;
+      if (topLevelIP) {
+        console.log('✅ IP extracted using top-level fallback:', topLevelIP);
+        return topLevelIP;
+      }
+      
+      console.log('❌ No IP found in any extraction method');
+      return null;
+      
+    } catch (error) {
+      console.log('❌ IP extraction error:', error);
+      return data.ip || null; // Final safety fallback
+    }
+  }
+
+  // Storage function with verification (from June 28th - critical for conversion data)
+  async function storeConversionWithVerification(trackingData) {
+    const storageKey = `conversions:${trackingData.timestamp}:${Math.random().toString(36).substr(2, 9)}`;
+    
+    try {
+      console.log('🔄 Attempting Redis set for key (PERMANENT STORAGE):', storageKey);
+      console.log('📦 Data size:', JSON.stringify(trackingData).length, 'characters');
+      
+      // Step 1: Store the data (permanent storage, no TTL)
+      const setResult = await redis(`set/${storageKey}/${encodeURIComponent(JSON.stringify(trackingData))}`, 8000);
+      console.log('📋 Redis set returned:', JSON.stringify(setResult));
+      
+      // Step 2: Verify the write actually worked by reading it back
+      console.log('🔍 Verifying write with get command...');
+      const verifyResult = await redis(`get/${storageKey}`, 3000);
+      console.log('📋 Redis get verification:', verifyResult ? 'DATA FOUND ✅' : 'DATA NOT FOUND ❌');
+      
+      if (verifyResult && verifyResult.result) {
+        console.log('✅ VERIFIED: Conversion data successfully written and readable (PERMANENT STORAGE)');
+        return { success: true, key: storageKey, verified: true };
+      } else {
+        console.log('❌ CRITICAL: Data not found after set command - Redis write failed silently');
+        return { success: false, error: 'Data not found after write attempt - silent Redis failure', verified: false };
+      }
+      
+    } catch (error) {
+      console.log('❌ Redis storage operation failed:', error.message);
+      return { success: false, error: error.message, verified: false };
+    }
+  }
+
+  try {
+    const data = JSON.parse(event.body || '{}');
+    console.log('Webhook data received:', Object.keys(data));
+
+    // Enhanced data extraction with cascading IP extraction
     const extractedData = {
-      email: data.email || 'unknown',
-      order_total: data.order_total || data.amount || 0,
+      email: data.email || data.customer?.email || 'unknown',
+      order_total: parseFloat(data.order_total) || 0,
+      order_id: data.order_id || 'unknown',
       currency: data.currency || 'usd',
       
-      // 🔧 FIXED: Correct IP extraction paths
-      PIP: data.ip,                                    // Primary IP (top-level)
-      CIP: getNestedPageviewIP(data),                  // Conversion IP (nested pageview)
-      IP: getNestedPageviewIP(data) || data.ip,       // Fallback IP
+      // Handle subscription data
+      subscription_id: data.subscription_id,
+      subscription_amount: data.subscription_amount,
+      offer_name: data.offer_name,
+      event_name: data.event_name,
       
-      // 🔧 FIXED: Enhanced attribution parameters with correct field names
-      SSID: data.ssid || data.session_id,                          // Session ID  
-      dsig: data.dsig || data.device_signature,                    // Device signature
-      SVV: data.SVVV || data.SVV || data.screen_value,             // 🔧 FIXED: Check SVVV first!
-      gsig: data.gsig || data.gpu_signature,                       // GPU signature
+      // Enhanced IP extraction with cascading fallbacks
+      PIP: data.ip,                           // Primary IP (always top-level)
+      CIP: getConversionIP(data),             // Conversion IP (cascading extraction)
+      IP: getConversionIP(data) || data.ip,   // Fallback IP (same as CIP with safety)
+      
+      // Attribution parameters (handle both field name variations)
+      SSID: data.ssid || data.session_id,                     // Session ID from custom field
+      dsig: data.dsig || data.device_signature,               // Device signature from custom field
+      SVV: data.SVVV || data.SVV || data.screen_value,        // Screen value - check SVVV first
+      gsig: data.gsig || data.gpu_signature,                  // GPU signature from custom field
       
       // Additional webhook data
       customer_id: data.customer_id,
@@ -77,232 +191,297 @@ const handler = async (event, context) => {
       timestamp: new Date().toISOString()
     };
 
-    // 🔧 FIXED: Enhanced IP analysis with proper extraction
-    const uniqueIPs = new Set();
-    if (extractedData.PIP) uniqueIPs.add(extractedData.PIP);
-    if (extractedData.CIP) uniqueIPs.add(extractedData.CIP);
-    if (extractedData.IP && extractedData.IP !== extractedData.PIP) uniqueIPs.add(extractedData.IP);
+    // Enhanced IP analysis with method tracking
+    const ipExtractionMethods = {
+      PIP: 'top_level_ip',
+      CIP: extractedData.CIP === data.checkoutview?.pageviewcheckout?.pageview?.ip ? 'july_1st_deep_nested' :
+           extractedData.CIP === data.customer?.ip_address ? 'june_28th_customer_nested' :
+           extractedData.CIP === data.ip ? 'top_level_fallback' : 'unknown',
+      IP: 'same_as_cip'
+    };
 
-    const ipAnalysis = {
+    const uniqueIPs = [...new Set([extractedData.PIP, extractedData.CIP, extractedData.IP].filter(Boolean))];
+    const isDualIPScenario = uniqueIPs.length > 1;
+    
+    console.log('🔧 IP Extraction Results:', {
       primary_ip: extractedData.PIP,
       conversion_ip: extractedData.CIP,
       pageview_ip: extractedData.IP,
-      unique_count: uniqueIPs.size,
-      dual_ip_detected: uniqueIPs.size >= 2,
-      unique_ips_list: Array.from(uniqueIPs),
-      nested_ip_extraction_successful: !!extractedData.CIP,
-      fix_status: extractedData.CIP ? 'NESTED_IP_FOUND ✅' : 'ONLY_PRIMARY_IP_FOUND ⚠️'
-    };
+      extraction_methods: ipExtractionMethods,
+      unique_count: uniqueIPs.length,
+      dual_ip_detected: isDualIPScenario
+    });
 
-    console.log('🔧 FIXED - IP Analysis:', ipAnalysis);
-
-    // 🔧 FIXED: Enhanced data extraction status
-    const extractionStatus = {
+    console.log('Enhanced data extraction complete:', {
+      email: extractedData.email,
       has_session_id: !!extractedData.SSID,
       has_device_signature: !!extractedData.dsig,
       has_screen_value: !!extractedData.SVV,
       has_gpu_signature: !!extractedData.gsig,
-      unique_count: ipAnalysis.unique_count,
-      dual_ip_detected: ipAnalysis.dual_ip_detected
-    };
+      ip_addresses: {
+        primary: extractedData.PIP,
+        conversion: extractedData.CIP,
+        fallback: extractedData.IP
+      }
+    });
 
-    console.log('🔧 FIXED - Enhanced data extraction complete:', extractionStatus);
-
-    // Upstash REST API (matches your other functions)
-    const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-    const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-    
-    const redis = async (command) => {
-      const response = await fetch(`${redisUrl}/${command}`, {
-        headers: { Authorization: `Bearer ${redisToken}` }
-      });
-      return response.json();
-    };
-
-    // Attribution lookup with 8-tier priority system
+    // Attribution lookup with enhanced 8-tier priority system (using June 28th logic)
     let attributionResult = null;
-    let attributionAttempts = {
-      session_id_attempted: false,
-      device_signature_attempted: false,
-      ip_addresses_attempted: 0,
-      unique_ips_to_try: Array.from(uniqueIPs),
-      attribution_found: false,
-      attribution_method: 'none',
-      attribution_score: 0
-    };
 
     // Priority 1: Session ID Match (300 points) - HIGHEST PRIORITY
-    if (extractedData.SSID) {
-      attributionAttempts.session_id_attempted = true;
-      const sessionKey = `attribution_session_${extractedData.SSID}`;
-      console.log(`🔧 FIXED - Trying session lookup: ${sessionKey}`);
-      
+    if (extractedData.SSID && !attributionResult) {
       try {
-        const sessionResult = await redis(`get/${sessionKey}`);
-        console.log(`✅ Redis command success: get -> ${JSON.stringify({result: sessionResult})}`);
+        console.log('Trying session ID lookup:', extractedData.SSID);
+        const sessionKey = `attribution_session_${extractedData.SSID}`;
+        const sessionResult = await redis(`get/${sessionKey}`, 3000);
         
-        if (sessionResult && sessionResult.result) {
-          attributionResult = JSON.parse(sessionResult.result);
-          attributionAttempts.attribution_found = true;
-          attributionAttempts.attribution_method = 'session_id_match';
-          attributionAttempts.attribution_score = 300;
-          console.log('🎯 PRIORITY 1 SUCCESS: Session ID Match (300 points)');
-        } else {
-          console.log('⚠️ No attribution found for session_id_match');
-        }
-      } catch (error) {
-        console.log('❌ Redis session lookup error:', error);
-      }
-    }
-
-    // Priority 2-4: IP-based matching (if no session match found)
-    if (!attributionResult && uniqueIPs.size > 0) {
-      const ipPriorities = [
-        { name: 'primary_ip_match', ip: extractedData.PIP, points: 280 },
-        { name: 'conversion_ip_match', ip: extractedData.CIP, points: 260 },
-        { name: 'pageview_ip_match', ip: extractedData.IP, points: 240 }
-      ];
-
-      for (const priority of ipPriorities) {
-        if (!attributionResult && priority.ip) {
-          attributionAttempts.ip_addresses_attempted++;
-          const ipKey = `attribution_ip_${priority.ip.replace(/:/g, '_')}`;
-          console.log(`🔧 FIXED - Trying IP lookup: ${priority.name} with IP: ${priority.ip}`);
-          console.log(`🔧 FIXED - Redis key for ${priority.name}: ${ipKey}`);
-          
-          try {
-            const ipResult = await redis(`get/${ipKey}`);
-            console.log(`✅ Redis command success: get -> ${JSON.stringify({result: ipResult})}`);
-            
-            if (ipResult && ipResult.result) {
-              attributionResult = JSON.parse(ipResult.result);
-              attributionAttempts.attribution_found = true;
-              attributionAttempts.attribution_method = priority.name;
-              attributionAttempts.attribution_score = priority.points;
-              console.log(`🎯 ${priority.name.toUpperCase()} SUCCESS: (${priority.points} points)`);
-              break;
-            } else {
-              console.log(`⚠️ No attribution found for ${priority.name} with IP: ${priority.ip}`);
-            }
-          } catch (error) {
-            console.log(`❌ Redis IP lookup error for ${priority.name}:`, error);
+        if (sessionResult.result) {
+          // June 28th logic: Two-step lookup with URL decoding
+          const attributionDataResult = await redis(`get/${sessionResult.result}`, 3000);
+          if (attributionDataResult.result) {
+            const originalAttribution = JSON.parse(decodeURIComponent(attributionDataResult.result));
+            attributionResult = {
+              data: originalAttribution,
+              method: 'session_id_match',
+              score: 300
+            };
+            console.log('✅ Session ID attribution found');
           }
         }
+      } catch (sessionError) {
+        console.log('Session ID lookup failed:', sessionError.message);
       }
     }
 
-    // Priority 5: Device Signature Match (220 points)
-    if (!attributionResult && extractedData.dsig) {
-      attributionAttempts.device_signature_attempted = true;
-      const deviceKey = `attribution_fp_${extractedData.dsig}`;
-      console.log(`🔧 FIXED - Trying device signature lookup: ${deviceKey}`);
-      
+    // Priority 2: Device Signature Match (260 points) - June 28th prioritization
+    if (extractedData.dsig && !attributionResult) {
       try {
-        const deviceResult = await redis(`get/${deviceKey}`);
-        console.log(`✅ Redis command success: get -> ${JSON.stringify({result: deviceResult})}`);
+        console.log('Trying device signature lookup:', extractedData.dsig.substring(0, 10) + '...');
+        // June 28th logic: Use truncated signature (last 20 chars)
+        const deviceKey = `attribution_fp_${extractedData.dsig.slice(-20)}`;
+        const deviceResult = await redis(`get/${deviceKey}`, 3000);
         
-        if (deviceResult && deviceResult.result) {
-          attributionResult = JSON.parse(deviceResult.result);
-          attributionAttempts.attribution_found = true;
-          attributionAttempts.attribution_method = 'device_signature_match';
-          attributionAttempts.attribution_score = 220;
-          console.log('🎯 PRIORITY 5 SUCCESS: Device Signature Match (220 points)');
-        } else {
-          console.log('⚠️ No attribution found for device_signature_match');
+        if (deviceResult.result) {
+          // Two-step lookup with URL decoding
+          const attributionDataResult = await redis(`get/${deviceResult.result}`, 3000);
+          if (attributionDataResult.result) {
+            const originalAttribution = JSON.parse(decodeURIComponent(attributionDataResult.result));
+            attributionResult = {
+              data: originalAttribution,
+              method: 'device_signature_match',
+              score: 260
+            };
+            console.log('✅ Device signature attribution found');
+          }
         }
-      } catch (error) {
-        console.log('❌ Redis device lookup error:', error);
+      } catch (deviceError) {
+        console.log('Device signature lookup failed:', deviceError.message);
       }
     }
 
-    console.log('🔧 FIXED - Attribution attempt summary:', attributionAttempts);
+    // Priority 3-5: IP Address Matches (280-240 points)
+    const ipAddressesToTry = [
+      { ip: extractedData.PIP, method: 'primary_ip_match', score: 280 },
+      { ip: extractedData.CIP, method: 'conversion_ip_match', score: 260 },
+      { ip: extractedData.IP, method: 'pageview_ip_match', score: 240 }
+    ];
 
-    // 🔧 FIXED: Enhanced tracking data with STORED attribution parameters
+    for (const ipData of ipAddressesToTry) {
+      if (ipData.ip && !attributionResult) {
+        try {
+          console.log('Trying IP lookup:', ipData.ip);
+          const ipKey = `attribution_ip_${ipData.ip.replace(/:/g, '_')}`;
+          const ipResult = await redis(`get/${ipKey}`, 3000);
+          
+          if (ipResult.result) {
+            // Two-step lookup with URL decoding
+            const attributionDataResult = await redis(`get/${ipResult.result}`, 3000);
+            if (attributionDataResult.result) {
+              const originalAttribution = JSON.parse(decodeURIComponent(attributionDataResult.result));
+              attributionResult = {
+                data: originalAttribution,
+                method: ipData.method,
+                score: ipData.score
+              };
+              console.log(`✅ ${ipData.method} attribution found`);
+              break;
+            }
+          }
+        } catch (ipError) {
+          console.log(`IP lookup failed for ${ipData.ip}:`, ipError.message);
+        }
+      }
+    }
+
+    // Detect event type
+    const isSubscriptionEvent = !!(data.subscription_id || data.event_name?.includes('subscription'));
+    
+    // Build comprehensive tracking data with ACTUAL attribution parameter values
     const enhancedTrackingData = {
       email: extractedData.email,
       order_total: extractedData.order_total,
-      currency: extractedData.currency,
-      customer_id: extractedData.customer_id,
-      checkout_publish_id: extractedData.checkout_publish_id,
-      card_id: extractedData.card_id,
-      checkoutview_id: extractedData.checkoutview_id,
-      gateway_id: extractedData.gateway_id,
+      order_id: extractedData.order_id,
       timestamp: extractedData.timestamp,
       
-      // 🔧 FIXED: Store IP data properly
-      primary_ip: extractedData.PIP,
-      conversion_ip: extractedData.CIP,
-      pageview_ip: extractedData.IP,
-      
-      // 🔧 FIXED: Store ALL attribution parameters for recovery scripts
-      session_id: extractedData.SSID,        // For session-based recovery
-      ssid: extractedData.SSID,              // Alternative field name
-      dsig: extractedData.dsig,              // Device signature (truncated)
-      device_signature: extractedData.dsig,  // Alternative field name
-      SVV: extractedData.SVV,                // Screen value (hashed)
-      SVVV: extractedData.SVV,               // Store under both names
-      screen_value: extractedData.SVV,       // Alternative field name  
-      gsig: extractedData.gsig,              // GPU signature (hashed)
-      gpu_signature: extractedData.gsig,     // Alternative field name
+      // Event classification
+      event_type: isSubscriptionEvent ? 'subscription' : 'purchase',
+      subscription_id: extractedData.subscription_id,
+      subscription_amount: extractedData.subscription_amount,
+      offer_name: extractedData.offer_name || 'Ojoy 7 Day FREE Trial',
+      event_name: extractedData.event_name,
       
       // Attribution results
       attribution_found: !!attributionResult,
-      attribution_method: attributionAttempts.attribution_method,
-      attribution_score: attributionAttempts.attribution_score,
+      attribution_method: attributionResult?.method || 'none',
+      attribution_score: attributionResult?.score || 0,
+      source: attributionResult?.data?.source || 'direct',
+      campaign: attributionResult?.data?.utm_campaign || 'none',
+      medium: attributionResult?.data?.utm_medium || 'none',
+      landing_page: attributionResult?.data?.landing_page || null,
       
-      // Include attribution data if found
-      ...(attributionResult && {
-        source: attributionResult.source || 'direct',
-        landing_page: attributionResult.landing_page || 'none',
-        utm_source: attributionResult.utm_source || null,
-        utm_medium: attributionResult.utm_medium || null,
-        utm_campaign: attributionResult.utm_campaign || null,
-        utm_content: attributionResult.utm_content || null,
-        utm_term: attributionResult.utm_term || null
-      }),
+      // Store ACTUAL attribution parameter values (critical for recovery scripts)
+      session_id: extractedData.SSID,        // Actual session ID value
+      ssid: extractedData.SSID,              // Alternative field name
+      dsig: extractedData.dsig,              // Actual device signature
+      device_signature: extractedData.dsig,  // Alternative field name
+      SVV: extractedData.SVV,                // Actual screen value
+      SVVV: extractedData.SVV,               // Store under both names
+      screen_value: extractedData.SVV,       // Alternative field name  
+      gsig: extractedData.gsig,              // Actual GPU signature
+      gpu_signature: extractedData.gsig,     // Alternative field name
       
-      // Default values if no attribution found
-      source: attributionResult?.source || 'direct',
-      landing_page: attributionResult?.landing_page || 'none'
+      // IP tracking metadata  
+      ip_address: extractedData.CIP || extractedData.PIP || extractedData.IP || 'unknown',
+      primary_ip: extractedData.PIP || null,
+      conversion_ip: extractedData.CIP || null,
+      pageview_ip: extractedData.IP || null,
+      
+      // Enhanced dual IP detection
+      dual_ip_scenario: isDualIPScenario,
+      ip_addresses_detected: uniqueIPs.length,
+      unique_ips: uniqueIPs,
+      ip_extraction_methods: ipExtractionMethods
     };
 
-    console.log('Final tracking data prepared:', enhancedTrackingData);
+    console.log('Attribution attempt summary:', {
+      session_id_attempted: !!extractedData.SSID,
+      device_signature_attempted: !!extractedData.dsig,
+      ip_addresses_attempted: ipAddressesToTry.filter(ip => ip.ip).length,
+      attribution_found: enhancedTrackingData.attribution_found,
+      attribution_method: enhancedTrackingData.attribution_method,
+      attribution_score: enhancedTrackingData.attribution_score
+    });
 
-    // 🔧 CORRECTED: Store using CORRECT key pattern: conversions:[timestamp]:[random_id]
-    const randomId = Math.random().toString(36).substr(2, 9);
-    const conversionKey = `conversions:${extractedData.timestamp}:${randomId}`;
+    console.log('Final tracking data prepared:', {
+      email: enhancedTrackingData.email,
+      attribution_found: enhancedTrackingData.attribution_found,
+      attribution_method: enhancedTrackingData.attribution_method,
+      source: enhancedTrackingData.source,
+      landing_page: enhancedTrackingData.landing_page || 'MISSING'
+    });
+
+    // Store conversion data with verification (critical for conversion data integrity)
+    const conversionResult = await storeConversionWithVerification(enhancedTrackingData);
     
-    try {
-      await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(enhancedTrackingData))}`);
-      console.log(`✅ Conversion stored in Redis with key: ${conversionKey}`);
-    } catch (error) {
-      console.log('❌ Failed to store conversion in Redis:', error);
-      throw error;
+    if (conversionResult.success) {
+      console.log('✅ Conversion storage verified successful with key (PERMANENT):', conversionResult.key);
+    } else {
+      console.log('❌ CRITICAL: Conversion storage failed:', conversionResult.error);
     }
 
+    // Store attribution stats for monitoring (optional, 30-day TTL is fine for stats)
+    try {
+      const statsKey = `attribution_stats_${Date.now()}`;
+      const statsData = {
+        email: enhancedTrackingData.email,
+        timestamp: enhancedTrackingData.timestamp,
+        method: enhancedTrackingData.attribution_method,
+        score: enhancedTrackingData.attribution_score,
+        success: enhancedTrackingData.attribution_found,
+        dual_ip: isDualIPScenario,
+        fields_available: {
+          session_id: !!extractedData.SSID,
+          device_signature: !!extractedData.dsig,
+          screen_value: !!extractedData.SVV,
+          gpu_signature: !!extractedData.gsig
+        }
+      };
+      await redis(`setex/${statsKey}/2592000/${encodeURIComponent(JSON.stringify(statsData))}`, 3000); // 30 days
+      console.log('✅ Attribution stats stored');
+    } catch (statsError) {
+      console.log('⚠️ Stats storage failed:', statsError.message);
+    }
+
+    // Return enhanced response with storage verification
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        message: 'Enhanced tracking completed with IP extraction fix',
-        attribution_found: !!attributionResult,
-        attribution_method: attributionAttempts.attribution_method,
-        attribution_score: attributionAttempts.attribution_score,
-        ip_analysis: ipAnalysis,
-        extraction_status: extractionStatus,
-        conversion_key: conversionKey
+        message: isSubscriptionEvent ? 
+          'Subscription tracked successfully' : 'Conversion tracked successfully',
+        
+        // Attribution results
+        attribution_found: enhancedTrackingData.attribution_found,
+        attribution_method: enhancedTrackingData.attribution_method,
+        attribution_score: enhancedTrackingData.attribution_score || 0,
+        
+        // Event details
+        order_id: enhancedTrackingData.order_id,
+        event_type: enhancedTrackingData.event_type,
+        
+        // CRITICAL: Storage verification status
+        storage_verified: conversionResult.success,
+        storage_key: conversionResult.key || null,
+        storage_error: conversionResult.error || null,
+        storage_type: 'PERMANENT',
+        
+        // IP extraction details
+        dual_ip_detected: isDualIPScenario,
+        ip_extraction_methods: ipExtractionMethods,
+        attribution_fields_received: {
+          session_id: !!extractedData.SSID,
+          device_signature: !!extractedData.dsig,
+          screen_value: !!extractedData.SVV,
+          gpu_signature: !!extractedData.gsig
+        },
+        
+        // IP breakdown for verification
+        ip_details: {
+          primary_ip: extractedData.PIP,
+          conversion_ip: extractedData.CIP,
+          pageview_ip: extractedData.IP,
+          unique_ips: uniqueIPs,
+          ip_count: uniqueIPs.length
+        },
+        
+        webhook_health: {
+          data_extracted: true,
+          attribution_attempted: true,
+          storage_attempted: true,
+          storage_verified: conversionResult.success,
+          storage_permanent: true,
+          landing_page_copied: !!enhancedTrackingData.landing_page,
+          missing_fields: [
+            !extractedData.SSID && 'ssid',
+            !extractedData.dsig && 'dsig', 
+            !extractedData.SVV && 'SVV',
+            !extractedData.gsig && 'gsig'
+          ].filter(Boolean)
+        }
       })
     };
 
   } catch (error) {
-    console.error('❌ Enhanced track function error:', error);
+    console.error('Track function error:', error);
+    
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ 
-        error: 'Internal server error', 
-        details: error.message 
+      body: JSON.stringify({
+        error: 'Internal server error',
+        message: error.message,
+        storage_verified: false
       })
     };
   }
