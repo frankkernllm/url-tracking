@@ -258,7 +258,8 @@ const handler = async (event, context) => {
               // Create lookup key
               let lookupKey;
               if (priority.keyPrefix === 'attribution_ip_') {
-                lookupKey = `${priority.keyPrefix}${fieldValue.replace(/\./g, '_').replace(/:/g, '_')}`;
+                // 🔧 FIXED: Keep dots for IPv4, convert colons for IPv6
+                lookupKey = `${priority.keyPrefix}${fieldValue.replace(/:/g, '_')}`;
               } else {
                 lookupKey = `${priority.keyPrefix}${fieldValue}`;
               }
