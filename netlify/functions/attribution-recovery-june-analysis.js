@@ -1,6 +1,6 @@
 // File: netlify/functions/attribution-recovery-june-analysis.js
-// FIXED VERSION with correct field mapping and comprehensive analysis
-// 🔧 UPDATED: Corrected all field names to match actual track.js storage
+// COMPLETELY CLEAN VERSION - No ioredis dependencies
+// 🔧 UPDATED: Uses only Upstash REST API (same as analytics-flexible.js)
 
 const handler = async (event, context) => {
   console.log('🚀 Starting June 23-30 conversion analysis...');
@@ -29,8 +29,16 @@ const handler = async (event, context) => {
   }
 
   try {
-    const Redis = require('ioredis');
-    const redis = new Redis(process.env.REDIS_URL);
+    // 🔧 CLEAN: Upstash REST API only (no ioredis)
+    const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    
+    const redis = async (command) => {
+      const response = await fetch(`${redisUrl}/${command}`, {
+        headers: { Authorization: `Bearer ${redisToken}` }
+      });
+      return response.json();
+    };
 
     // Define date range for June 23-30, 2025
     const startDate = new Date('2025-06-23T00:00:00.000Z');
@@ -41,7 +49,8 @@ const handler = async (event, context) => {
     console.log(`📅 Analyzing conversions from ${startDate.toISOString()} to ${endDate.toISOString()}`);
 
     // Get all conversion keys
-    const allKeys = await redis.keys('conversion_*');
+    const allKeysResult = await redis('keys/conversion_*');
+    const allKeys = allKeysResult.result || [];
     console.log(`🔍 Found ${allKeys.length} total conversion keys in Redis`);
 
     // Filter conversions within date range
@@ -50,7 +59,8 @@ const handler = async (event, context) => {
     
     for (const key of allKeys) {
       try {
-        const conversionData = await redis.get(key);
+        const conversionResult = await redis(`get/${key}`);
+        const conversionData = conversionResult.result;
         if (!conversionData) continue;
         
         const conversion = JSON.parse(conversionData);
@@ -160,7 +170,8 @@ const handler = async (event, context) => {
         console.log(`🌐 ${priority.name}: Trying ${priority.field}: ${fieldValue}`);
 
         try {
-          const attributionData = await redis.get(lookupKey);
+          const attributionResult = await redis(`get/${lookupKey}`);
+          const attributionData = attributionResult.result;
           if (attributionData) {
             const parsed = JSON.parse(attributionData);
             console.log(`✅ ATTRIBUTION FOUND: ${priority.name} (${priority.points} points)`);
@@ -256,8 +267,6 @@ const handler = async (event, context) => {
     console.log(`Currently Attributed: ${currentlyAttributed} (${analysisStats.attribution_rate_before}%)`);
     console.log(`Recovery Possible: ${recoverySuccessful} (${analysisStats.improvement_percentage}%)`);
     console.log(`Potential Attribution Rate: ${analysisStats.potential_attribution_rate}%`);
-
-    redis.disconnect();
 
     return {
       statusCode: 200,
