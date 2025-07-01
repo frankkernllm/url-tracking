@@ -19,7 +19,9 @@ const handler = async (event, context) => {
 
   // Authentication
   const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-  if (apiKey !== 'ojoy_track_2025_secure_key_v1') {
+  const validApiKey = process.env.OJOY_API_KEY;
+  
+  if (!apiKey || apiKey !== validApiKey) {
     console.log('❌ Invalid or missing API key');
     return {
       statusCode: 401,
