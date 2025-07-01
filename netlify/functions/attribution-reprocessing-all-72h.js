@@ -36,10 +36,10 @@ const handler = async (event, context) => {
     const cacheStats = { hits: 0, misses: 0, api_calls: 0, redis_hits: 0 };
     const geoDataCache = new Map(); // In-memory cache for this run
 
-    console.log('📊 Starting complete reprocessing of all conversions (48 hours)...');
+    console.log('📊 Starting complete reprocessing of all conversions (72 hours)...');
 
-    // Get ALL conversions from past 48 hours (attributed AND unattributed)
-    const analyticsData = await getAllConversionsLast48Hours();
+    // Get ALL conversions from past 72 hours (attributed AND unattributed)
+    const analyticsData = await getAllConversionsLast72Hours();
     console.log(`📊 Found ${analyticsData.all_conversions.length} total conversions to reprocess`);
 
     if (analyticsData.all_conversions.length === 0) {
@@ -266,7 +266,7 @@ async function getAllConversionsLast72Hours() {
             
             const conversionTimestamp = new Date(conversion.timestamp).getTime();
             
-            // Include ALL conversions within 48 hours (attributed and unattributed)
+            // Include ALL conversions within 72 hours (attributed and unattributed)
             if (conversionTimestamp >= startTimestamp && conversionTimestamp <= endTimestamp) {
                 allConversions.push(conversion);
             }
@@ -278,7 +278,7 @@ async function getAllConversionsLast72Hours() {
     // Sort by timestamp (newest first for priority processing)
     const sortedConversions = allConversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    console.log(`📊 Found ${sortedConversions.length} total conversions in past 48 hours`);
+    console.log(`📊 Found ${sortedConversions.length} total conversions in past 72 hours`);
     console.log(`📊 Attribution status: ${sortedConversions.filter(c => c.attribution_found).length} attributed, ${sortedConversions.filter(c => !c.attribution_found).length} unattributed`);
     
     return {
