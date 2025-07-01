@@ -1,6 +1,5 @@
 // File: netlify/functions/track.js
-// COMPLETELY CLEAN VERSION - Zero ioredis dependencies
-// 🔧 UPDATED: Uses only Upstash REST API (same as analytics-flexible.js)
+// CORRECTED VERSION with proper Redis key pattern: conversions:[timestamp]:[random_id]
 
 const handler = async (event, context) => {
   console.log('Enhanced track function started');
@@ -109,7 +108,7 @@ const handler = async (event, context) => {
 
     console.log('🔧 FIXED - Enhanced data extraction complete:', extractionStatus);
 
-    // 🔧 CLEAN: Upstash REST API only (no ioredis anywhere)
+    // Upstash REST API (matches your other functions)
     const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
     const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
     
@@ -216,9 +215,6 @@ const handler = async (event, context) => {
       }
     }
 
-    // Priority 6-7: Screen and WebGL matching (if implemented)
-    // These would follow similar patterns with SVV and gsig
-
     console.log('🔧 FIXED - Attribution attempt summary:', attributionAttempts);
 
     // 🔧 FIXED: Enhanced tracking data with STORED attribution parameters
@@ -272,8 +268,9 @@ const handler = async (event, context) => {
 
     console.log('Final tracking data prepared:', enhancedTrackingData);
 
-    // Store conversion data in Redis (permanent storage - no TTL)
-    const conversionKey = `conversion_${extractedData.email}_${Date.now()}`;
+    // 🔧 CORRECTED: Store using CORRECT key pattern: conversions:[timestamp]:[random_id]
+    const randomId = Math.random().toString(36).substr(2, 9);
+    const conversionKey = `conversions:${extractedData.timestamp}:${randomId}`;
     
     try {
       await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(enhancedTrackingData))}`);
