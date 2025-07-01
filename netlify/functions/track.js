@@ -166,7 +166,7 @@ const handler = async (event, context) => {
       for (const priority of ipPriorities) {
         if (!attributionResult && priority.ip) {
           attributionAttempts.ip_addresses_attempted++;
-          const ipKey = `attribution_ip_${priority.ip.replace(/\./g, '_').replace(/:/g, '_')}`;
+          const ipKey = `attribution_ip_${priority.ip.replace(/:/g, '_')}`;
           console.log(`🔧 FIXED - Trying IP lookup: ${priority.name} with IP: ${priority.ip}`);
           console.log(`🔧 FIXED - Redis key for ${priority.name}: ${ipKey}`);
           
