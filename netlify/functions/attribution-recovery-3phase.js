@@ -1,332 +1,253 @@
-// File: netlify/functions/attribution-recovery-3phase.js
-// ORIGINAL VERSION with full geographic functionality restored
-// Based on the sophisticated version from project knowledge
-
-const handler = async (event, context) => {
-  console.log('🚀 Enhanced Attribution Improvement System v3.0 - Unattributed Conversions Only');
-  
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Content-Type': 'application/json'
-  };
-
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers, body: '' };
-  }
-
-  const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-  const validApiKey = process.env.OJOY_API_KEY;
-  
-  if (!apiKey || apiKey !== validApiKey) {
-    return {
-      statusCode: 401,
-      headers,
-      body: JSON.stringify({ error: 'Unauthorized' })
-    };
-  }
-
-  try {
-    // Runtime management
-    const startTime = Date.now();
-    const maxRunTime = 25000; // 25 seconds for safety
-    let processedInThisRun = 0;
-    const processedConversions = [];
-    const cacheStats = { hits: 0, misses: 0, api_calls: 0, redis_hits: 0 };
-    const geoDataCache = new Map(); // In-memory cache for this run
-
-    console.log('📊 Starting enhanced attribution improvement run...');
-
-    // Get analytics data with unattributed conversions
-    const analyticsData = await getUnattributedConversionsLast3Days();
-    console.log(`📊 Found ${analyticsData.unattributed_conversions.length} unattributed conversions to process`);
-
-    if (analyticsData.unattributed_conversions.length === 0) {
-        return {
-            statusCode: 200,
-            headers,
-            body: JSON.stringify({
-                success: true,
-                message: 'No unattributed conversions found to process',
-                results: {
-                    processed_in_this_run: 0,
-                    remaining_to_process: 0,
-                    status: 'ALL_COMPLETE'
-                }
-            })
-        };
-    }
-
-    // Filter out already processed conversions
-    const unprocessedConversions = await filterNonProcess4Conversions(analyticsData.unattributed_conversions);
-    console.log(`📊 ${unprocessedConversions.length} conversions remaining after filtering already processed`);
-
-    if (unprocessedConversions.length === 0) {
-        return {
-            statusCode: 200,
-            headers,
-            body: JSON.stringify({
-                success: true,
-                message: 'All unattributed conversions have been processed',
-                results: {
-                    processed_in_this_run: 0,
-                    remaining_to_process: 0,
-                    status: 'ALL_COMPLETE'
-                }
-            })
-        };
-    }
-
-    // Dynamic batch sizing based on conversion count and available time
-    const estimatedTimePerConversion = 1500; // ms per conversion estimate
-    const availableTime = maxRunTime - 2000; // Reserve 2s for response
-    let batchSize = Math.min(
-        Math.floor(availableTime / estimatedTimePerConversion),
-        unprocessedConversions.length,
-        15 // Maximum batch size
-    );
-    batchSize = Math.max(1, batchSize); // Minimum 1
-
-    console.log(`📦 Processing batch of ${batchSize} conversions (${unprocessedConversions.length} total remaining)`);
-
-    // Process conversions in the current batch
-    const currentBatch = unprocessedConversions.splice(0, batchSize);
+exports.handler = async (event, context) => {
+    // ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v2.1: Backwards Compatible 8-Tier System
+    // Key Features: 1) 8-tier priority system, 2) Backwards compatibility, 3) Aggressive caching, 4) Smart batch sizing
     
-    for (let i = 0; i < currentBatch.length; i++) {
-        const conversionToProcess = currentBatch[i];
-        const conversionStartTime = Date.now();
-        
-        // Check runtime limit
-        if (Date.now() - startTime > maxRunTime - 3000) {
-            console.log(`⏰ Approaching runtime limit, stopping at ${i} conversions`);
-            break;
-        }
-
-        console.log(`\n🎯 CONVERSION ${i + 1}/${batchSize}: ${conversionToProcess.email}`);
-        
-        // Extract parameters with backwards compatibility
-        const conversionData = extractConversionParameters(conversionToProcess);
-        
-        console.log(`   📊 Type: ${conversionData.has_enhanced_params ? 'ENHANCED' : 'LEGACY'} (age: ${conversionData.conversion_age_days} days)`);
-        console.log(`   📍 IPs: PIP=${conversionData.PIP || 'none'}, CIP=${conversionData.CIP || 'none'}, IP=${conversionData.IP || 'none'}`);
-        console.log(`   🔐 Signatures: SSID=${!!conversionData.SSID}, dsig=${!!conversionData.dsig}, SVV=${!!conversionData.SVV}`);
-        console.log(`   📊 Current: ${conversionToProcess.landing_page || 'NONE'}`);
-        
-        // Enhanced attribution analysis with backwards compatibility
-        const improvementResults = await analyzeConversionForAttributionEnhanced(
-            conversionToProcess, 
-            analyticsData.page_views, 
-            conversionData,
-            geoDataCache,
-            cacheStats
-        );
-        
-        // Update Redis if needed
-        let updateResult = null;
-        if (improvementResults.shouldUpdate) {
-            console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
-            try {
-                updateResult = await updateConversionAttributionEnhanced(conversionToProcess, improvementResults);
-            } catch (redisError) {
-                console.error('❌ Redis update failed:', redisError);
-            }
-        }
-        
-        // Mark as process4 with enhanced tracking
-        await markConversionAsProcess4(conversionToProcess, improvementResults.attributionMethod);
-        
-        // Track this processed conversion
-        const conversionTime = Date.now() - conversionStartTime;
-        processedInThisRun++;
-        processedConversions.push({
-            email: conversionToProcess.email,
-            improvement_type: improvementResults.improvementType,
-            attribution_method: improvementResults.attributionMethod,
-            priority_level: improvementResults.priorityLevel || 8,
-            processing_time_ms: conversionTime,
-            update_result: updateResult
-        });
-        
-        console.log(`✅ Completed ${conversionToProcess.email} in ${conversionTime/1000}s`);
-    }
-
-    const totalTime = Date.now() - startTime;
-    const isComplete = unprocessedConversions.length === 0;
-
-    console.log('📊 Enhanced attribution improvement run complete');
-    console.log(`✅ Processed ${processedInThisRun} conversions in ${totalTime/1000}s`);
-
-    return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-            success: true,
-            message: 'Enhanced attribution improvement completed',
-            results: {
-                processed_in_this_run: processedInThisRun,
-                remaining_to_process: unprocessedConversions.length,
-                processed_conversions: processedConversions,
-                status: isComplete ? 'ALL_COMPLETE' : 'CONTINUE',
-                next_action: isComplete ? 'All unattributed conversions optimized!' : 'Run again to continue processing'
-            },
-            performance: {
-                total_run_time_seconds: totalTime / 1000,
-                average_time_per_conversion: processedInThisRun > 0 ? (totalTime / processedInThisRun / 1000) : 0,
-                cache_performance: {
-                    total_lookups: cacheStats.hits + cacheStats.misses,
-                    cache_hits: cacheStats.hits,
-                    cache_misses: cacheStats.misses,
-                    redis_hits: cacheStats.redis_hits,
-                    api_calls: cacheStats.api_calls,
-                    efficiency_percent: Math.round(cacheStats.hits / (cacheStats.hits + cacheStats.misses + 1) * 100)
-                }
-            }
-        })
+    const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Content-Type': 'application/json'
     };
 
-  } catch (error) {
-    console.error('❌ Enhanced attribution improvement error:', error);
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: 'Enhanced attribution improvement failed',
-        details: error.message
-      })
-    };
-  }
-};
-
-// Redis request helper
-async function redisRequest(command, ...args) {
-    const url = process.env.UPSTASH_REDIS_REST_URL;
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-    
-    if (!url || !token) {
-        throw new Error('Missing Redis configuration');
+    if (event.httpMethod === 'OPTIONS') {
+        return { statusCode: 200, headers, body: '' };
     }
 
     try {
-        if (command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') {
-            const response = await fetch(`${url}/${command}/${args.join('/')}`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            return response.json();
-        } else {
-            const response = await fetch(`${url}/${command}/${args.join('/')}`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            return response.json();
-        }
-    } catch (error) {
-        console.error(`Redis ${command} error:`, error);
-        throw error;
-    }
-}
-
-// Get unattributed conversions from last 3 days
-async function getUnattributedConversionsLast3Days() {
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - 3);
-    const endDate = new Date();
-    
-    console.log(`📅 Fetching conversions from ${startDate.toISOString()} to ${endDate.toISOString()}`);
-    
-    // Get conversion keys
-    let allKeys = [];
-    let cursor = '0';
-    
-    do {
-        const result = await redisRequest('scan', cursor, 'match', 'conversions:*', 'count', '1000');
-        if (result.result && result.result[1]) {
-            cursor = result.result[0];
-            const keys = result.result[1];
-            allKeys = allKeys.concat(keys);
-            if (allKeys.length > 10000) break;
-        } else {
-            break;
-        }
-    } while (cursor !== '0');
-    
-    console.log(`🔍 Found ${allKeys.length} conversion keys to analyze`);
-    
-    const conversions = [];
-    const pageViews = []; // For compatibility - you might need to implement this
-    
-    const startTimestamp = startDate.getTime();
-    const endTimestamp = endDate.getTime();
-    
-    for (const key of allKeys) {
-        try {
-            const conversionResult = await redisRequest('get', key);
-            const conversionData = conversionResult.result;
-            if (!conversionData) continue;
-            
-            let conversion = typeof conversionData === 'string' ? JSON.parse(conversionData) : conversionData;
-            
-            if (!conversion.timestamp) continue;
-            
-            const conversionTimestamp = new Date(conversion.timestamp).getTime();
-            
-            if (conversionTimestamp >= startTimestamp && conversionTimestamp <= endTimestamp) {
-                conversions.push(conversion);
-            }
-        } catch (error) {
-            console.log(`⚠️ Error processing ${key}: ${error.message}`);
-        }
-    }
-    
-    // Filter for unattributed conversions
-    const unattributed = conversions.filter(conv => {
-        const hasNoAttribution = !conv.attribution_found ||
-                                conv.attribution_found === false ||
-                                !conv.landing_page ||
-                                conv.landing_page === '' ||
-                                conv.landing_page === 'NO ATTRIBUTION' ||
-                                conv.landing_page === null ||
-                                conv.landing_page === undefined;
-        return hasNoAttribution;
-    });
-    
-    const sortedUnattributed = unattributed.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    console.log(`📊 Found ${sortedUnattributed.length} unattributed conversions out of ${conversions.length} total`);
-    
-    return {
-        unattributed_conversions: sortedUnattributed,
-        page_views: pageViews // Empty for now, implement if needed
-    };
-}
-
-// Filter out conversions already marked as "process4"
-async function filterNonProcess4Conversions(allConversions) {
-    const nonProcess4Conversions = [];
-    let process4Count = 0;
-    
-    for (const conversion of allConversions) {
-        const process4Key = `process4:${conversion.email}:${conversion.timestamp}`;
+        console.log('🔧 Starting ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v2.1 - Backwards Compatible');
+        console.log('⚡ Features: 8-tier priority system, backwards compatibility, aggressive caching, smart batching');
         
-        try {
-            const process4Data = await redisRequest('get', process4Key);
-            
-            if (process4Data.result) {
-                process4Count++;
-            } else {
-                nonProcess4Conversions.push(conversion);
-            }
-        } catch (error) {
-            // If we can't check status, assume not processed
-            nonProcess4Conversions.push(conversion);
+        // Enhanced timeout protection with more conservative timing
+        const startTime = Date.now();
+        const maxRunTime = 25000; // Increased to 25 seconds due to enhanced processing
+        let processedInThisRun = 0;
+        const processedConversions = [];
+        
+        // Global caching for this batch run
+        let geoDataCache = new Map();
+        let cacheStats = { hits: 0, misses: 0, api_calls: 0, redis_hits: 0 };
+        
+        // Step 1: Fetch analytics data from past 7 days (safe date range)
+        const analyticsData = await fetchAnalyticsDataPast7Days();
+        
+        // Step 2: Find all conversions (not just unattributed)
+        const allConversions = getAllConversions(analyticsData.conversions);
+        
+        if (allConversions.length === 0) {
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'No conversions found in past 7 days',
+                    results: { total: 0, processed: 0, remaining: 0 }
+                })
+            };
         }
-    }
-    
-    console.log(`📊 Process4 status: ${process4Count} already processed, ${nonProcess4Conversions.length} remaining`);
-    
-    return nonProcess4Conversions;
-}
+        
+        console.log(`🔄 ENHANCED BATCH PROCESSING: Smart batch sizing (1-2 conversions) for max ${maxRunTime/1000} seconds`);
+        
+        // Step 3: Get initial list of non-process3 conversions (ONCE at start)
+        console.log('🔍 Getting initial list of non-process3 conversions...');
+        let unprocessedConversions = await filterNonProcess3Conversions(allConversions);
+        
+        if (unprocessedConversions.length === 0) {
+            console.log('🎉 ALL CONVERSIONS ALREADY COMPLETED WITH ENHANCED SYSTEM!');
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    message: 'All conversions already completed with enhanced attribution',
+                    progress: { total_conversions: allConversions.length, total_processed: allConversions.length, remaining_conversions: 0, status: 'ALL_COMPLETE' }
+                })
+            };
+        }
+        
+        console.log(`📋 Found ${unprocessedConversions.length} non-process3 conversions (will process with smart batching)`);
+        console.log(`📊 Estimated processing time: ${Math.ceil(unprocessedConversions.length * 8)} seconds`);
+        
+        // Main processing loop - SMART batch sizing
+        while (unprocessedConversions.length > 0 && Date.now() - startTime < maxRunTime) {
+            
+            // Check if we have enough time for another batch
+            const timeRemaining = maxRunTime - (Date.now() - startTime);
+            if (timeRemaining < 8000) { // Increased buffer time
+                console.log(`⏰ Approaching timeout: ${timeRemaining/1000}s remaining - stopping batch processing`);
+                break;
+            }
+            
+            // Smart batch sizing based on conversion complexity and remaining time
+            let batchSize = 1; // Default to 1 for safety
+            
+            if (timeRemaining > 15000) {
+                // If we have plenty of time, analyze next conversion for batch size decision
+                const nextConversion = unprocessedConversions[0];
+                const conversionData = extractConversionParameters(nextConversion);
+                
+                if (conversionData.has_enhanced_params || conversionData.conversion_age_days < 7) {
+                    batchSize = 1; // Recent conversions with enhanced params need more processing
+                } else {
+                    batchSize = Math.min(2, unprocessedConversions.length); // Older conversions might be faster
+                }
+            }
+            
+            const currentBatch = unprocessedConversions.splice(0, batchSize);
+            const batchStartTime = Date.now();
+            
+            console.log(`\n📦 PROCESSING BATCH: ${batchSize} conversions (${unprocessedConversions.length} remaining after this batch)`);
+            
+            // Reset cache stats for each batch
+            const batchCacheStats = { hits: 0, misses: 0, api_calls: 0, redis_hits: 0 };
+            
+            // Process each conversion in the current batch
+            for (let i = 0; i < currentBatch.length; i++) {
+                const conversionToProcess = currentBatch[i];
+                const conversionStartTime = Date.now();
+                
+                console.log(`\n🎯 CONVERSION ${i + 1}/${batchSize}: ${conversionToProcess.email}`);
+                
+                // Extract parameters with backwards compatibility
+                const conversionData = extractConversionParameters(conversionToProcess);
+                
+                console.log(`   📊 Type: ${conversionData.has_enhanced_params ? 'ENHANCED' : 'LEGACY'} (age: ${conversionData.conversion_age_days} days)`);
+                console.log(`   📍 IPs: PIP=${conversionData.PIP || 'none'}, CIP=${conversionData.CIP || 'none'}, IP=${conversionData.IP || 'none'}`);
+                console.log(`   🔐 Signatures: SSID=${!!conversionData.SSID}, dsig=${!!conversionData.dsig}, SVV=${!!conversionData.SVV}`);
+                console.log(`   📊 Current: ${conversionToProcess.landing_page || 'NONE'}`);
+                
+                // Step 5: Enhanced attribution analysis with backwards compatibility
+                const improvementResults = await analyzeConversionForAttributionEnhanced(
+                    conversionToProcess, 
+                    analyticsData.page_views, 
+                    conversionData,
+                    geoDataCache,
+                    batchCacheStats
+                );
+                
+                // Step 6: Update Redis if needed
+                let updateResult = null;
+                if (improvementResults.shouldUpdate) {
+                    console.log(`📝 Updating attribution for ${conversionToProcess.email}...`);
+                    try {
+                        updateResult = await updateConversionAttributionEnhanced(conversionToProcess, improvementResults);
+                    } catch (redisError) {
+                        console.error('❌ Redis update failed:', redisError);
+                    }
+                }
+                
+                // Step 7: Mark as process3 with enhanced tracking
+                await markConversionAsProcess3Enhanced(conversionToProcess, improvementResults.attributionMethod);
+                
+                // Track this processed conversion
+                const conversionTime = Date.now() - conversionStartTime;
+                processedInThisRun++;
+                processedConversions.push({
+                    email: conversionToProcess.email,
+                    improvement_type: improvementResults.improvementType,
+                    attribution_method: improvementResults.attributionMethod,
+                    priority_level: improvementResults.priorityLevel || 8,
+                    processing_time_ms: conversionTime,
+                    cache_performance: `${batchCacheStats.hits}H/${batchCacheStats.misses}M/${batchCacheStats.api_calls}A/${batchCacheStats.redis_hits}R`,
+                    update_result: updateResult
+                });
+                
+                // Update global cache stats
+                cacheStats.hits += batchCacheStats.hits;
+                cacheStats.misses += batchCacheStats.misses;
+                cacheStats.api_calls += batchCacheStats.api_calls;
+                cacheStats.redis_hits += batchCacheStats.redis_hits;
+                
+                console.log(`✅ Completed ${conversionToProcess.email} in ${conversionTime/1000}s`);
+                console.log(`   📊 Cache: ${batchCacheStats.hits}H/${batchCacheStats.misses}M/${batchCacheStats.api_calls}A/${batchCacheStats.redis_hits}R`);
+            }
+            
+            // Batch completion summary
+            const batchTime = Date.now() - batchStartTime;
+            const cacheEfficiency = batchCacheStats.hits + batchCacheStats.misses > 0 
+                ? Math.round(batchCacheStats.hits / (batchCacheStats.hits + batchCacheStats.misses) * 100) 
+                : 0;
+            
+            console.log(`📦 Batch complete: ${batchSize} conversions in ${batchTime/1000}s | Cache efficiency: ${cacheEfficiency}%`);
+        }
+        
+        // Final status calculation
+        const totalTime = Date.now() - startTime;
+        const totalRemaining = unprocessedConversions.length;
+        const totalProcessed = allConversions.length - totalRemaining;
+        const isComplete = totalRemaining === 0;
+        
+        console.log(`\n🏁 ENHANCED RUN COMPLETE:`);
+        console.log(`   ⏱️  Total run time: ${totalTime/1000}s`);
+        console.log(`   ✅ Processed in this run: ${processedInThisRun}`);
+        console.log(`   📊 Total processed overall: ${totalProcessed}/${allConversions.length}`);
+        console.log(`   🔄 Remaining: ${totalRemaining}`);
+        console.log(`   📊 Cache performance: ${cacheStats.hits}H/${cacheStats.misses}M/${cacheStats.api_calls}A/${cacheStats.redis_hits}R`);
+        console.log(`   🎯 Status: ${isComplete ? 'ALL COMPLETE' : 'RUN AGAIN TO CONTINUE'}`);
+        
+        // Generate enhanced summary message
+        let summaryMessage;
+        if (isComplete) {
+            summaryMessage = `🎉 ALL ${allConversions.length} CONVERSIONS COMPLETED! Enhanced attribution v2.1 processed ${processedInThisRun} conversions in final run.`;
+        } else if (processedInThisRun > 0) {
+            summaryMessage = `✅ Enhanced v2.1: Processed ${processedInThisRun} conversions (${totalRemaining} remaining). Cache efficiency: ${Math.round(cacheStats.hits / (cacheStats.hits + cacheStats.misses + 1) * 100)}%`;
+        } else {
+            summaryMessage = `⚠️ No conversions processed (may be near timeout limit). ${totalRemaining} conversions remaining.`;
+        }
+        
+        return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({
+                success: true,
+                batch_complete: true,
+                processed_this_run: processedInThisRun,
+                processed_conversions: processedConversions,
+                message: summaryMessage,
+                progress: {
+                    total_conversions: allConversions.length,
+                    total_processed: totalProcessed,
+                    remaining_conversions: totalRemaining,
+                    processed_this_batch: processedInThisRun,
+                    status: isComplete ? 'ALL_COMPLETE' : 'CONTINUE',
+                    next_action: isComplete ? 'All conversions optimized with enhanced attribution!' : 'Run the function again to continue processing'
+                },
+                performance: {
+                    total_run_time_seconds: totalTime / 1000,
+                    average_time_per_conversion: processedInThisRun > 0 ? (totalTime / processedInThisRun / 1000) : 0,
+                    timeout_limit_seconds: maxRunTime / 1000,
+                    cache_performance: {
+                        total_lookups: cacheStats.hits + cacheStats.misses,
+                        cache_hits: cacheStats.hits,
+                        cache_misses: cacheStats.misses,
+                        redis_hits: cacheStats.redis_hits,
+                        api_calls: cacheStats.api_calls,
+                        efficiency_percent: Math.round(cacheStats.hits / (cacheStats.hits + cacheStats.misses + 1) * 100)
+                    }
+                },
+                enhancements: {
+                    version: '2.1',
+                    features: ['8_tier_priority_system', 'backwards_compatibility', 'aggressive_caching', 'smart_batch_sizing'],
+                    processing_method: 'enhanced_attribution_with_fallbacks'
+                },
+                date_range: 'Past 7 days (safe range)'
+            })
+        };
 
-// Backwards compatible data extraction
+    } catch (error) {
+        console.error('❌ Enhanced attribution improvement system error:', error);
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({
+                error: 'Enhanced attribution improvement system failed',
+                details: error.message,
+                version: '2.1'
+            })
+        };
+    }
+};
+
+// Backwards compatible data extraction - handles missing enhanced fields gracefully
 function extractConversionParameters(conversion) {
     const conversionAge = Math.floor((Date.now() - new Date(conversion.timestamp)) / (1000 * 60 * 60 * 24));
     
@@ -351,7 +272,7 @@ function extractConversionParameters(conversion) {
         gsig: conversion.webgl_hash || 
               (conversion.webgl_fingerprint ? hashString(conversion.webgl_fingerprint) : null),
         
-        // Standard fields
+        // Standard fields (should exist in most conversions)
         landing_page: conversion.landing_page,
         utm_source: conversion.utm_source || conversion.source,
         utm_campaign: conversion.utm_campaign || conversion.campaign,
@@ -359,15 +280,17 @@ function extractConversionParameters(conversion) {
         utm_content: conversion.utm_content,
         utm_term: conversion.utm_term,
         
-        // Metadata
+        // Metadata for processing decisions
         has_enhanced_params: !!(conversion.session_id || conversion.device_signature || conversion.primary_ip),
         conversion_age_days: conversionAge,
+        
+        // Processing hints
         requires_geo_correlation: !(conversion.session_id || conversion.device_signature),
         is_legacy_conversion: conversionAge > 30
     };
 }
 
-// Hash function for privacy-safe parameter values
+// Hash function for privacy-safe parameter values (matching other scripts)
 function hashString(str) {
     if (!str) return null;
     let hash = 0;
@@ -376,14 +299,14 @@ function hashString(str) {
         hash = ((hash << 5) - hash) + char;
         hash = hash & hash; // Convert to 32-bit integer
     }
-    return Math.abs(hash).toString(36);
+    return Math.abs(hash).toString(36); // Convert to base36 for shorter string
 }
 
 // Enhanced cached geographic data strategy
 async function getCachedGeoData(ip, geoDataCache, cacheStats) {
     if (!ip || ip === 'unknown') return null;
     
-    // Check in-memory cache first
+    // Check in-memory cache first (for current batch run)
     if (geoDataCache.has(ip)) {
         cacheStats.hits++;
         console.log(`   💾 Using in-memory cache for ${ip}`);
@@ -396,22 +319,22 @@ async function getCachedGeoData(ip, geoDataCache, cacheStats) {
         const cacheKey = `geo_cache:${encodedIP}`;
         const cachedResult = await redisRequest('get', cacheKey);
         
-        if (cachedResult.result) {
-            const geoData = JSON.parse(decodeURIComponent(cachedResult.result));
-            geoDataCache.set(ip, geoData);
+        if (cachedResult) {
+            const geoData = JSON.parse(decodeURIComponent(cachedResult));
+            geoDataCache.set(ip, geoData); // Store in memory for this run
             cacheStats.redis_hits++;
             console.log(`   📦 Using Redis cache for ${ip}: ${geoData.city}, ${geoData.region}`);
             return geoData;
         }
         
         // Check if we already have geo data in existing attribution records
-        const ipKey = `attribution_ip_${ip.includes(':') ? ip.replace(/:/g, '_') : ip}`;
+        const ipKey = `attribution_ip_${encodedIP}`;
         const attrKeyResult = await redisRequest('get', ipKey);
         
-        if (attrKeyResult.result) {
-            const attrResult = await redisRequest('get', attrKeyResult.result);
-            if (attrResult.result) {
-                const attrData = JSON.parse(attrResult.result);
+        if (attrKeyResult) {
+            const attrResult = await redisRequest('get', attrKeyResult);
+            if (attrResult) {
+                const attrData = JSON.parse(attrResult);
                 if (attrData.geographic_data) {
                     geoDataCache.set(ip, attrData.geographic_data);
                     cacheStats.redis_hits++;
@@ -431,14 +354,13 @@ async function getCachedGeoData(ip, geoDataCache, cacheStats) {
     }
 }
 
-// Get or fetch geographic data
 async function getOrFetchGeoData(ip, geoDataCache, cacheStats) {
     // Try cache first
     let geoData = await getCachedGeoData(ip, geoDataCache, cacheStats);
     if (geoData) return geoData;
     
-    // Only make API call if within rate limits
-    if (cacheStats.api_calls < 10) {
+    // Only make API call if absolutely necessary and within rate limits
+    if (cacheStats.api_calls < 10) { // Limit API calls per batch run
         try {
             const ipinfoToken = process.env.IPINFO_TOKEN;
             if (!ipinfoToken) return getFailedLookupData(ip);
@@ -464,285 +386,533 @@ async function getOrFetchGeoData(ip, geoDataCache, cacheStats) {
                 // Cache in both memory and Redis
                 geoDataCache.set(ip, geoData);
                 const cacheKey = `geo_cache:${ip.replace(/:/g, '_')}`;
-                await redisRequest('setex', cacheKey, '86400', encodeURIComponent(JSON.stringify(geoData)));
+                await redisRequest('setex', cacheKey, 86400, encodeURIComponent(JSON.stringify(geoData)));
                 
                 cacheStats.api_calls++;
-                console.log(`   🌍 IPinfo result for ${ip}: ${geoData.city}, ${geoData.region}, ${geoData.isp}`);
+                console.log(`   ✅ Cached geo data for ${ip}: ${geoData.city}, ${geoData.region} (${geoData.isp})`);
                 return geoData;
             }
         } catch (error) {
-            console.log(`   ⚠️ IPinfo API failed for ${ip}: ${error.message}`);
-            cacheStats.api_calls++;
+            console.log(`   ❌ IPinfo API call failed for ${ip}: ${error.message}`);
         }
+    } else {
+        console.log(`   ⚠️ Skipping API call for ${ip} - rate limit reached (${cacheStats.api_calls}/10)`);
     }
     
     return getFailedLookupData(ip);
 }
 
-// Extract best ISP from IPinfo response
+function getFailedLookupData(ip) {
+    return {
+        ip: ip || 'unknown',
+        city: 'LOOKUP_FAILED',
+        region: 'LOOKUP_FAILED', 
+        country: 'LOOKUP_FAILED',
+        isp: 'LOOKUP_FAILED',
+        coordinates: '0,0',
+        timezone: 'Unknown'
+    };
+}
+
 function extractBestISP(data) {
     if (data.company?.name) return data.company.name;
     if (data.asn?.name) return data.asn.name;
     if (data.org) return data.org;
+    if (data.carrier?.name) return data.carrier.name;
     return 'Unknown';
 }
 
-// Failed lookup data
-function getFailedLookupData(ip) {
-    return {
-        ip: ip,
-        city: 'LOOKUP_FAILED',
-        region: 'LOOKUP_FAILED',
-        country: 'LOOKUP_FAILED',
-        isp: 'LOOKUP_FAILED',
-        coordinates: '0,0',
-        timezone: 'Unknown',
-        lookup_timestamp: new Date().toISOString()
-    };
-}
-
-// Enhanced attribution analysis
-async function analyzeConversionForAttributionEnhanced(conversion, pageViews, conversionData, geoDataCache, cacheStats) {
-    console.log(`   🔬 Analyzing attribution for ${conversion.email}...`);
+// Enhanced attribution analysis with backwards compatibility
+async function analyzeConversionForAttributionEnhanced(conversion, pageviews, conversionData, geoDataCache, cacheStats) {
+    console.log('   🔬 Using backwards-compatible enhanced attribution system...');
     
-    // Start with basic result structure
-    let improvementResults = {
-        shouldUpdate: false,
-        improvementType: 'NO_IMPROVEMENT',
-        attributionMethod: 'none',
-        priorityLevel: 8,
+    const results = {
+        conversionEmail: conversion.email,
+        originalAttribution: conversion.landing_page || null,
+        matchFound: false,
         newAttribution: null,
+        shouldUpdate: false,
+        improvementType: 'NO_CHANGE',
+        attributionMethod: 'none',
+        priorityLevel: 9,
         match: null,
         analysis: {
-            processing_path: 'enhanced_analysis',
-            geo_correlation_attempted: false,
-            cache_performance: `${cacheStats.hits}H/${cacheStats.misses}M`
+            conversion_type: conversionData.has_enhanced_params ? 'enhanced' : 'legacy',
+            conversion_age_days: conversionData.conversion_age_days,
+            processing_path: 'unknown'
         }
     };
-
-    // Enhanced 8-tier attribution priority system
-    const attributionPriorities = [
-        { name: 'session_id_match', field: 'SSID', points: 300, priority: 1 },
-        { name: 'primary_ip_match', field: 'PIP', points: 280, priority: 2 },
-        { name: 'conversion_ip_match', field: 'CIP', points: 260, priority: 3 },
-        { name: 'pageview_ip_match', field: 'IP', points: 240, priority: 4 },
-        { name: 'device_signature_match', field: 'dsig', points: 220, priority: 5 },
-        { name: 'screen_hash_match', field: 'SVV', points: 200, priority: 6 },
-        { name: 'webgl_match', field: 'gsig', points: 180, priority: 7 },
-        { name: 'geographic_match', field: 'geographic_correlation', points: 100, priority: 8 }
-    ];
-
-    // Try each method in priority order
-    for (const priority of attributionPriorities) {
-        if (priority.name === 'geographic_match') {
-            // Special handling for geographic matching
-            console.log(`   🌍 Attempting geographic correlation...`);
-            improvementResults.analysis.geo_correlation_attempted = true;
+    
+    // Try enhanced 8-tier system first (for conversions with enhanced params)
+    if (conversionData.has_enhanced_params) {
+        console.log('   🚀 Trying enhanced 8-tier attribution system...');
+        results.analysis.processing_path = '8_tier_system';
+        
+        const enhancedResult = await findEnhancedAttribution(conversionData);
+        
+        if (enhancedResult) {
+            results.matchFound = true;
+            results.newAttribution = enhancedResult.landing_page || enhancedResult.url;
+            results.match = enhancedResult;
+            results.attributionMethod = enhancedResult.method;
+            results.priorityLevel = getPriorityLevel(enhancedResult.method);
             
-            const geoMatch = await attemptGeographicCorrelation(conversion, conversionData, geoDataCache, cacheStats);
-            if (geoMatch) {
-                console.log(`   ✅ Geographic correlation successful!`);
-                improvementResults = {
-                    shouldUpdate: true,
-                    improvementType: 'NEW_ATTRIBUTION',
-                    attributionMethod: 'geographic_match',
-                    priorityLevel: 8,
-                    newAttribution: geoMatch.pageview?.landing_page || geoMatch.landing_page,
-                    match: geoMatch,
-                    analysis: {
-                        ...improvementResults.analysis,
-                        geographic_confidence: geoMatch.confidence,
-                        geographic_score: geoMatch.score
-                    }
-                };
-                break;
-            }
-        } else {
-            // Standard attribution method lookup
-            const fieldValue = conversionData[priority.field];
-            if (!fieldValue) {
-                console.log(`   ❌ ${priority.name}: No ${priority.field} available`);
-                continue;
-            }
-
-            console.log(`   🔍 ${priority.name}: Checking ${priority.field}=${fieldValue}`);
+            const shouldUpdate = shouldUpdateAttributionByPriority(conversion, enhancedResult);
+            results.shouldUpdate = shouldUpdate.update;
+            results.improvementType = shouldUpdate.type;
             
-            // Generate lookup key with correct format
-            let lookupKey;
-            if (priority.field === 'PIP' || priority.field === 'CIP' || priority.field === 'IP') {
-                // IP-based lookup
-                if (fieldValue.includes(':')) {
-                    // IPv6
-                    lookupKey = `attribution_ip_${fieldValue.replace(/:/g, '_')}`;
-                } else {
-                    // IPv4
-                    lookupKey = `attribution_ip_${fieldValue}`;
-                }
-            } else if (priority.field === 'SSID') {
-                lookupKey = `attribution_session_${fieldValue}`;
-            } else if (priority.field === 'dsig') {
-                lookupKey = `attribution_fp_${fieldValue}`;
-            } else if (priority.field === 'SVV') {
-                lookupKey = `attribution_screen_${fieldValue}`;
-            } else if (priority.field === 'gsig') {
-                lookupKey = `attribution_webgl_${fieldValue}`;
-            }
-
-            try {
-                const attributionResult = await redisRequest('get', lookupKey);
-                if (attributionResult.result) {
-                    console.log(`   ✅ ${priority.name}: Found attribution data!`);
-                    const attributionData = JSON.parse(attributionResult.result);
-                    
-                    improvementResults = {
-                        shouldUpdate: true,
-                        improvementType: 'NEW_ATTRIBUTION',
-                        attributionMethod: priority.name,
-                        priorityLevel: priority.priority,
-                        newAttribution: attributionData.landing_page || attributionData.url,
-                        match: attributionData,
-                        analysis: {
-                            ...improvementResults.analysis,
-                            attribution_score: priority.points,
-                            lookup_key: lookupKey
-                        }
-                    };
-                    break; // Found match, stop here (highest priority wins)
-                } else {
-                    console.log(`   ❌ ${priority.name}: No attribution data found`);
-                }
-            } catch (error) {
-                console.log(`   ⚠️ ${priority.name}: Error during lookup - ${error.message}`);
-            }
+            console.log(`   ✅ Enhanced attribution found: ${enhancedResult.method} (Priority ${results.priorityLevel})`);
+            return results;
         }
     }
-
-    console.log(`   📊 Analysis result: ${improvementResults.improvementType} via ${improvementResults.attributionMethod}`);
-    return improvementResults;
+    
+    // Fallback to geographic correlation (Priority 8) for legacy conversions or failed enhanced lookups
+    console.log('   🌍 Falling back to geographic correlation...');
+    results.analysis.processing_path = 'geographic_correlation';
+    
+    const geoResult = await performGeographicCorrelationCached(conversion, pageviews, conversionData, geoDataCache, cacheStats);
+    
+    if (geoResult) {
+        results.matchFound = true;
+        results.newAttribution = geoResult.newAttribution;
+        results.match = geoResult.match;
+        results.attributionMethod = geoResult.method || 'geo_correlation';
+        results.priorityLevel = 8;
+        
+        const shouldUpdate = shouldUpdateAttributionByPriority(conversion, geoResult);
+        results.shouldUpdate = shouldUpdate.update;
+        results.improvementType = shouldUpdate.type;
+        
+        console.log(`   ✅ Geographic correlation successful: ${results.attributionMethod}`);
+    } else {
+        console.log('   ❌ No attribution found via any method');
+        results.improvementType = 'NO_MATCH_FOUND';
+    }
+    
+    return results;
 }
 
-// Geographic correlation attempt
-async function attemptGeographicCorrelation(conversion, conversionData, geoDataCache, cacheStats) {
-    // Get geo data for available IPs
-    const ipsToCheck = [conversionData.PIP, conversionData.CIP, conversionData.IP].filter(ip => ip);
+// 8-tier enhanced attribution system (adapted for analytics data)
+async function findEnhancedAttribution(conversionData) {
+    console.log('      🎯 Starting 8-tier attribution search...');
     
-    if (ipsToCheck.length === 0) {
-        console.log(`   ❌ No IPs available for geographic correlation`);
-        return null;
-    }
-
-    console.log(`   🗺️ Checking ${ipsToCheck.length} IPs for geographic correlation`);
-    
-    for (const ip of ipsToCheck) {
-        const geoData = await getOrFetchGeoData(ip, geoDataCache, cacheStats);
+    // Priority 1: Session ID Match (300 points) - HIGHEST PRIORITY
+    if (conversionData.SSID) {
+        console.log('      🔍 Priority 1: Trying SSID match:', conversionData.SSID);
+        const sessionKey = `attribution_session_${conversionData.SSID}`;
+        const sessionResult = await redisRequest('get', sessionKey);
         
-        if (geoData && geoData.city !== 'LOOKUP_FAILED') {
-            console.log(`   📍 Geo data for ${ip}: ${geoData.city}, ${geoData.region}, ${geoData.isp}`);
-            
-            // Try to find attribution data using geographic correlation
-            const cleanCity = cleanForRedisKey(geoData.city);
-            const cleanISP = cleanForRedisKey(geoData.isp?.substring(0, 20) || 'unknown');
-            const cleanRegion = cleanForRedisKey(geoData.region);
-            
-            if (cleanCity.length > 2 && cleanISP.length > 2) {
-                // Try city + ISP correlation
-                const geoPattern = `attribution_geo_${cleanCity}_${cleanISP}_*`;
-                console.log(`   🔍 Trying geographic pattern: ${geoPattern}`);
-                
-                try {
-                    // Scan for matching geographic keys
-                    const scanResult = await redisRequest('scan', '0', 'match', geoPattern, 'count', '100');
-                    if (scanResult.result && scanResult.result[1] && scanResult.result[1].length > 0) {
-                        const geoKeys = scanResult.result[1];
-                        console.log(`   ✅ Found ${geoKeys.length} geographic matches`);
-                        
-                        // Get the first matching attribution data
-                        const firstKey = geoKeys[0];
-                        const attrResult = await redisRequest('get', firstKey);
-                        if (attrResult.result) {
-                            const attrData = JSON.parse(attrResult.result);
-                            return {
-                                pageview: attrData,
-                                landing_page: attrData.landing_page || attrData.url,
-                                score: 100,
-                                confidence: 'medium',
-                                method: 'geographic_city_isp',
-                                geo_data: geoData,
-                                lookup_pattern: geoPattern
-                            };
-                        }
-                    }
-                } catch (error) {
-                    console.log(`   ⚠️ Geographic scan failed: ${error.message}`);
-                }
-                
-                // Try region + ISP correlation if city failed
-                if (cleanRegion.length > 2) {
-                    const regionPattern = `attribution_region_${cleanRegion}_${cleanISP}_*`;
-                    console.log(`   🔍 Trying regional pattern: ${regionPattern}`);
-                    
-                    try {
-                        const regionScanResult = await redisRequest('scan', '0', 'match', regionPattern, 'count', '100');
-                        if (regionScanResult.result && regionScanResult.result[1] && regionScanResult.result[1].length > 0) {
-                            const regionKeys = regionScanResult.result[1];
-                            console.log(`   ✅ Found ${regionKeys.length} regional matches`);
-                            
-                            const firstKey = regionKeys[0];
-                            const attrResult = await redisRequest('get', firstKey);
-                            if (attrResult.result) {
-                                const attrData = JSON.parse(attrResult.result);
-                                return {
-                                    pageview: attrData,
-                                    landing_page: attrData.landing_page || attrData.url,
-                                    score: 80,
-                                    confidence: 'low',
-                                    method: 'geographic_region_isp',
-                                    geo_data: geoData,
-                                    lookup_pattern: regionPattern
-                                };
-                            }
-                        }
-                    } catch (error) {
-                        console.log(`   ⚠️ Regional scan failed: ${error.message}`);
-                    }
-                }
+        if (sessionResult) {
+            const mainKey = sessionResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 1: SSID match found - highest confidence');
+                return {
+                    method: 'ssid_direct_match',
+                    score: 300,
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
             }
-        } else {
-            console.log(`   ❌ Could not get geo data for ${ip}`);
         }
+        console.log('      ⚠️ Priority 1: SSID lookup failed');
     }
     
-    console.log(`   ❌ No geographic correlation found`);
+    // Priority 2: Primary IP Match (280 points) - IPv6 original or explicit primary IP
+    if (conversionData.PIP) {
+        console.log('      🔍 Priority 2: Trying Primary IP match:', conversionData.PIP);
+        const pipKey = `attribution_ip_${encodeIPForKey(conversionData.PIP)}`;
+        const pipResult = await redisRequest('get', pipKey);
+        
+        if (pipResult) {
+            const mainKey = pipResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 2: Primary IP match found');
+                return {
+                    method: 'primary_ip_match',
+                    score: 280,
+                    matched_ip: 'primary',
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 2: Primary IP lookup failed');
+    }
+    
+    // Priority 3: Conversion IP Match (260 points) - Top-level checkout IP
+    if (conversionData.CIP && conversionData.CIP !== conversionData.PIP) {
+        console.log('      🔍 Priority 3: Trying Conversion IP match:', conversionData.CIP);
+        const cipKey = `attribution_ip_${encodeIPForKey(conversionData.CIP)}`;
+        const cipResult = await redisRequest('get', cipKey);
+        
+        if (cipResult) {
+            const mainKey = cipResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 3: Conversion IP match found');
+                return {
+                    method: 'conversion_ip_match',
+                    score: 260,
+                    matched_ip: 'conversion',
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 3: Conversion IP lookup failed');
+    }
+    
+    // Priority 4: Pageview IP Match (240 points) - Nested pageview IP (backward compatibility)
+    if (conversionData.IP && conversionData.IP !== conversionData.CIP && conversionData.IP !== conversionData.PIP) {
+        console.log('      🔍 Priority 4: Trying Pageview IP match:', conversionData.IP);
+        const ipKey = `attribution_ip_${encodeIPForKey(conversionData.IP)}`;
+        const ipResult = await redisRequest('get', ipKey);
+        
+        if (ipResult) {
+            const mainKey = ipResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 4: Pageview IP match found');
+                return {
+                    method: 'pageview_ip_match',
+                    score: 240,
+                    matched_ip: 'pageview',
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 4: Pageview IP lookup failed');
+    }
+    
+    // Priority 5: Device Signature Match (220 points) - Cross-device attribution
+    if (conversionData.dsig) {
+        console.log('      🔍 Priority 5: Trying device signature match:', conversionData.dsig);
+        const fpKey = `attribution_fp_${conversionData.dsig}`;
+        const fpResult = await redisRequest('get', fpKey);
+        
+        if (fpResult) {
+            const mainKey = fpResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 5: Device signature match found - cross-device attribution');
+                return {
+                    method: 'device_signature_match',
+                    score: 220,
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 5: Device signature lookup failed');
+    }
+    
+    // Priority 6: Screen Hash Match (200 points) - Privacy-safe device correlation
+    if (conversionData.SVV) {
+        console.log('      🔍 Priority 6: Trying screen hash match:', conversionData.SVV);
+        const screenKey = `attribution_screen_${conversionData.SVV}`;
+        const screenResult = await redisRequest('get', screenKey);
+        
+        if (screenResult) {
+            const mainKey = screenResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 6: Screen hash match found - privacy-safe device correlation');
+                return {
+                    method: 'screen_hash_match',
+                    score: 200,
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 6: Screen hash lookup failed');
+    }
+    
+    // Priority 7: WebGL Signature Match (180 points) - Additional device validation
+    if (conversionData.gsig) {
+        console.log('      🔍 Priority 7: Trying WebGL signature match:', conversionData.gsig);
+        const webglKey = `attribution_webgl_${conversionData.gsig}`;
+        const webglResult = await redisRequest('get', webglKey);
+        
+        if (webglResult) {
+            const mainKey = webglResult;
+            const attributionResult = await redisRequest('get', mainKey);
+            if (attributionResult) {
+                const attrData = JSON.parse(attributionResult);
+                console.log('      ✅ Priority 7: WebGL signature match found');
+                return {
+                    method: 'webgl_signature_match',
+                    score: 180,
+                    landing_page: attrData.landing_page,
+                    ...attrData
+                };
+            }
+        }
+        console.log('      ⚠️ Priority 7: WebGL signature lookup failed');
+    }
+    
+    console.log('      ❌ All 7 direct attribution methods failed');
     return null;
 }
 
-// Clean string for Redis key usage
-function cleanForRedisKey(str) {
-    if (!str) return '';
-    return str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+// Helper function to get priority level from method
+function getPriorityLevel(method) {
+    const priorities = {
+        'ssid_direct_match': 1,
+        'primary_ip_match': 2,
+        'conversion_ip_match': 3,
+        'pageview_ip_match': 4,
+        'device_signature_match': 5,
+        'screen_hash_match': 6,
+        'webgl_signature_match': 7,
+        'geo_correlation': 8,
+        'geo_high_confidence': 8,
+        'geo_medium_confidence': 8
+    };
+    return priorities[method] || 9;
 }
 
-// Mark conversion as process4
-async function markConversionAsProcess4(conversion, attributionMethod) {
-    try {
-        const process4Key = `process4:${conversion.email}:${conversion.timestamp}`;
-        const process4Data = {
-            email: conversion.email,
-            timestamp: conversion.timestamp,
-            processed_at: new Date().toISOString(),
-            system: 'attribution_improvement_8tier_unattributed_only',
-            version: '3.0',
-            attribution_method: attributionMethod,
-            processing_type: 'batch_reprocessing_unattributed'
-        };
-        
-        await redisRequest('setex', process4Key, '2592000', JSON.stringify(process4Data)); // 30 days
-    } catch (error) {
-        console.log(`   ⚠️ Could not mark ${conversion.email} as process4: ${error.message}`);
+// IPv6-safe key encoding
+function encodeIPForKey(ip) {
+    return ip.replace(/:/g, '_');
+}
+
+// Enhanced geographic correlation with caching
+async function performGeographicCorrelationCached(conversion, pageviews, conversionData, geoDataCache, cacheStats) {
+    console.log('      🌍 Starting cached geographic correlation...');
+    
+    // Get the best IP for correlation
+    const testIPs = [conversionData.PIP, conversionData.CIP, conversionData.IP].filter(Boolean);
+    
+    if (testIPs.length === 0) {
+        console.log('      ❌ No IPs available for geographic correlation');
+        return null;
     }
+    
+    // Find pageviews in 90-minute window before conversion
+    const candidatePageviews = findPageviewsIn90MinuteWindow(conversion, pageviews);
+    
+    if (candidatePageviews.length === 0) {
+        console.log('      ❌ No pageviews found in 90-minute window before conversion');
+        return null;
+    }
+    
+    console.log(`      📱 Found ${candidatePageviews.length} pageviews in 90-minute window`);
+    
+    // Test each customer IP for geographic correlation
+    for (const customerIP of testIPs) {
+        console.log(`      🌍 Testing geographic correlation for: ${customerIP}`);
+        
+        // Get geographic data for conversion IP (using cache)
+        const conversionGeo = await getOrFetchGeoData(customerIP, geoDataCache, cacheStats);
+        
+        console.log(`      🌍 Conversion geo: ${conversionGeo.city}, ${conversionGeo.region} (${conversionGeo.isp})`);
+
+        if (conversionGeo.city === 'LOOKUP_FAILED') {
+            console.log('      ❌ Geographic lookup failed, trying next IP');
+            continue;
+        }
+
+        // Find the best temporal match with geographic correlation
+        const bestMatch = await findBestTemporalMatchCached(conversion, candidatePageviews, conversionGeo, geoDataCache, cacheStats);
+        
+        if (bestMatch) {
+            console.log(`      ✅ Geographic correlation successful: ${bestMatch.confidence} (score: ${Math.round(bestMatch.score)})`);
+            
+            return {
+                newAttribution: bestMatch.pageview.landing_page || bestMatch.pageview.url,
+                match: bestMatch,
+                method: bestMatch.confidence === 'HIGH_CONFIDENCE' ? 'geo_high_confidence' : 
+                       bestMatch.confidence === 'MEDIUM_CONFIDENCE' ? 'geo_medium_confidence' : 'geo_correlation'
+            };
+        }
+    }
+    
+    console.log('      ❌ Geographic correlation failed for all IPs');
+    return null;
 }
 
-// Enhanced attribution update
+// Find pageviews in 90-minute window before conversion
+function findPageviewsIn90MinuteWindow(conversion, pageviews) {
+    const conversionTime = new Date(conversion.timestamp);
+    const windowStart = new Date(conversionTime.getTime() - 90 * 60 * 1000); // 90 minutes before
+    
+    const candidatePageviews = pageviews.filter(pv => {
+        const pvTime = new Date(pv.timestamp);
+        return pvTime >= windowStart && 
+               pvTime <= conversionTime && 
+               pv.ip_address; // Must have IP address
+    });
+    
+    // Sort by timestamp DESCENDING (newest first = closest to conversion)
+    candidatePageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    return candidatePageviews;
+}
+
+// Find best temporal match with cached geographic data
+async function findBestTemporalMatchCached(conversion, candidatePageviews, conversionGeoData, geoDataCache, cacheStats) {
+    for (let i = 0; i < candidatePageviews.length; i++) {
+        const pageview = candidatePageviews[i];
+        const timeDiff = Math.abs(new Date(conversion.timestamp) - new Date(pageview.timestamp)) / 1000 / 60;
+        
+        // Get pageview geographic data (using cache)
+        const pageviewGeoData = await getOrFetchGeoData(pageview.ip_address, geoDataCache, cacheStats);
+        
+        // Compare geographic data with enhanced scoring
+        const geoMatch = compareGeographicDataEnhanced(conversionGeoData, pageviewGeoData);
+        
+        if (geoMatch.isMatch) {
+            console.log(`      🏆 TEMPORAL MATCH: ${timeDiff.toFixed(1)}min before (${geoMatch.confidence})`);
+            
+            return {
+                pageview: pageview,
+                score: geoMatch.score,
+                timeDiff: timeDiff,
+                confidence: geoMatch.confidence,
+                conversionGeo: conversionGeoData,
+                pageviewGeo: pageviewGeoData,
+                candidateNumber: i + 1
+            };
+        }
+        
+        // Progress logging for large datasets
+        if ((i + 1) % 25 === 0) {
+            console.log(`      📊 Checked ${i + 1}/${candidatePageviews.length} pageviews`);
+        }
+    }
+    
+    return null;
+}
+
+// Enhanced geographic scoring to match track.js system
+function compareGeographicDataEnhanced(conversionGeo, pageviewGeo) {
+    if (conversionGeo.city === 'LOOKUP_FAILED' || pageviewGeo.city === 'LOOKUP_FAILED') {
+        return { isMatch: false, confidence: 'LOOKUP_FAILED', score: 0 };
+    }
+
+    const cityMatch = conversionGeo.city === pageviewGeo.city;
+    const regionMatch = conversionGeo.region === pageviewGeo.region;
+    const countryMatch = conversionGeo.country === pageviewGeo.country;
+    const ispMatch = compareISPs(conversionGeo.isp, pageviewGeo.isp);
+
+    let score = 0;
+    
+    // ISP + Location combinations (primary correlation method for dual-stack)
+    if (conversionGeo.isp !== 'Unknown' && pageviewGeo.isp !== 'Unknown') {
+        if (normalizeISP(conversionGeo.isp) === normalizeISP(pageviewGeo.isp)) {
+            if (cityMatch) {
+                score += 60; // High confidence: same city + ISP
+            } else if (regionMatch) {
+                score += 40; // Medium confidence: same region + ISP  
+            } else if (countryMatch) {
+                score += 20; // Low confidence: same country + ISP
+            }
+        }
+    }
+
+    // Geographic-only fallbacks (lower confidence)
+    if (cityMatch && conversionGeo.city !== 'Unknown') {
+        score += 20; // Same city bonus
+    }
+    if (regionMatch && conversionGeo.region !== 'Unknown') {
+        score += 10; // Same region bonus
+    }
+
+    let confidence = 'NO_MATCH';
+    let isMatch = false;
+
+    // Enhanced thresholds for geographic correlation
+    if (score >= 80) {
+        confidence = 'HIGH_CONFIDENCE';
+        isMatch = true;
+    } else if (score >= 60) {
+        confidence = 'MEDIUM_CONFIDENCE';
+        isMatch = true;
+    } else if (score >= 40) {
+        confidence = 'LOW_CONFIDENCE';
+        isMatch = true; // Accept lower threshold since it's final fallback
+    }
+
+    return {
+        isMatch,
+        confidence,
+        score,
+        cityMatch,
+        regionMatch,
+        countryMatch,
+        ispMatch
+    };
+}
+
+// Compare ISPs with normalization
+function compareISPs(isp1, isp2) {
+    if (!isp1 || !isp2 || isp1 === 'Unknown' || isp2 === 'Unknown') return false;
+    return normalizeISP(isp1) === normalizeISP(isp2);
+}
+
+// Normalize ISP names for better matching
+function normalizeISP(isp) {
+    if (!isp || isp === 'Unknown') return '';
+    
+    const normalized = isp.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // Handle common ISP name variations
+    if (normalized.includes('twc') || normalized.includes('timewarner') || normalized.includes('spectruminternet')) {
+        return 'timewarner';
+    }
+    if (normalized.includes('comcast') || normalized.includes('xfinity')) {
+        return 'comcast';
+    }
+    if (normalized.includes('verizon') || normalized.includes('vzw')) {
+        return 'verizon';
+    }
+    
+    return normalized;
+}
+
+// Priority-based update logic
+function shouldUpdateAttributionByPriority(conversion, newMatch) {
+    const hasCurrentAttribution = conversion.landing_page && conversion.landing_page !== '';
+    
+    if (!hasCurrentAttribution) {
+        return { update: true, type: 'NEW_ATTRIBUTION' };
+    }
+    
+    // Get current attribution method priority (if available)
+    const currentMethod = conversion.attribution_improvement?.method || 'unknown';
+    const currentPriority = getPriorityLevel(currentMethod);
+    const newPriority = getPriorityLevel(newMatch.method);
+    
+    // Update if new method has higher priority (lower number = higher priority)
+    if (newPriority < currentPriority) {
+        return { update: true, type: 'PRIORITY_UPGRADE' };
+    }
+    
+    // For same priority level, use temporal precedence
+    if (newPriority === currentPriority) {
+        const currentAttributionTime = conversion.attributed_pageview_timestamp || conversion.timestamp;
+        const newMatchTime = newMatch.pageview?.timestamp || newMatch.timestamp;
+        
+        if (newMatchTime && new Date(newMatchTime) < new Date(currentAttributionTime)) {
+            return { update: true, type: 'TEMPORAL_IMPROVEMENT' };
+        }
+    }
+    
+    // Keep existing if lower or same priority
+    return { update: false, type: 'NO_IMPROVEMENT' };
+}
+
+// Enhanced attribution update with version tracking
 async function updateConversionAttributionEnhanced(conversion, improvementResults) {
     try {
         // Find the conversion record in Redis
@@ -750,32 +920,40 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
         
         if (conversionKey) {
             // Get existing data
-            const existingResult = await redisRequest('get', conversionKey);
-            let conversionData = existingResult.result;
-            if (typeof conversionData === 'string') {
-                conversionData = JSON.parse(conversionData);
-            }
+            const existingData = await redisRequest('get', conversionKey);
+            let conversionData = typeof existingData === 'string' ? JSON.parse(existingData) : existingData;
             
             // Update with enhanced attribution
             const updatedConversion = {
                 ...conversionData,
                 attribution_found: true,
                 landing_page: improvementResults.newAttribution,
-                source: improvementResults.match?.source || 'enhanced_v3_0',
-                utm_campaign: improvementResults.match?.utm_campaign || conversionData.utm_campaign,
-                utm_medium: improvementResults.match?.utm_medium || conversionData.utm_medium,
-                referrer_url: improvementResults.match?.referrer_url || conversionData.referrer_url,
+                source: improvementResults.match.pageview?.source || improvementResults.match.source || 'enhanced_v2_1',
+                utm_campaign: improvementResults.match.pageview?.utm_campaign || improvementResults.match.utm_campaign || conversionData.utm_campaign,
+                utm_medium: improvementResults.match.pageview?.utm_medium || improvementResults.match.utm_medium || conversionData.utm_medium,
+                referrer_url: improvementResults.match.pageview?.referrer_url || improvementResults.match.referrer_url || conversionData.referrer_url,
                 
-                // Attribution improvement metadata
+                // Enhanced attribution improvement metadata
                 attribution_improvement: {
                     method: improvementResults.attributionMethod,
                     improvement_type: improvementResults.improvementType,
                     priority_level: improvementResults.priorityLevel,
-                    confidence: improvementResults.match?.confidence || 'medium',
-                    score: improvementResults.match?.score || 0,
+                    confidence: improvementResults.match.confidence || 'medium',
+                    score: improvementResults.match.score || 0,
+                    time_difference_minutes: improvementResults.match.timeDiff || 0,
                     improved_at: new Date().toISOString(),
-                    system_version: '3.0'
-                }
+                    system_version: '2.1',
+                    processing_path: improvementResults.analysis?.processing_path || 'unknown',
+                    
+                    // Attribution source metadata
+                    pageview_ip: improvementResults.match.pageview?.ip_address || improvementResults.match.ip_address,
+                    pageview_timestamp: improvementResults.match.pageview?.timestamp || improvementResults.match.timestamp,
+                    matched_ip_type: improvementResults.match.matched_ip || 'unknown'
+                },
+                
+                // Store previous attribution if it existed
+                previous_attribution: conversionData.landing_page || null,
+                attributed_pageview_timestamp: improvementResults.match.pageview?.timestamp || improvementResults.match.timestamp || new Date().toISOString()
             };
             
             // Save back to Redis
@@ -784,6 +962,7 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
             return {
                 success: true,
                 updated_attribution: improvementResults.newAttribution,
+                previous_attribution: conversionData.landing_page || null,
                 improvement_type: improvementResults.improvementType,
                 attribution_method: improvementResults.attributionMethod,
                 priority_level: improvementResults.priorityLevel
@@ -798,39 +977,199 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
     }
 }
 
-// Find conversion key in Redis
-async function findConversionKey(conversion) {
-    // Try to find the conversion key by scanning
-    let cursor = '0';
-    
-    do {
-        const result = await redisRequest('scan', cursor, 'match', 'conversions:*', 'count', '1000');
-        if (result.result && result.result[1]) {
-            cursor = result.result[0];
-            const keys = result.result[1];
-            
-            for (const key of keys) {
-                try {
-                    const convResult = await redisRequest('get', key);
-                    if (convResult.result) {
-                        const convData = typeof convResult.result === 'string' ? 
-                            JSON.parse(convResult.result) : convResult.result;
-                        
-                        if (convData.email === conversion.email && 
-                            convData.timestamp === conversion.timestamp) {
-                            return key;
-                        }
-                    }
-                } catch (error) {
-                    continue;
-                }
-            }
-        } else {
-            break;
-        }
-    } while (cursor !== '0');
-    
-    return null;
+// Enhanced Process3 marking with version tracking
+async function markConversionAsProcess3Enhanced(conversion, attributionMethod) {
+    try {
+        const process3Key = `process3:${conversion.email}:${conversion.timestamp}`;
+        const process3Data = {
+            email: conversion.email,
+            timestamp: conversion.timestamp,
+            processed_at: new Date().toISOString(),
+            system: 'attribution_improvement_8tier_backwards_compatible',
+            version: '2.1',
+            attribution_method: attributionMethod,
+            processing_type: 'batch_reprocessing_enhanced'
+        };
+        
+        // Set with 30-day expiration
+        await redisRequest('setex', process3Key, 2592000, JSON.stringify(process3Data)); // 30 days
+    } catch (error) {
+        console.log(`   ⚠️ Could not mark ${conversion.email} as process3: ${error.message}`);
+    }
 }
 
-module.exports = { handler };
+// EXISTING FUNCTIONS (maintained for compatibility)
+
+// Fetch analytics data for past 7 days (same as original)
+async function fetchAnalyticsDataPast7Days() {
+    console.log('📊 Fetching analytics data for past 7 days...');
+    
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - 7);
+    
+    const earliestDate = new Date('2025-06-11');
+    if (startDate < earliestDate) {
+        startDate.setTime(earliestDate.getTime());
+    }
+    
+    const startDateStr = startDate.toISOString().split('T')[0];
+    const endDateStr = endDate.toISOString().split('T')[0];
+    
+    console.log(`📅 Safe date range: ${startDateStr} to ${endDateStr} (respecting data availability)`);
+    
+    const params = new URLSearchParams();
+    params.append('start_date', startDateStr);
+    params.append('end_date', endDateStr);
+    
+    const apiUrl = `https://trackingojoy.netlify.app/.netlify/functions/analytics?${params}`;
+    
+    const response = await fetch(apiUrl, {
+        headers: {
+            'X-API-Key': process.env.OJOY_API_KEY
+        }
+    });
+    
+    if (!response.ok) {
+        throw new Error(`Analytics API failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    console.log(`✅ Analytics data loaded for ${startDateStr} to ${endDateStr}:`);
+    console.log(`   📊 Total conversions: ${data.conversions?.length || 0}`);
+    console.log(`   📊 Total pageviews: ${data.page_views?.length || 0}`);
+    
+    return data;
+}
+
+// Get ALL conversions (same as original)
+function getAllConversions(conversions) {
+    if (!conversions || conversions.length === 0) {
+        console.log('❌ No conversions found in analytics data');
+        return [];
+    }
+    
+    const sortedConversions = conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    console.log(`📊 Found ${sortedConversions.length} total conversions for enhanced reprocessing evaluation`);
+    
+    return sortedConversions;
+}
+
+// Filter out conversions already marked as "process3"
+async function filterNonProcess3Conversions(allConversions) {
+    const nonProcess3Conversions = [];
+    let process3Count = 0;
+    
+    for (const conversion of allConversions) {
+        const process3Key = `process3:${conversion.email}:${conversion.timestamp}`;
+        
+        try {
+            const process3Data = await redisRequest('get', process3Key);
+            
+            if (process3Data) {
+                process3Count++;
+            } else {
+                nonProcess3Conversions.push(conversion);
+            }
+        } catch (error) {
+            // If we can't check status, assume not processed
+            nonProcess3Conversions.push(conversion);
+        }
+    }
+    
+    console.log(`📊 Process3 status: ${process3Count} already processed, ${nonProcess3Conversions.length} remaining`);
+    
+    return nonProcess3Conversions;
+}
+
+// Redis request helper (same as original)
+async function redisRequest(command, ...args) {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    
+    if (!url || !token) {
+        throw new Error('Missing Redis configuration');
+    }
+    
+    let response;
+    
+    try {
+        if ((command.toLowerCase() === 'set' || command.toLowerCase() === 'setex') && args.length >= 2) {
+            response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify([command, ...args])
+            });
+        } else {
+            const encodedArgs = args.map(arg => encodeURIComponent(arg));
+            const requestUrl = `${url}/${command}/${encodedArgs.join('/')}`;
+            
+            response = await fetch(requestUrl, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+        }
+        
+        if (!response.ok) {
+            if (response.status === 404) {
+                return null;
+            }
+            throw new Error(`Redis request failed: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        return data.result;
+        
+    } catch (error) {
+        throw error;
+    }
+}
+
+// Find conversion key in Redis (same as original)
+async function findConversionKey(conversion) {
+    try {
+        const patterns = [
+            `conversions:*${conversion.email}*`,
+            `conversions:${conversion.timestamp.split('T')[0]}*`,
+            `conversions:*`,
+            `conversion_${conversion.email}_*`,
+            `conv_${conversion.email}_*`,
+            `track_${conversion.email}_*`,
+            `*${conversion.email}*`
+        ];
+        
+        for (const pattern of patterns) {
+            try {
+                const keys = await redisRequest('keys', pattern);
+                if (keys && keys.length > 0) {
+                    for (const key of keys) {
+                        const data = await redisRequest('get', key);
+                        if (data) {
+                            const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+                            if (parsed.email === conversion.email && 
+                                Math.abs(new Date(parsed.timestamp) - new Date(conversion.timestamp)) < 60000) {
+                                return key;
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                continue;
+            }
+        }
+        
+        const newKey = `conversion_${conversion.email}_${Date.now()}`;
+        await redisRequest('set', newKey, JSON.stringify(conversion));
+        return newKey;
+        
+    } catch (error) {
+        console.error(`❌ Error finding conversion key for ${conversion.email}:`, error);
+        return null;
+    }
+}
