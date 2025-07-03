@@ -500,63 +500,88 @@ async function findAttributionByBothIPs(pageviewIP, conversionIP, originalTimest
       }
     }
     
-    // Method 2: Scan all attribution records for any matching IP
+    // Method 2: Scan all attribution records for any matching IP (using SCAN instead of KEYS)
     console.log('🔍 Fallback: Scanning all attribution records for IP matches...');
-    const attributionKeys = await redis('keys/attribution_*');
     
-    if (!attributionKeys?.result) {
-      console.log('❌ No attribution keys found in Redis');
-      return null;
-    }
+    // Use SCAN instead of KEYS to handle large datasets
+    let cursor = '0';
+    let totalScanned = 0;
+    let maxScans = 50; // Limit to prevent infinite loops
+    let scanCount = 0;
     
-    console.log(`🔍 Scanning ${attributionKeys.result.length} attribution keys...`);
-    
-    for (const key of attributionKeys.result) {
-      // Skip lookup keys, scan main data keys only
-      if (key.startsWith('attribution_ip_') || 
-          key.startsWith('attribution_session_') ||
-          key.startsWith('attribution_fp_') ||
-          key.startsWith('attribution_screen_') ||
-          key.startsWith('attribution_webgl_') ||
-          key.startsWith('attribution_geo_')) {
-        continue;
-      }
-      
+    do {
       try {
-        const data = await redis(`get/${key}`);
-        if (data?.result) {
-          const attribution = JSON.parse(data.result);
+        const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/100`);
+        
+        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+          console.log('⚠️ Invalid scan result, breaking');
+          break;
+        }
+        
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        totalScanned += keys.length;
+        scanCount++;
+        
+        console.log(`🔍 Scan ${scanCount}: Found ${keys.length} keys, cursor: ${cursor}, total: ${totalScanned}`);
+        
+        // Check each key in this batch
+        for (const key of keys) {
+          // Skip lookup keys, scan main data keys only
+          if (key.startsWith('attribution_ip_') || 
+              key.startsWith('attribution_session_') ||
+              key.startsWith('attribution_fp_') ||
+              key.startsWith('attribution_screen_') ||
+              key.startsWith('attribution_webgl_') ||
+              key.startsWith('attribution_geo_')) {
+            continue;
+          }
           
-          // Check if this attribution record matches any of our IPs
-          for (const { ip, type } of ipsToCheck) {
-            if (attribution.ip_address === ip) {
-              // Check timeframe (within 24 hours)
-              const timeDiff = Math.abs(new Date(originalTimestamp) - new Date(attribution.timestamp));
-              const oneDayMs = 24 * 60 * 60 * 1000;
+          try {
+            const data = await redis(`get/${key}`);
+            if (data?.result) {
+              const attribution = JSON.parse(data.result);
               
-              if (timeDiff < oneDayMs) {
-                console.log(`✅ Found matching attribution via ${type} IP scan:`, {
-                  key: key,
-                  matched_ip: ip,
-                  landing_page: attribution.landing_page,
-                  source: attribution.source
-                });
-                attribution.confidence = 'medium';
-                attribution.method = `${type}_ip_scan_match`;
-                attribution.matched_ip = ip;
-                attribution.ip_type = type;
-                return attribution;
+              // Check if this attribution record matches any of our IPs
+              for (const { ip, type } of ipsToCheck) {
+                if (attribution.ip_address === ip) {
+                  // Check timeframe (within 24 hours)
+                  const timeDiff = Math.abs(new Date(originalTimestamp) - new Date(attribution.timestamp));
+                  const oneDayMs = 24 * 60 * 60 * 1000;
+                  
+                  if (timeDiff < oneDayMs) {
+                    console.log(`✅ Found matching attribution via ${type} IP scan:`, {
+                      key: key,
+                      matched_ip: ip,
+                      landing_page: attribution.landing_page,
+                      source: attribution.source,
+                      scan_count: scanCount,
+                      total_scanned: totalScanned
+                    });
+                    attribution.confidence = 'medium';
+                    attribution.method = `${type}_ip_scan_match`;
+                    attribution.matched_ip = ip;
+                    attribution.ip_type = type;
+                    return attribution;
+                  }
+                }
               }
             }
+          } catch (parseError) {
+            // Skip malformed records
+            continue;
           }
         }
-      } catch (parseError) {
-        // Skip malformed records
-        continue;
+        
+      } catch (scanError) {
+        console.log(`❌ Scan error on iteration ${scanCount}:`, scanError.message);
+        break;
       }
-    }
+      
+    } while (cursor !== '0' && scanCount < maxScans);
     
-    console.log('❌ No matching attribution found for either IP');
+    console.log(`🔍 Scan complete: ${scanCount} iterations, ${totalScanned} keys total`);
+    console.log('❌ No matching attribution found for either IP after scanning');
     return null;
     
   } catch (error) {
