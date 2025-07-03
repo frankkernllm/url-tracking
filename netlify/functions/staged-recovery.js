@@ -413,28 +413,48 @@ async function clearStagingArea(event, headers) {
       };
     }
 
-    const stagingKeys = await redis('keys/recovery_staging:*');
+    // Use SCAN instead of KEYS to handle large datasets
+    let cursor = '0';
     let deleted = 0;
     let kept = 0;
+    let maxScans = 10;
+    let scanCount = 0;
 
-    if (stagingKeys?.result?.length) {
-      for (const key of stagingKeys.result) {
-        if (keep_applied) {
-          // Check if this recovery was applied
-          const data = await redis(`get/${key}`);
-          if (data?.result) {
-            const recovery = JSON.parse(data.result);
-            if (recovery.status === 'applied') {
-              kept++;
-              continue;
-            }
-          }
+    do {
+      try {
+        const scanResult = await redis(`scan/${cursor}/match/recovery_staging:*/count/50`);
+        
+        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+          break;
         }
         
-        await redis(`del/${key}`);
-        deleted++;
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        scanCount++;
+        
+        for (const key of keys) {
+          if (keep_applied) {
+            // Check if this recovery was applied
+            const data = await redis(`get/${key}`);
+            if (data?.result) {
+              const recovery = JSON.parse(data.result);
+              if (recovery.status === 'applied') {
+                kept++;
+                continue;
+              }
+            }
+          }
+          
+          await redis(`del/${key}`);
+          deleted++;
+        }
+        
+      } catch (scanError) {
+        console.log(`❌ Clear staging scan error:`, scanError.message);
+        break;
       }
-    }
+      
+    } while (cursor !== '0' && scanCount < maxScans);
 
     return {
       statusCode: 200,
@@ -592,23 +612,58 @@ async function findAttributionByBothIPs(pageviewIP, conversionIP, originalTimest
 
 async function findCurrentConversion(email, timestamp) {
   try {
-    const conversionKeys = await redis('keys/conversions:*');
+    // Use SCAN instead of KEYS to handle large datasets
+    let cursor = '0';
+    let totalScanned = 0;
+    let maxScans = 20; // Limit for conversion search
+    let scanCount = 0;
     
-    if (!conversionKeys?.result) return null;
-
-    for (const key of conversionKeys.result) {
-      const conversionData = await redis(`get/${key}`);
-      if (conversionData?.result) {
-        const conversion = JSON.parse(conversionData.result);
+    do {
+      try {
+        const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/50`);
         
-        if (conversion.email === email && conversion.timestamp === timestamp) {
-          conversion.key = key; // Store the key for later updates
-          return conversion;
+        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+          console.log('⚠️ Conversion scan: Invalid result, breaking');
+          break;
         }
+        
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        totalScanned += keys.length;
+        scanCount++;
+        
+        console.log(`🔍 Conversion scan ${scanCount}: Found ${keys.length} keys, total: ${totalScanned}`);
+        
+        // Check each conversion key
+        for (const key of keys) {
+          try {
+            const conversionData = await redis(`get/${key}`);
+            if (conversionData?.result) {
+              const conversion = JSON.parse(conversionData.result);
+              
+              if (conversion.email === email && conversion.timestamp === timestamp) {
+                conversion.key = key; // Store the key for later updates
+                console.log(`✅ Found conversion: ${email} in ${key}`);
+                return conversion;
+              }
+            }
+          } catch (parseError) {
+            // Skip malformed records
+            continue;
+          }
+        }
+        
+      } catch (scanError) {
+        console.log(`❌ Conversion scan error on iteration ${scanCount}:`, scanError.message);
+        break;
       }
-    }
+      
+    } while (cursor !== '0' && scanCount < maxScans);
     
+    console.log(`🔍 Conversion scan complete: ${scanCount} iterations, ${totalScanned} keys total`);
+    console.log(`❌ No conversion found for ${email}`);
     return null;
+    
   } catch (error) {
     console.error('❌ Error finding conversion:', error);
     return null;
@@ -675,5 +730,6 @@ async function addToStagingIndex(recoveryId, email) {
 }
 
 function encodeIPForKey(ip) {
-  return ip.replace(/:/g, '_');
+  // Replace both colons (IPv6) and dots (IPv4) with underscores
+  return ip.replace(/[:.]/g, '_');
 }
