@@ -1,34 +1,14 @@
 // Staged Recovery System - Safe Attribution Recovery with Review Process
 // Path: netlify/functions/staged-recovery.js
 
-exports.handler = async (event, context) => {
-  // Environment variable validation
-  const requiredEnvVars = [
-    'UPSTASH_REDIS_REST_URL',
-    'UPSTASH_REDIS_REST_TOKEN'
-  ];
-  
-  const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
-  if (missingEnvVars.length > 0) {
-    console.log('Missing environment variables:', missingEnvVars);
-    return {
-      statusCode: 500,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
-      },
-      body: JSON.stringify({ 
-        error: 'Configuration error',
-        missing: missingEnvVars
-      })
-    };
-  }
+// Global Redis helper - accessible to all functions
+let redis;
 
-  // Redis helper using Upstash REST API (same as track.js)
+function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-  const redis = async (command, timeoutMs = 5000) => {
+  
+  return async (command, timeoutMs = 5000) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
@@ -69,6 +49,34 @@ exports.handler = async (event, context) => {
       throw error;
     }
   };
+}
+
+exports.handler = async (event, context) => {
+  // Environment variable validation
+  const requiredEnvVars = [
+    'UPSTASH_REDIS_REST_URL',
+    'UPSTASH_REDIS_REST_TOKEN'
+  ];
+  
+  const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+  if (missingEnvVars.length > 0) {
+    console.log('Missing environment variables:', missingEnvVars);
+    return {
+      statusCode: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
+      },
+      body: JSON.stringify({ 
+        error: 'Configuration error',
+        missing: missingEnvVars
+      })
+    };
+  }
+
+  // Initialize Redis function
+  redis = initializeRedis();
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
@@ -119,10 +127,10 @@ async function stageRecovery(event, headers) {
     });
 
     // Attempt to find attribution using pageview IP
-    const attributionResult = await findAttributionByPageviewIP(pageviewIP, data.timestamp, redis);
+    const attributionResult = await findAttributionByPageviewIP(pageviewIP, data.timestamp);
     
     // Find the current conversion record (read-only)
-    const currentConversion = await findCurrentConversion(data.email, data.timestamp, redis);
+    const currentConversion = await findCurrentConversion(data.email, data.timestamp);
     
     if (attributionResult && currentConversion) {
       // Stage the recovery (don't update live data yet)
@@ -178,7 +186,7 @@ async function stageRecovery(event, headers) {
       await redis(`set/${stagingKey}/${encodeURIComponent(JSON.stringify(stagedRecovery))}`);
       
       // Add to staging index
-      await addToStagingIndex(stagedRecovery.recovery_id, data.email, redis);
+      await addToStagingIndex(stagedRecovery.recovery_id, data.email);
 
       console.log('✅ Recovery staged successfully');
 
@@ -224,7 +232,7 @@ async function stageRecovery(event, headers) {
 }
 
 // Review all staged recoveries
-async function reviewStagedRecoveries(event, headers, redis) {
+async function reviewStagedRecoveries(event, headers) {
   try {
     console.log('📋 Reviewing staged recoveries...');
     
@@ -307,7 +315,7 @@ async function reviewStagedRecoveries(event, headers, redis) {
 }
 
 // Apply a specific staged recovery to live data
-async function applyStagedRecovery(event, headers, redis) {
+async function applyStagedRecovery(event, headers) {
   try {
     const { recovery_id, approved_by } = JSON.parse(event.body);
     
@@ -384,7 +392,7 @@ async function applyStagedRecovery(event, headers, redis) {
 }
 
 // Clear staging area (for cleanup)
-async function clearStagingArea(event, headers, redis) {
+async function clearStagingArea(event, headers) {
   try {
     const { confirm, keep_applied } = JSON.parse(event.body || '{}');
     
@@ -442,7 +450,7 @@ async function clearStagingArea(event, headers, redis) {
 
 // Helper functions
 
-async function findAttributionByPageviewIP(pageviewIP, originalTimestamp, redis) {
+async function findAttributionByPageviewIP(pageviewIP, originalTimestamp) {
   try {
     if (!pageviewIP) return null;
     
@@ -498,7 +506,7 @@ async function findAttributionByPageviewIP(pageviewIP, originalTimestamp, redis)
   }
 }
 
-async function findCurrentConversion(email, timestamp, redis) {
+async function findCurrentConversion(email, timestamp) {
   try {
     const conversionKeys = await redis('keys/conversions:*');
     
@@ -570,7 +578,7 @@ function assessRiskLevel(currentConversion, attributionResult) {
   return 'high';
 }
 
-async function addToStagingIndex(recoveryId, email, redis) {
+async function addToStagingIndex(recoveryId, email) {
   try {
     const indexKey = 'recovery_staging_index';
     const indexEntry = { recovery_id: recoveryId, email: email, timestamp: new Date().toISOString() };
