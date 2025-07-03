@@ -119,10 +119,10 @@ async function stageRecovery(event, headers) {
     });
 
     // Attempt to find attribution using pageview IP
-    const attributionResult = await findAttributionByPageviewIP(pageviewIP, data.timestamp);
+    const attributionResult = await findAttributionByPageviewIP(pageviewIP, data.timestamp, redis);
     
     // Find the current conversion record (read-only)
-    const currentConversion = await findCurrentConversion(data.email, data.timestamp);
+    const currentConversion = await findCurrentConversion(data.email, data.timestamp, redis);
     
     if (attributionResult && currentConversion) {
       // Stage the recovery (don't update live data yet)
@@ -178,7 +178,7 @@ async function stageRecovery(event, headers) {
       await redis(`set/${stagingKey}/${encodeURIComponent(JSON.stringify(stagedRecovery))}`);
       
       // Add to staging index
-      await addToStagingIndex(stagedRecovery.recovery_id, data.email);
+      await addToStagingIndex(stagedRecovery.recovery_id, data.email, redis);
 
       console.log('✅ Recovery staged successfully');
 
@@ -224,7 +224,7 @@ async function stageRecovery(event, headers) {
 }
 
 // Review all staged recoveries
-async function reviewStagedRecoveries(event, headers) {
+async function reviewStagedRecoveries(event, headers, redis) {
   try {
     console.log('📋 Reviewing staged recoveries...');
     
@@ -307,7 +307,7 @@ async function reviewStagedRecoveries(event, headers) {
 }
 
 // Apply a specific staged recovery to live data
-async function applyStagedRecovery(event, headers) {
+async function applyStagedRecovery(event, headers, redis) {
   try {
     const { recovery_id, approved_by } = JSON.parse(event.body);
     
@@ -384,7 +384,7 @@ async function applyStagedRecovery(event, headers) {
 }
 
 // Clear staging area (for cleanup)
-async function clearStagingArea(event, headers) {
+async function clearStagingArea(event, headers, redis) {
   try {
     const { confirm, keep_applied } = JSON.parse(event.body || '{}');
     
@@ -442,7 +442,7 @@ async function clearStagingArea(event, headers) {
 
 // Helper functions
 
-async function findAttributionByPageviewIP(pageviewIP, originalTimestamp) {
+async function findAttributionByPageviewIP(pageviewIP, originalTimestamp, redis) {
   try {
     if (!pageviewIP) return null;
     
@@ -498,7 +498,7 @@ async function findAttributionByPageviewIP(pageviewIP, originalTimestamp) {
   }
 }
 
-async function findCurrentConversion(email, timestamp) {
+async function findCurrentConversion(email, timestamp, redis) {
   try {
     const conversionKeys = await redis('keys/conversions:*');
     
@@ -570,7 +570,7 @@ function assessRiskLevel(currentConversion, attributionResult) {
   return 'high';
 }
 
-async function addToStagingIndex(recoveryId, email) {
+async function addToStagingIndex(recoveryId, email, redis) {
   try {
     const indexKey = 'recovery_staging_index';
     const indexEntry = { recovery_id: recoveryId, email: email, timestamp: new Date().toISOString() };
