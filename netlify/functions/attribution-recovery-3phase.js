@@ -1,6 +1,6 @@
 exports.handler = async (event, context) => {
-    // ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v2.1: Backwards Compatible 8-Tier System
-    // Key Features: 1) 8-tier priority system, 2) Backwards compatibility, 3) Aggressive caching, 4) Smart batch sizing
+    // ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v3.0: Unattributed Only 8-Tier System
+    // Key Features: 1) 8-tier priority system, 2) Unattributed conversions only, 3) Aggressive caching, 4) Smart batch sizing
     
     const headers = {
         'Access-Control-Allow-Origin': '*',
@@ -14,8 +14,8 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        console.log('🔧 Starting ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v2.1 - Backwards Compatible');
-        console.log('⚡ Features: 8-tier priority system, backwards compatibility, aggressive caching, smart batching');
+        console.log('🔧 Starting ENHANCED ATTRIBUTION IMPROVEMENT SYSTEM v3.0 - Unattributed Only');
+        console.log('⚡ Features: 8-tier priority system, unattributed conversions only, aggressive caching, smart batching');
         
         // Enhanced timeout protection with more conservative timing
         const startTime = Date.now();
@@ -27,19 +27,19 @@ exports.handler = async (event, context) => {
         let geoDataCache = new Map();
         let cacheStats = { hits: 0, misses: 0, api_calls: 0, redis_hits: 0 };
         
-        // Step 1: Fetch analytics data from past 7 days (safe date range)
-        const analyticsData = await fetchAnalyticsDataPast7Days();
+        // Step 1: Fetch analytics data from past 3 days (focused date range)
+        const analyticsData = await fetchAnalyticsDataPast3Days();
         
-        // Step 2: Find all conversions (not just unattributed)
-        const allConversions = getAllConversions(analyticsData.conversions);
+        // Step 2: Find unattributed conversions only
+        const unattributedConversions = getUnattributedConversions(analyticsData.conversions);
         
-        if (allConversions.length === 0) {
+        if (unattributedConversions.length === 0) {
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'No conversions found in past 7 days',
+                    message: 'No unattributed conversions found in past 3 days',
                     results: { total: 0, processed: 0, remaining: 0 }
                 })
             };
@@ -47,24 +47,24 @@ exports.handler = async (event, context) => {
         
         console.log(`🔄 ENHANCED BATCH PROCESSING: Smart batch sizing (1-2 conversions) for max ${maxRunTime/1000} seconds`);
         
-        // Step 3: Get initial list of non-process3 conversions (ONCE at start)
-        console.log('🔍 Getting initial list of non-process3 conversions...');
-        let unprocessedConversions = await filterNonProcess3Conversions(allConversions);
+        // Step 3: Get initial list of non-process4 conversions (ONCE at start)
+        console.log('🔍 Getting initial list of non-process4 conversions...');
+        let unprocessedConversions = await filterNonProcess4Conversions(unattributedConversions);
         
         if (unprocessedConversions.length === 0) {
-            console.log('🎉 ALL CONVERSIONS ALREADY COMPLETED WITH ENHANCED SYSTEM!');
+            console.log('🎉 ALL UNATTRIBUTED CONVERSIONS ALREADY COMPLETED WITH ENHANCED SYSTEM!');
             return {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
                     success: true,
-                    message: 'All conversions already completed with enhanced attribution',
-                    progress: { total_conversions: allConversions.length, total_processed: allConversions.length, remaining_conversions: 0, status: 'ALL_COMPLETE' }
+                    message: 'All unattributed conversions already completed with enhanced attribution',
+                    progress: { total_conversions: unattributedConversions.length, total_processed: unattributedConversions.length, remaining_conversions: 0, status: 'ALL_COMPLETE' }
                 })
             };
         }
         
-        console.log(`📋 Found ${unprocessedConversions.length} non-process3 conversions (will process with smart batching)`);
+        console.log(`📋 Found ${unprocessedConversions.length} non-process4 unattributed conversions (will process with smart batching)`);
         console.log(`📊 Estimated processing time: ${Math.ceil(unprocessedConversions.length * 8)} seconds`);
         
         // Main processing loop - SMART batch sizing
@@ -85,7 +85,7 @@ exports.handler = async (event, context) => {
                 const nextConversion = unprocessedConversions[0];
                 const conversionData = extractConversionParameters(nextConversion);
                 
-                if (conversionData.has_enhanced_params || conversionData.conversion_age_days < 7) {
+                if (conversionData.has_enhanced_params || conversionData.conversion_age_days < 3) {
                     batchSize = 1; // Recent conversions with enhanced params need more processing
                 } else {
                     batchSize = Math.min(2, unprocessedConversions.length); // Older conversions might be faster
@@ -135,8 +135,8 @@ exports.handler = async (event, context) => {
                     }
                 }
                 
-                // Step 7: Mark as process3 with enhanced tracking
-                await markConversionAsProcess3Enhanced(conversionToProcess, improvementResults.attributionMethod);
+                // Step 7: Mark as process4 with enhanced tracking
+                await markConversionAsProcess4(conversionToProcess, improvementResults.attributionMethod);
                 
                 // Track this processed conversion
                 const conversionTime = Date.now() - conversionStartTime;
@@ -173,13 +173,13 @@ exports.handler = async (event, context) => {
         // Final status calculation
         const totalTime = Date.now() - startTime;
         const totalRemaining = unprocessedConversions.length;
-        const totalProcessed = allConversions.length - totalRemaining;
+        const totalProcessed = unattributedConversions.length - totalRemaining;
         const isComplete = totalRemaining === 0;
         
         console.log(`\n🏁 ENHANCED RUN COMPLETE:`);
         console.log(`   ⏱️  Total run time: ${totalTime/1000}s`);
         console.log(`   ✅ Processed in this run: ${processedInThisRun}`);
-        console.log(`   📊 Total processed overall: ${totalProcessed}/${allConversions.length}`);
+        console.log(`   📊 Total processed overall: ${totalProcessed}/${unattributedConversions.length}`);
         console.log(`   🔄 Remaining: ${totalRemaining}`);
         console.log(`   📊 Cache performance: ${cacheStats.hits}H/${cacheStats.misses}M/${cacheStats.api_calls}A/${cacheStats.redis_hits}R`);
         console.log(`   🎯 Status: ${isComplete ? 'ALL COMPLETE' : 'RUN AGAIN TO CONTINUE'}`);
@@ -187,11 +187,11 @@ exports.handler = async (event, context) => {
         // Generate enhanced summary message
         let summaryMessage;
         if (isComplete) {
-            summaryMessage = `🎉 ALL ${allConversions.length} CONVERSIONS COMPLETED! Enhanced attribution v2.1 processed ${processedInThisRun} conversions in final run.`;
+            summaryMessage = `🎉 ALL ${unattributedConversions.length} UNATTRIBUTED CONVERSIONS COMPLETED! Enhanced attribution v3.0 processed ${processedInThisRun} conversions in final run.`;
         } else if (processedInThisRun > 0) {
-            summaryMessage = `✅ Enhanced v2.1: Processed ${processedInThisRun} conversions (${totalRemaining} remaining). Cache efficiency: ${Math.round(cacheStats.hits / (cacheStats.hits + cacheStats.misses + 1) * 100)}%`;
+            summaryMessage = `✅ Enhanced v3.0: Processed ${processedInThisRun} unattributed conversions (${totalRemaining} remaining). Cache efficiency: ${Math.round(cacheStats.hits / (cacheStats.hits + cacheStats.misses + 1) * 100)}%`;
         } else {
-            summaryMessage = `⚠️ No conversions processed (may be near timeout limit). ${totalRemaining} conversions remaining.`;
+            summaryMessage = `⚠️ No unattributed conversions processed (may be near timeout limit). ${totalRemaining} unattributed conversions remaining.`;
         }
         
         return {
@@ -204,12 +204,12 @@ exports.handler = async (event, context) => {
                 processed_conversions: processedConversions,
                 message: summaryMessage,
                 progress: {
-                    total_conversions: allConversions.length,
+                    total_conversions: unattributedConversions.length,
                     total_processed: totalProcessed,
                     remaining_conversions: totalRemaining,
                     processed_this_batch: processedInThisRun,
                     status: isComplete ? 'ALL_COMPLETE' : 'CONTINUE',
-                    next_action: isComplete ? 'All conversions optimized with enhanced attribution!' : 'Run the function again to continue processing'
+                    next_action: isComplete ? 'All unattributed conversions optimized with enhanced attribution!' : 'Run the function again to continue processing'
                 },
                 performance: {
                     total_run_time_seconds: totalTime / 1000,
@@ -225,11 +225,11 @@ exports.handler = async (event, context) => {
                     }
                 },
                 enhancements: {
-                    version: '2.1',
-                    features: ['8_tier_priority_system', 'backwards_compatibility', 'aggressive_caching', 'smart_batch_sizing'],
-                    processing_method: 'enhanced_attribution_with_fallbacks'
+                    version: '3.0',
+                    features: ['8_tier_priority_system', 'unattributed_conversions_only', 'aggressive_caching', 'smart_batch_sizing'],
+                    processing_method: 'enhanced_attribution_unattributed_only'
                 },
-                date_range: 'Past 7 days (safe range)'
+                date_range: 'Past 3 days (unattributed conversions only)'
             })
         };
 
@@ -241,7 +241,7 @@ exports.handler = async (event, context) => {
             body: JSON.stringify({
                 error: 'Enhanced attribution improvement system failed',
                 details: error.message,
-                version: '2.1'
+                version: '3.0'
             })
         };
     }
@@ -928,7 +928,7 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
                 ...conversionData,
                 attribution_found: true,
                 landing_page: improvementResults.newAttribution,
-                source: improvementResults.match.pageview?.source || improvementResults.match.source || 'enhanced_v2_1',
+                source: improvementResults.match.pageview?.source || improvementResults.match.source || 'enhanced_v3_0',
                 utm_campaign: improvementResults.match.pageview?.utm_campaign || improvementResults.match.utm_campaign || conversionData.utm_campaign,
                 utm_medium: improvementResults.match.pageview?.utm_medium || improvementResults.match.utm_medium || conversionData.utm_medium,
                 referrer_url: improvementResults.match.pageview?.referrer_url || improvementResults.match.referrer_url || conversionData.referrer_url,
@@ -942,7 +942,7 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
                     score: improvementResults.match.score || 0,
                     time_difference_minutes: improvementResults.match.timeDiff || 0,
                     improved_at: new Date().toISOString(),
-                    system_version: '2.1',
+                    system_version: '3.0',
                     processing_path: improvementResults.analysis?.processing_path || 'unknown',
                     
                     // Attribution source metadata
@@ -977,36 +977,36 @@ async function updateConversionAttributionEnhanced(conversion, improvementResult
     }
 }
 
-// Enhanced Process3 marking with version tracking
-async function markConversionAsProcess3Enhanced(conversion, attributionMethod) {
+// Enhanced Process4 marking with version tracking
+async function markConversionAsProcess4(conversion, attributionMethod) {
     try {
-        const process3Key = `process3:${conversion.email}:${conversion.timestamp}`;
-        const process3Data = {
+        const process4Key = `process4:${conversion.email}:${conversion.timestamp}`;
+        const process4Data = {
             email: conversion.email,
             timestamp: conversion.timestamp,
             processed_at: new Date().toISOString(),
-            system: 'attribution_improvement_8tier_backwards_compatible',
-            version: '2.1',
+            system: 'attribution_improvement_8tier_unattributed_only',
+            version: '3.0',
             attribution_method: attributionMethod,
-            processing_type: 'batch_reprocessing_enhanced'
+            processing_type: 'batch_reprocessing_unattributed'
         };
         
         // Set with 30-day expiration
-        await redisRequest('setex', process3Key, 2592000, JSON.stringify(process3Data)); // 30 days
+        await redisRequest('setex', process4Key, 2592000, JSON.stringify(process4Data)); // 30 days
     } catch (error) {
-        console.log(`   ⚠️ Could not mark ${conversion.email} as process3: ${error.message}`);
+        console.log(`   ⚠️ Could not mark ${conversion.email} as process4: ${error.message}`);
     }
 }
 
-// EXISTING FUNCTIONS (maintained for compatibility)
+// UPDATED FUNCTIONS FOR V3.0
 
-// Fetch analytics data for past 7 days (same as original)
-async function fetchAnalyticsDataPast7Days() {
-    console.log('📊 Fetching analytics data for past 7 days...');
+// Fetch analytics data for past 3 days (changed from 7 days)
+async function fetchAnalyticsDataPast3Days() {
+    console.log('📊 Fetching analytics data for past 3 days...');
     
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setDate(endDate.getDate() - 7);
+    startDate.setDate(endDate.getDate() - 3);
     
     const earliestDate = new Date('2025-06-11');
     if (startDate < earliestDate) {
@@ -1016,7 +1016,7 @@ async function fetchAnalyticsDataPast7Days() {
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
     
-    console.log(`📅 Safe date range: ${startDateStr} to ${endDateStr} (respecting data availability)`);
+    console.log(`📅 Focused date range: ${startDateStr} to ${endDateStr} (3 days for unattributed conversions)`);
     
     const params = new URLSearchParams();
     params.append('start_date', startDateStr);
@@ -1042,45 +1042,56 @@ async function fetchAnalyticsDataPast7Days() {
     return data;
 }
 
-// Get ALL conversions (same as original)
-function getAllConversions(conversions) {
+// Get UNATTRIBUTED conversions only (changed from all conversions)
+function getUnattributedConversions(conversions) {
     if (!conversions || conversions.length === 0) {
         console.log('❌ No conversions found in analytics data');
         return [];
     }
     
-    const sortedConversions = conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    // Filter for only unattributed conversions
+    const unattributed = conversions.filter(conv => {
+        const hasNoAttribution = !conv.landing_page || 
+                                conv.landing_page === '' || 
+                                conv.landing_page === 'NO ATTRIBUTION' ||
+                                conv.landing_page === null ||
+                                conv.landing_page === undefined;
+        return hasNoAttribution;
+    });
     
-    console.log(`📊 Found ${sortedConversions.length} total conversions for enhanced reprocessing evaluation`);
+    const sortedUnattributed = unattributed.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     
-    return sortedConversions;
+    console.log(`📊 Found ${sortedUnattributed.length} unattributed conversions out of ${conversions.length} total conversions`);
+    console.log(`📊 Attribution status: ${conversions.length - sortedUnattributed.length} already have attribution, ${sortedUnattributed.length} need processing`);
+    
+    return sortedUnattributed;
 }
 
-// Filter out conversions already marked as "process3"
-async function filterNonProcess3Conversions(allConversions) {
-    const nonProcess3Conversions = [];
-    let process3Count = 0;
+// Filter out conversions already marked as "process4" (changed from process3)
+async function filterNonProcess4Conversions(allConversions) {
+    const nonProcess4Conversions = [];
+    let process4Count = 0;
     
     for (const conversion of allConversions) {
-        const process3Key = `process3:${conversion.email}:${conversion.timestamp}`;
+        const process4Key = `process4:${conversion.email}:${conversion.timestamp}`;
         
         try {
-            const process3Data = await redisRequest('get', process3Key);
+            const process4Data = await redisRequest('get', process4Key);
             
-            if (process3Data) {
-                process3Count++;
+            if (process4Data) {
+                process4Count++;
             } else {
-                nonProcess3Conversions.push(conversion);
+                nonProcess4Conversions.push(conversion);
             }
         } catch (error) {
             // If we can't check status, assume not processed
-            nonProcess3Conversions.push(conversion);
+            nonProcess4Conversions.push(conversion);
         }
     }
     
-    console.log(`📊 Process3 status: ${process3Count} already processed, ${nonProcess3Conversions.length} remaining`);
+    console.log(`📊 Process4 status: ${process4Count} already processed, ${nonProcess4Conversions.length} remaining`);
     
-    return nonProcess3Conversions;
+    return nonProcess4Conversions;
 }
 
 // Redis request helper (same as original)
