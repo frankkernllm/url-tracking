@@ -119,13 +119,30 @@ async function stageRecovery(event, headers) {
       order_id: data.order_id
     });
 
-    // Extract IPs using correct mapping
+    // Extract IPs using comprehensive mapping with fallbacks
     const pageviewIP = data.ip;
-    const conversionIP = data.checkoutview?.pageviewcheckout?.pageview?.ip || data.conversion_ip;
     
-    console.log('📍 Dual IP Analysis:', {
+    // Try multiple paths for the second IP
+    let conversionIP = data.checkoutview?.pageviewcheckout?.pageview?.ip;
+    
+    // Fallback paths if nested IP is missing
+    if (!conversionIP) {
+      conversionIP = data.customer?.ip_address || 
+                    data.customer?.ip || 
+                    data.user_ip || 
+                    data.client_ip || 
+                    data.conversion_ip ||
+                    data.customer_ip;
+    }
+    
+    console.log('📍 Comprehensive IP Analysis:', {
       pageview_ip: pageviewIP,
-      conversion_ip: conversionIP
+      conversion_ip: conversionIP,
+      nested_ip_path: data.checkoutview?.pageviewcheckout?.pageview?.ip,
+      customer_ip: data.customer?.ip_address,
+      has_checkoutview: !!data.checkoutview,
+      has_pageviewcheckout: !!data.checkoutview?.pageviewcheckout,
+      has_pageview: !!data.checkoutview?.pageviewcheckout?.pageview
     });
 
     // Attempt to find attribution using BOTH IPs
