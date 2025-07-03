@@ -1,9 +1,74 @@
 // Staged Recovery System - Safe Attribution Recovery with Review Process
 // Path: netlify/functions/staged-recovery.js
 
-const redis = require('./redis-client'); // Your existing Redis client
-
 exports.handler = async (event, context) => {
+  // Environment variable validation
+  const requiredEnvVars = [
+    'UPSTASH_REDIS_REST_URL',
+    'UPSTASH_REDIS_REST_TOKEN'
+  ];
+  
+  const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+  if (missingEnvVars.length > 0) {
+    console.log('Missing environment variables:', missingEnvVars);
+    return {
+      statusCode: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
+      },
+      body: JSON.stringify({ 
+        error: 'Configuration error',
+        missing: missingEnvVars
+      })
+    };
+  }
+
+  // Redis helper using Upstash REST API (same as track.js)
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const redis = async (command, timeoutMs = 5000) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+      console.log(`⏰ Redis timeout after ${timeoutMs}ms for command: ${command.split('/')[0]}`);
+    }, timeoutMs);
+    
+    try {
+      const response = await fetch(`${redisUrl}/${command}`, {
+        headers: { 
+          Authorization: `Bearer ${redisToken}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`❌ Redis HTTP error ${response.status}: ${errorText}`);
+        throw new Error(`Redis HTTP error: ${response.status} ${errorText}`);
+      }
+      
+      const result = await response.json();
+      console.log(`✅ Redis command success: ${command.split('/')[0]} -> ${JSON.stringify(result).substring(0, 100)}`);
+      
+      return result;
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      if (error.name === 'AbortError') {
+        console.log(`⏰ Redis command timed out: ${command.split('/')[0]}`);
+        throw new Error(`Redis timeout after ${timeoutMs}ms`);
+      }
+      
+      console.log(`❌ Redis command failed: ${command.split('/')[0]} - ${error.message}`);
+      throw error;
+    }
+  };
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
