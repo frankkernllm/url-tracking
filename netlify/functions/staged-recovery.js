@@ -777,6 +777,7 @@ async function addToStagingIndex(recoveryId, email) {
 }
 
 function encodeIPForKey(ip) {
-  // Replace both colons (IPv6) and dots (IPv4) with underscores
-  return ip.replace(/[:.]/g, '_');
+  // Based on scanner results, attribution keys keep dots for IPv4
+  // Only replace colons (IPv6) with underscores, keep dots for IPv4
+  return ip.replace(/:/g, '_');
 }
