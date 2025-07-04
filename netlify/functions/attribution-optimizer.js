@@ -44,7 +44,11 @@ const handler = async (event, context) => {
     }
     
     const totalImprovements = results.filter(r => r.improved).length;
+    const totalUpdated = results.filter(r => r.updated_in_redis).length;
     const executionTime = Date.now() - startTime;
+    
+    // Get optimization statistics
+    const optimizationStats = await getOptimizationStats(redis);
     
     return {
       statusCode: 200,
@@ -55,10 +59,13 @@ const handler = async (event, context) => {
           total_conversions: allConversions.length,
           processed_conversions: processedCount,
           improvements_found: totalImprovements,
+          records_updated: totalUpdated,
           improvement_rate: `${((totalImprovements / processedCount) * 100).toFixed(1)}%`,
-          execution_time_ms: executionTime
+          execution_time_ms: executionTime,
+          total_historical_optimizations: optimizationStats.total_optimizations
         },
         results: results,
+        optimization_stats: optimizationStats,
         next_batch_start: processedCount < allConversions.length ? processedCount : null
       })
     };
@@ -131,7 +138,7 @@ async function optimizeConversionAttribution(redis, conversion) {
   const currentAttribution = getCurrentAttribution(conversion);
   const shouldUpdate = shouldUpdateAttribution(currentAttribution, bestMatch);
   
-  return {
+  const result = {
     email: conversion.email,
     conversion_timestamp: conversion.timestamp,
     extracted_ips: extractedIPs,
@@ -143,6 +150,15 @@ async function optimizeConversionAttribution(redis, conversion) {
     old_attribution: shouldUpdate ? currentAttribution : null,
     new_attribution: shouldUpdate ? bestMatch : null
   };
+
+  // If improvement found, update the conversion record
+  if (shouldUpdate && bestMatch) {
+    await updateConversionRecord(redis, conversion, bestMatch, currentAttribution);
+    result.updated_in_redis = true;
+    console.log(`   💾 Updated conversion record in Redis`);
+  }
+
+  return result;
 }
 
 // Extract both pageview and conversion IPs from webhook data
@@ -341,6 +357,137 @@ function getImprovementType(oldAttribution, newAttribution) {
   }
   
   return 'SAME_CONFIDENCE';
+}
+
+// Update conversion record with optimized attribution
+async function updateConversionRecord(redis, conversion, newAttribution, oldAttribution) {
+  try {
+    const conversionKey = conversion._redis_key;
+    if (!conversionKey) {
+      throw new Error('No Redis key found for conversion');
+    }
+
+    console.log(`     💾 Updating conversion record: ${conversionKey}`);
+
+    // Create updated conversion record
+    const updatedConversion = {
+      ...conversion,
+      
+      // Update primary attribution fields
+      attribution_found: true,
+      attribution_method: newAttribution.method,
+      attribution_score: newAttribution.score,
+      landing_page: newAttribution.landing_page,
+      source: newAttribution.source,
+      campaign: newAttribution.utm_campaign || conversion.campaign,
+      medium: newAttribution.utm_medium || conversion.medium,
+      
+      // Add optimization metadata
+      attribution_optimized: true,
+      optimization_timestamp: new Date().toISOString(),
+      optimization_version: "24h_dual_ip_v1.0",
+      optimization_matched_ip: newAttribution.matched_ip,
+      optimization_time_diff_minutes: newAttribution.time_difference_minutes,
+      
+      // Preserve original attribution for audit trail
+      original_attribution: {
+        method: oldAttribution?.method || 'none',
+        score: oldAttribution?.score || 0,
+        landing_page: oldAttribution?.landing_page || null,
+        source: oldAttribution?.source || null,
+        preserved_at: new Date().toISOString()
+      }
+    };
+
+    // Store updated conversion record
+    await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(updatedConversion))}`);
+    
+    // Also create optimization log entry
+    await createOptimizationLogEntry(redis, conversion, newAttribution, oldAttribution);
+    
+    console.log(`     ✅ Successfully updated conversion record and created optimization log`);
+    
+  } catch (error) {
+    console.error(`     ❌ Failed to update conversion record:`, error);
+    throw error;
+  }
+}
+
+// Create optimization log entry for audit trail
+async function createOptimizationLogEntry(redis, conversion, newAttribution, oldAttribution) {
+  try {
+    const optimizationKey = `optimization:${conversion.email}:${Date.now()}`;
+    
+    const optimizationRecord = {
+      email: conversion.email,
+      conversion_timestamp: conversion.timestamp,
+      conversion_order_id: conversion.order_id,
+      optimization_timestamp: new Date().toISOString(),
+      optimization_version: "24h_dual_ip_v1.0",
+      
+      // Attribution change details
+      old_attribution: {
+        method: oldAttribution?.method || 'none',
+        score: oldAttribution?.score || 0,
+        landing_page: oldAttribution?.landing_page || null,
+        source: oldAttribution?.source || null
+      },
+      new_attribution: {
+        method: newAttribution.method,
+        score: newAttribution.score,
+        landing_page: newAttribution.landing_page,
+        source: newAttribution.source,
+        matched_ip: newAttribution.matched_ip,
+        pageview_timestamp: newAttribution.pageview_timestamp,
+        time_difference_minutes: newAttribution.time_difference_minutes
+      },
+      
+      // Improvement metrics
+      score_improvement: newAttribution.score - (oldAttribution?.score || 0),
+      improvement_type: getImprovementType(oldAttribution, newAttribution),
+      
+      // Process metadata
+      original_conversion_key: conversion._redis_key
+    };
+
+    await redis(`set/${optimizationKey}/${encodeURIComponent(JSON.stringify(optimizationRecord))}`);
+    
+  } catch (error) {
+    console.error(`     ⚠️ Failed to create optimization log entry:`, error);
+    // Don't throw - optimization logging failure shouldn't stop the main process
+  }
+}
+
+// Get optimization statistics
+async function getOptimizationStats(redis) {
+  try {
+    console.log('📊 Gathering optimization statistics...');
+    
+    // Scan for optimization log entries
+    let cursor = '0';
+    let optimizationKeys = [];
+    
+    do {
+      const result = await redis(`scan/${cursor}/match/optimization:*/count/1000`);
+      if (result.result && result.result[1]) {
+        cursor = result.result[0];
+        optimizationKeys = optimizationKeys.concat(result.result[1]);
+      } else {
+        break;
+      }
+    } while (cursor !== '0' && optimizationKeys.length < 5000);
+    
+    console.log(`📋 Found ${optimizationKeys.length} optimization records`);
+    
+    return {
+      total_optimizations: optimizationKeys.length,
+      optimization_keys: optimizationKeys.slice(0, 100) // Return sample for debugging
+    };
+    
+  } catch (error) {
+    console.error('❌ Failed to get optimization stats:', error);
+    return { total_optimizations: 0, error: error.message };
+  }
 }
 
 // Utility functions
