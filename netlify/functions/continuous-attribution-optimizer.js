@@ -229,80 +229,92 @@ async function optimizeSingleConversion(redis, conversion) {
   }
 }
 
-// Optimized pageview scanning for 24-hour window with unlimited key scanning
+// Optimized pageview scanning with aggressive time management
 async function getPageviewsInWindowOptimized(redis, windowStart, conversionTime) {
   try {
-    // Use time-based termination instead of key count limit for complete coverage
-    const maxScanTime = 20000; // 20 seconds max scanning time
+    // More aggressive time limit to stay well under 30-second Netlify limit
+    const maxScanTime = 15000; // 15 seconds max scanning time
     const scanStartTime = Date.now();
     const relevantPageviews = [];
     
-    console.log(`     🔍 Scanning ALL attribution keys for window (max 20 seconds)...`);
+    console.log(`     🔍 Scanning attribution keys for window (max 15 seconds)...`);
     
     let cursor = '0';
     let keysScanned = 0;
     let batchCount = 0;
     
     do {
-      // Check if we're approaching time limit
+      // Check time limit BEFORE each batch
       const elapsedTime = Date.now() - scanStartTime;
       if (elapsedTime >= maxScanTime) {
         console.log(`     ⏰ Time limit reached: ${elapsedTime}ms, stopping scan`);
         break;
       }
       
-      const result = await redis(`scan/${cursor}/match/attribution_*/count/300`);
+      // Smaller batches for better time control
+      const result = await redis(`scan/${cursor}/match/attribution_*/count/150`);
       
       if (result.result && result.result[1]) {
         cursor = result.result[0];
         const keys = result.result[1];
         batchCount++;
         
-        console.log(`     📦 Batch ${batchCount}: Processing ${keys.length} keys (${keysScanned} total scanned, ${relevantPageviews.length} pageviews found)`);
-        
-        // Process this batch of keys
-        const batchPageviews = await Promise.all(
-          keys.map(async (key) => {
-            try {
-              const data = await redis(`get/${key}`);
-              if (data.result) {
-                const parsed = JSON.parse(data.result);
-                const pageviewTime = new Date(parsed.timestamp);
-                
-                // Check if pageview is within our 24-hour window
-                if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
-                  return {
-                    key: key,
-                    timestamp: parsed.timestamp,
-                    ip_address: parsed.ip_address,
-                    landing_page: parsed.landing_page,
-                    source: parsed.source,
-                    utm_campaign: parsed.utm_campaign,
-                    utm_medium: parsed.utm_medium,
-                    utm_source: parsed.utm_source
-                  };
+        // Process smaller sub-batches to avoid Promise.all timeout
+        const subBatchSize = 50;
+        for (let i = 0; i < keys.length; i += subBatchSize) {
+          // Check time again during processing
+          const midElapsed = Date.now() - scanStartTime;
+          if (midElapsed >= maxScanTime) {
+            console.log(`     ⏰ Time limit during processing: ${midElapsed}ms, stopping`);
+            return relevantPageviews;
+          }
+          
+          const subBatch = keys.slice(i, i + subBatchSize);
+          
+          const batchPageviews = await Promise.all(
+            subBatch.map(async (key) => {
+              try {
+                const data = await redis(`get/${key}`);
+                if (data.result) {
+                  const parsed = JSON.parse(data.result);
+                  const pageviewTime = new Date(parsed.timestamp);
+                  
+                  // Check if pageview is within our 24-hour window
+                  if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+                    return {
+                      key: key,
+                      timestamp: parsed.timestamp,
+                      ip_address: parsed.ip_address,
+                      landing_page: parsed.landing_page,
+                      source: parsed.source,
+                      utm_campaign: parsed.utm_campaign,
+                      utm_medium: parsed.utm_medium,
+                      utm_source: parsed.utm_source
+                    };
+                  }
                 }
+                return null;
+              } catch (error) {
+                return null;
               }
-              return null;
-            } catch (error) {
-              return null;
-            }
-          })
-        );
-        
-        const validPageviews = batchPageviews.filter(pv => pv !== null);
-        relevantPageviews.push(...validPageviews);
-        keysScanned += keys.length;
-        
-        // Log progress every few batches
-        if (batchCount % 10 === 0) {
-          const elapsed = Date.now() - scanStartTime;
-          console.log(`     📊 Progress: ${keysScanned} keys scanned, ${relevantPageviews.length} pageviews found (${elapsed}ms elapsed)`);
+            })
+          );
+          
+          const validPageviews = batchPageviews.filter(pv => pv !== null);
+          relevantPageviews.push(...validPageviews);
         }
         
-        // Early termination only if we found a substantial number of pageviews AND have good matches
-        if (relevantPageviews.length >= 200) {
-          console.log(`     ✅ Early termination: found sufficient pageviews (${relevantPageviews.length})`);
+        keysScanned += keys.length;
+        
+        // Progress logging every 5 batches (less frequent)
+        if (batchCount % 5 === 0) {
+          const elapsed = Date.now() - scanStartTime;
+          console.log(`     📊 Batch ${batchCount}: ${keysScanned} keys, ${relevantPageviews.length} pageviews (${elapsed}ms)`);
+        }
+        
+        // Smart early termination: if we found good matches AND have decent coverage
+        if (relevantPageviews.length >= 150 && keysScanned >= 3000) {
+          console.log(`     ✅ Smart termination: sufficient coverage (${relevantPageviews.length} pageviews, ${keysScanned} keys)`);
           break;
         }
         
