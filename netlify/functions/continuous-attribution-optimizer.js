@@ -229,24 +229,36 @@ async function optimizeSingleConversion(redis, conversion) {
   }
 }
 
-// Optimized pageview scanning for 24-hour window
+// Optimized pageview scanning for 24-hour window with unlimited key scanning
 async function getPageviewsInWindowOptimized(redis, windowStart, conversionTime) {
   try {
-    // Use a more efficient approach: limit the scan and use early termination
-    const maxKeysToScan = 2000; // Limit to avoid timeout
+    // Use time-based termination instead of key count limit for complete coverage
+    const maxScanTime = 20000; // 20 seconds max scanning time
+    const scanStartTime = Date.now();
     const relevantPageviews = [];
     
-    console.log(`     🔍 Scanning up to ${maxKeysToScan} attribution keys for window...`);
+    console.log(`     🔍 Scanning ALL attribution keys for window (max 20 seconds)...`);
     
     let cursor = '0';
     let keysScanned = 0;
+    let batchCount = 0;
     
     do {
-      const result = await redis(`scan/${cursor}/match/attribution_*/count/200`);
+      // Check if we're approaching time limit
+      const elapsedTime = Date.now() - scanStartTime;
+      if (elapsedTime >= maxScanTime) {
+        console.log(`     ⏰ Time limit reached: ${elapsedTime}ms, stopping scan`);
+        break;
+      }
+      
+      const result = await redis(`scan/${cursor}/match/attribution_*/count/300`);
       
       if (result.result && result.result[1]) {
         cursor = result.result[0];
         const keys = result.result[1];
+        batchCount++;
+        
+        console.log(`     📦 Batch ${batchCount}: Processing ${keys.length} keys (${keysScanned} total scanned, ${relevantPageviews.length} pageviews found)`);
         
         // Process this batch of keys
         const batchPageviews = await Promise.all(
@@ -278,22 +290,35 @@ async function getPageviewsInWindowOptimized(redis, windowStart, conversionTime)
           })
         );
         
-        relevantPageviews.push(...batchPageviews.filter(pv => pv !== null));
+        const validPageviews = batchPageviews.filter(pv => pv !== null);
+        relevantPageviews.push(...validPageviews);
         keysScanned += keys.length;
         
-        // Early termination if we've scanned enough or found a good amount of pageviews
-        if (keysScanned >= maxKeysToScan || relevantPageviews.length >= 100) {
-          console.log(`     ⚠️ Early termination: scanned ${keysScanned} keys, found ${relevantPageviews.length} pageviews`);
+        // Log progress every few batches
+        if (batchCount % 10 === 0) {
+          const elapsed = Date.now() - scanStartTime;
+          console.log(`     📊 Progress: ${keysScanned} keys scanned, ${relevantPageviews.length} pageviews found (${elapsed}ms elapsed)`);
+        }
+        
+        // Early termination only if we found a substantial number of pageviews AND have good matches
+        if (relevantPageviews.length >= 200) {
+          console.log(`     ✅ Early termination: found sufficient pageviews (${relevantPageviews.length})`);
           break;
         }
         
       } else {
+        console.log(`     ⚠️ No more results at cursor ${cursor}`);
         break;
       }
       
     } while (cursor !== '0');
     
-    console.log(`     ✅ Scan complete: ${keysScanned} keys scanned, ${relevantPageviews.length} pageviews found`);
+    const totalElapsed = Date.now() - scanStartTime;
+    console.log(`     ✅ Scan complete: ${keysScanned} keys scanned, ${relevantPageviews.length} pageviews found in ${totalElapsed}ms`);
+    
+    // Sort pageviews by timestamp (most recent first) for better matching
+    relevantPageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
     return relevantPageviews;
     
   } catch (error) {
@@ -454,8 +479,102 @@ function getImprovementType(oldAttribution, newAttribution) {
 }
 
 async function updateConversionRecord(redis, conversion, bestMatch, currentAttribution) {
-  // Implementation from previous version
-  // Update conversion record with new attribution
+  try {
+    const conversionKey = conversion._redis_key;
+    if (!conversionKey) {
+      console.log(`     ⚠️ No Redis key found for conversion ${conversion.email}, skipping update`);
+      return;
+    }
+
+    console.log(`     💾 Updating conversion record: ${conversionKey}`);
+
+    // Create updated conversion record
+    const updatedConversion = {
+      ...conversion,
+      
+      // Update primary attribution fields
+      attribution_found: true,
+      attribution_method: bestMatch.method,
+      attribution_score: bestMatch.score,
+      landing_page: bestMatch.landing_page,
+      source: bestMatch.source,
+      campaign: bestMatch.utm_campaign || conversion.campaign,
+      medium: bestMatch.utm_medium || conversion.medium,
+      
+      // Add optimization metadata
+      attribution_optimized: true,
+      optimization_timestamp: new Date().toISOString(),
+      optimization_version: "24h_unlimited_scan_v1.0",
+      optimization_matched_ip: bestMatch.matched_ip,
+      optimization_time_diff_minutes: bestMatch.time_difference_minutes,
+      
+      // Preserve original attribution for audit trail
+      original_attribution: {
+        method: currentAttribution?.method || 'none',
+        score: currentAttribution?.score || 0,
+        landing_page: currentAttribution?.landing_page || null,
+        source: currentAttribution?.source || null,
+        preserved_at: new Date().toISOString()
+      }
+    };
+
+    // Store updated conversion record
+    await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(updatedConversion))}`);
+    
+    // Also create optimization log entry
+    await createOptimizationLogEntry(redis, conversion, bestMatch, currentAttribution);
+    
+    console.log(`     ✅ Successfully updated conversion record and created optimization log`);
+    
+  } catch (error) {
+    console.error(`     ❌ Failed to update conversion record:`, error);
+    throw error;
+  }
+}
+
+// Create optimization log entry for audit trail
+async function createOptimizationLogEntry(redis, conversion, newAttribution, oldAttribution) {
+  try {
+    const optimizationKey = `optimization:${conversion.email}:${Date.now()}`;
+    
+    const optimizationRecord = {
+      email: conversion.email,
+      conversion_timestamp: conversion.timestamp,
+      conversion_order_id: conversion.order_id,
+      optimization_timestamp: new Date().toISOString(),
+      optimization_version: "24h_unlimited_scan_v1.0",
+      
+      // Attribution change details
+      old_attribution: {
+        method: oldAttribution?.method || 'none',
+        score: oldAttribution?.score || 0,
+        landing_page: oldAttribution?.landing_page || null,
+        source: oldAttribution?.source || null
+      },
+      new_attribution: {
+        method: newAttribution.method,
+        score: newAttribution.score,
+        landing_page: newAttribution.landing_page,
+        source: newAttribution.source,
+        matched_ip: newAttribution.matched_ip,
+        pageview_timestamp: newAttribution.pageview_timestamp,
+        time_difference_minutes: newAttribution.time_difference_minutes
+      },
+      
+      // Improvement metrics
+      score_improvement: newAttribution.score - (oldAttribution?.score || 0),
+      improvement_type: getImprovementType(oldAttribution, newAttribution),
+      
+      // Process metadata
+      original_conversion_key: conversion._redis_key
+    };
+
+    await redis(`set/${optimizationKey}/${encodeURIComponent(JSON.stringify(optimizationRecord))}`);
+    
+  } catch (error) {
+    console.error(`     ⚠️ Failed to create optimization log entry:`, error);
+    // Don't throw - optimization logging failure shouldn't stop the main process
+  }
 }
 
 async function initializeRedis() {
