@@ -1,8 +1,16 @@
-// Staged Recovery System - Updated for Clean CSV Data with Timeout Protection and Reprocessing
+// Staged Recovery System - Updated for Clean CSV Data with Caching and SECOND Reprocessing Pass
 // Path: netlify/functions/staged-recovery.js
 
 // Global Redis helper - accessible to all functions
 let redis;
+
+// Global cache for pageviews (stored in memory during processing session)
+let pageviewCache = new Map();
+let cacheStats = {
+  hits: 0,
+  misses: 0,
+  total_pageviews_cached: 0
+};
 
 function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
@@ -109,20 +117,20 @@ exports.handler = async (event, context) => {
   };
 };
 
-// Stage a recovery without updating live data - UPDATED FOR REPROCESSING
+// Stage a recovery without updating live data - UPDATED FOR SECOND REPROCESSING PASS
 async function stageRecovery(event, headers) {
   try {
     const data = JSON.parse(event.body);
     
-    console.log('🔄 REPROCESSING for improved attribution:', {
+    console.log('🔄 SECOND REPROCESSING PASS for comprehensive attribution:', {
       email: data.email,
       order_id: data.order_id
     });
 
-    // Check if this conversion has already been RE-PROCESSED (not just processed)
-    const alreadyReprocessed = await checkIfAlreadyReprocessed(data.email, data.timestamp);
-    if (alreadyReprocessed) {
-      console.log(`⏭️ Conversion already RE-PROCESSED: ${data.email}`);
+    // Check if this conversion has already been processed in THIS second pass
+    const alreadyReprocessed2 = await checkIfAlreadyReprocessed2(data.email, data.timestamp);
+    if (alreadyReprocessed2) {
+      console.log(`⏭️ Conversion already processed in SECOND PASS: ${data.email}`);
       return {
         statusCode: 200,
         headers,
@@ -130,32 +138,39 @@ async function stageRecovery(event, headers) {
           success: true,
           staged: false,
           already_processed: true,
-          already_reprocessed: true,
-          existing_recovery_id: alreadyReprocessed.recovery_id,
-          message: 'Conversion already re-processed with improved system - skipping'
+          already_reprocessed_2: true,
+          existing_recovery_id: alreadyReprocessed2.recovery_id,
+          message: 'Conversion already processed in second reprocessing pass - skipping'
         })
       };
     }
 
-    // Log if this conversion was processed before (but we're reprocessing it now)
+    // Log previous processing status (but don't skip - process anyway)
     const previouslyProcessed = await checkIfAlreadyProcessed(data.email, data.timestamp);
-    if (previouslyProcessed) {
-      console.log(`🔄 REPROCESSING previously processed conversion: ${data.email} (improving attribution)`);
+    const previouslyReprocessed = await checkIfAlreadyReprocessed(data.email, data.timestamp);
+    
+    if (previouslyReprocessed) {
+      console.log(`🔄 SECOND PASS: Previously reprocessed conversion: ${data.email} (comprehensive re-evaluation)`);
+    } else if (previouslyProcessed) {
+      console.log(`🔄 SECOND PASS: Previously processed conversion: ${data.email} (first reprocessing)`);
+    } else {
+      console.log(`🔄 SECOND PASS: New conversion: ${data.email} (first time processing)`);
     }
 
     // SIMPLIFIED IP extraction for clean CSV data
     const pageviewIP = data.pageview_ip;
     const conversionIP = data.conversion_ip;
     
-    console.log('📍 Clean IP Analysis:', {
+    console.log('📍 Clean IP Analysis (Second Pass):', {
       pageview_ip: pageviewIP,
       conversion_ip: conversionIP,
       has_both_ips: !!(pageviewIP && conversionIP),
       ips_are_same: pageviewIP === conversionIP,
-      reprocessing: !!previouslyProcessed
+      previous_processing: !!previouslyProcessed,
+      previous_reprocessing: !!previouslyReprocessed
     });
 
-    // Attempt to find attribution using 24-hour window approach
+    // Attempt to find attribution using 24-hour window approach with caching
     const attributionResult = await findAttributionByBothIPsWithTimeout(
       pageviewIP, 
       conversionIP, 
@@ -175,22 +190,24 @@ async function stageRecovery(event, headers) {
       utm_campaign: null,
       utm_source: null,
       utm_medium: null,
-      // Mark as reprocessing attempt
-      reprocessing_attempt: true,
-      previously_processed: !!previouslyProcessed
+      // Mark as second reprocessing attempt
+      reprocessing_attempt: 2,
+      previously_processed: !!previouslyProcessed,
+      previously_reprocessed: !!previouslyReprocessed
     };
     
     if (attributionResult) {
       // Stage the recovery (don't update live data yet)
       const stagedRecovery = {
         // Recovery metadata
-        recovery_id: `reprocess_${Date.now()}_${data.email.replace('@', '_at_')}`,
+        recovery_id: `reprocess2_${Date.now()}_${data.email.replace('@', '_at_')}`,
         timestamp: new Date().toISOString(),
         status: 'staged',
         
-        // Mark this as a reprocessing recovery
-        reprocessing: true,
+        // Mark this as a second reprocessing recovery
+        reprocessing: 2,
         previously_processed: !!previouslyProcessed,
+        previously_reprocessed: !!previouslyReprocessed,
         
         // Original data (mock for CSV)
         original_conversion: mockConversion,
@@ -223,7 +240,7 @@ async function stageRecovery(event, headers) {
         },
         
         // Technical details
-        recovery_method: 'dual_ip_24h_window_reprocess',
+        recovery_method: 'dual_ip_24h_window_reprocess_2',
         pageview_ip: pageviewIP,
         conversion_ip: conversionIP,
         matched_ip: attributionResult.matched_ip,
@@ -243,10 +260,10 @@ async function stageRecovery(event, headers) {
       // Add to staging index
       await addToStagingIndex(stagedRecovery.recovery_id, data.email);
 
-      // Mark as RE-PROCESSED for resume capability
-      await markAsReprocessed(data.email, data.timestamp, stagedRecovery.recovery_id, true);
+      // Mark as processed in SECOND REPROCESSING PASS
+      await markAsReprocessed2(data.email, data.timestamp, stagedRecovery.recovery_id, true);
 
-      console.log('✅ Recovery staged successfully (REPROCESSED)');
+      console.log('✅ Recovery staged successfully (SECOND REPROCESSING PASS)');
 
       return {
         statusCode: 200,
@@ -254,7 +271,7 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: true,
-          reprocessed: true,
+          reprocessed: 2,
           recovery_id: stagedRecovery.recovery_id,
           attribution_found: true,
           matched_ip: attributionResult.matched_ip,
@@ -263,15 +280,15 @@ async function stageRecovery(event, headers) {
           needs_review: stagedRecovery.needs_review,
           risk_level: stagedRecovery.risk_level,
           proposed_changes: stagedRecovery.proposed_changes,
-          message: `Recovery staged successfully using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before conversion) [REPROCESSED]`
+          message: `Recovery staged successfully using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before conversion) [SECOND REPROCESSING PASS]`
         })
       };
 
     } else {
-      console.log('❌ No attribution found for either IP in 24-hour window (REPROCESSED)');
+      console.log('❌ No attribution found for either IP in 24-hour window (SECOND REPROCESSING PASS)');
       
-      // Mark as RE-PROCESSED even if no attribution found (for resume capability)
-      await markAsReprocessed(data.email, data.timestamp, null, false);
+      // Mark as processed in SECOND REPROCESSING PASS even if no attribution found
+      await markAsReprocessed2(data.email, data.timestamp, null, false);
       
       return {
         statusCode: 200,
@@ -279,10 +296,10 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: false,
-          reprocessed: true,
+          reprocessed: 2,
           attribution_found: false,
           conversion_found: true, // We always have CSV data
-          message: 'No recovery possible - no attribution found for either pageview or conversion IP within 24-hour window [REPROCESSED]'
+          message: 'No recovery possible - no attribution found for either pageview or conversion IP within 24-hour window [SECOND REPROCESSING PASS]'
         })
       };
     }
@@ -294,6 +311,284 @@ async function stageRecovery(event, headers) {
       headers,
       body: JSON.stringify({ error: 'Staging failed', message: error.message })
     };
+  }
+}
+
+// Enhanced find attribution with intelligent caching
+async function findAttributionByBothIPsWithTimeout(pageviewIP, conversionIP, originalTimestamp) {
+  try {
+    console.log('🔍 24-Hour Window Attribution Search with Caching:', {
+      pageview_ip: pageviewIP,
+      conversion_ip: conversionIP,
+      conversion_time: originalTimestamp
+    });
+    
+    const ipsToCheck = [];
+    
+    // Add both IPs to check list (remove duplicates)
+    if (pageviewIP) ipsToCheck.push({ ip: pageviewIP, type: 'pageview' });
+    if (conversionIP && conversionIP !== pageviewIP) {
+      ipsToCheck.push({ ip: conversionIP, type: 'conversion' });
+    }
+    
+    console.log(`🎯 Will check ${ipsToCheck.length} unique IP(s) for attribution data`);
+    
+    // Method 1: Try direct IP lookup keys first (fastest)
+    for (const { ip, type } of ipsToCheck) {
+      console.log(`🔍 Trying direct lookup for ${type} IP: ${ip}`);
+      
+      const ipKey = `attribution_ip_${encodeIPForKey(ip)}`;
+      let lookupResult = await redis(`get/${ipKey}`);
+      
+      if (lookupResult?.result) {
+        console.log(`✅ Found attribution via ${type} IP lookup key`);
+        const mainKey = lookupResult.result;
+        const attributionData = await redis(`get/${mainKey}`);
+        if (attributionData?.result) {
+          const attribution = JSON.parse(attributionData.result);
+          
+          // Verify it's within 24-hour window
+          const conversionTime = new Date(originalTimestamp);
+          const pageviewTime = new Date(attribution.timestamp);
+          const timeDiff = conversionTime - pageviewTime;
+          const twentyFourHours = 24 * 60 * 60 * 1000;
+          
+          if (timeDiff >= 0 && timeDiff <= twentyFourHours) {
+            attribution.confidence = 'high';
+            attribution.method = `${type}_ip_lookup_key`;
+            attribution.matched_ip = ip;
+            attribution.ip_type = type;
+            attribution.time_diff_minutes = Math.round(timeDiff / (1000 * 60));
+            console.log(`✅ Direct match within 24h window: ${attribution.time_diff_minutes} minutes before conversion`);
+            return attribution;
+          } else {
+            console.log(`⏰ Direct match found but outside 24h window: ${Math.round(timeDiff / (1000 * 60 * 60))} hours`);
+          }
+        }
+      }
+    }
+    
+    // Method 2: 24-hour window pageview scanning with caching
+    console.log('🔍 Scanning pageviews within 24-hour window (with caching)...');
+    
+    const conversionTime = new Date(originalTimestamp);
+    const windowStart = new Date(conversionTime.getTime() - (24 * 60 * 60 * 1000));
+    
+    console.log(`📅 24-hour window: ${windowStart.toISOString()} to ${conversionTime.toISOString()}`);
+    
+    const pageviewsInWindow = await getCachedPageviewsInTimeWindow(windowStart, conversionTime);
+    
+    if (pageviewsInWindow.length === 0) {
+      console.log('❌ No pageviews found in 24-hour window');
+      return null;
+    }
+    
+    console.log(`📊 Found ${pageviewsInWindow.length} pageviews in 24-hour window (cache stats: ${cacheStats.hits} hits, ${cacheStats.misses} misses)`);
+    
+    // Search pageviews for IP matches
+    for (const pageview of pageviewsInWindow) {
+      for (const { ip, type } of ipsToCheck) {
+        if (pageview.ip_address === ip) {
+          const timeDiff = conversionTime - new Date(pageview.timestamp);
+          const timeDiffMinutes = Math.round(timeDiff / (1000 * 60));
+          
+          console.log(`🎯 IP MATCH in 24h window! ${type} IP: ${ip}`);
+          console.log(`   Time difference: ${timeDiffMinutes} minutes before conversion`);
+          console.log(`   Landing page: ${pageview.landing_page}`);
+          console.log(`   Source: ${pageview.source}`);
+          
+          return {
+            ...pageview,
+            confidence: 'high',
+            method: `${type}_ip_24h_window_match`,
+            matched_ip: ip,
+            ip_type: type,
+            time_diff_minutes: timeDiffMinutes
+          };
+        }
+      }
+    }
+    
+    console.log('❌ No IP matches found in 24-hour window pageviews');
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error in 24-hour window attribution search:', error);
+    return null;
+  }
+}
+
+// Cached pageview retrieval with intelligent time window management
+async function getCachedPageviewsInTimeWindow(windowStart, windowEnd) {
+  // Create cache key based on date (cache by day for efficiency)
+  const startDate = windowStart.toISOString().split('T')[0]; // YYYY-MM-DD
+  const endDate = windowEnd.toISOString().split('T')[0];
+  
+  // Generate list of dates we need to check (usually 1-2 days for 24h window)
+  const datesNeeded = [];
+  let currentDate = new Date(startDate);
+  const finalDate = new Date(endDate);
+  
+  while (currentDate <= finalDate) {
+    datesNeeded.push(currentDate.toISOString().split('T')[0]);
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  console.log(`📅 Need pageviews for dates: ${datesNeeded.join(', ')}`);
+  
+  let allPageviews = [];
+  
+  // Check cache for each date needed
+  for (const date of datesNeeded) {
+    if (pageviewCache.has(date)) {
+      // Cache hit
+      cacheStats.hits++;
+      const cachedPageviews = pageviewCache.get(date);
+      allPageviews = allPageviews.concat(cachedPageviews);
+      console.log(`💾 Cache HIT for ${date}: ${cachedPageviews.length} pageviews`);
+    } else {
+      // Cache miss - need to fetch and cache this date
+      cacheStats.misses++;
+      console.log(`🔍 Cache MISS for ${date}: scanning Redis...`);
+      
+      const datePageviews = await scanPageviewsForDate(date);
+      pageviewCache.set(date, datePageviews);
+      allPageviews = allPageviews.concat(datePageviews);
+      cacheStats.total_pageviews_cached += datePageviews.length;
+      
+      console.log(`💾 Cached ${datePageviews.length} pageviews for ${date}`);
+    }
+  }
+  
+  // Filter to exact time window
+  const filteredPageviews = allPageviews.filter(pageview => {
+    const pageviewTime = new Date(pageview.timestamp);
+    return pageviewTime >= windowStart && pageviewTime <= windowEnd;
+  });
+  
+  console.log(`📊 Cache Summary: ${cacheStats.hits} hits, ${cacheStats.misses} misses, ${cacheStats.total_pageviews_cached} total cached`);
+  console.log(`🎯 Filtered to ${filteredPageviews.length} pageviews in exact time window`);
+  
+  // Sort pageviews by timestamp (most recent first)
+  filteredPageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  return filteredPageviews;
+}
+
+// Scan and cache pageviews for a specific date
+async function scanPageviewsForDate(date) {
+  const pageviews = [];
+  const startTime = Date.now();
+  const maxScanTime = 120000; // 2 minutes max for comprehensive scanning (you only have ~600/day)
+  
+  try {
+    console.log(`🔍 Comprehensive scan for date: ${date}`);
+    
+    let cursor = '0';
+    let totalScanned = 0;
+    let maxIterations = 200; // Increased for comprehensive coverage
+    let iterationCount = 0;
+    
+    do {
+      // Check timeout before each scan
+      const elapsed = Date.now() - startTime;
+      if (elapsed > maxScanTime) {
+        console.log(`⏰ Comprehensive scan timeout after ${elapsed}ms, ${totalScanned} keys scanned`);
+        break;
+      }
+      
+      if (iterationCount >= maxIterations) {
+        console.log(`🔄 Reached max iterations (${maxIterations}), stopping scan`);
+        break;
+      }
+      
+      try {
+        const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/100`); // Increased batch size
+        
+        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+          break;
+        }
+        
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        totalScanned += keys.length;
+        iterationCount++;
+        
+        // Process keys in batches
+        const batchSize = 50; // Increased for efficiency
+        for (let i = 0; i < keys.length; i += batchSize) {
+          // Check timeout during batch processing
+          if (Date.now() - startTime > maxScanTime) {
+            console.log(`⏰ Timeout during batch processing`);
+            return pageviews;
+          }
+          
+          const batch = keys.slice(i, i + batchSize);
+          
+          // Skip lookup keys to focus on main pageview data
+          const mainKeys = batch.filter(key => 
+            !key.includes('_ip_') && 
+            !key.includes('_session_') && 
+            !key.includes('_fp_') && 
+            !key.includes('_screen_') && 
+            !key.includes('_webgl_') && 
+            !key.includes('_geo_')
+          );
+          
+          for (const key of mainKeys) {
+            try {
+              const data = await redis(`get/${key}`);
+              if (data?.result) {
+                const pageview = JSON.parse(data.result);
+                
+                // Check if pageview is for our target date
+                if (pageview.timestamp && pageview.ip_address) {
+                  const pageviewDate = pageview.timestamp.split('T')[0]; // YYYY-MM-DD
+                  
+                  if (pageviewDate === date) {
+                    pageviews.push({
+                      timestamp: pageview.timestamp,
+                      ip_address: pageview.ip_address,
+                      landing_page: pageview.landing_page,
+                      source: pageview.source,
+                      utm_campaign: pageview.utm_campaign,
+                      utm_medium: pageview.utm_medium,
+                      utm_source: pageview.utm_source,
+                      utm_term: pageview.utm_term,
+                      utm_content: pageview.utm_content,
+                      redis_key: key
+                    });
+                  }
+                }
+              }
+            } catch (parseError) {
+              // Skip malformed records
+              continue;
+            }
+          }
+        }
+        
+        // Log progress every 20 iterations
+        if (iterationCount % 20 === 0) {
+          const elapsed = Date.now() - startTime;
+          console.log(`📊 Date ${date} - Iteration ${iterationCount}: ${totalScanned} keys scanned, ${pageviews.length} pageviews found (${elapsed}ms)`);
+        }
+        
+      } catch (scanError) {
+        console.log(`❌ Scan error on iteration ${iterationCount}:`, scanError.message);
+        break;
+      }
+      
+    } while (cursor !== '0' && Date.now() - startTime < maxScanTime && iterationCount < maxIterations);
+    
+    const totalElapsed = Date.now() - startTime;
+    console.log(`✅ Date ${date} scan complete: ${totalScanned} keys scanned, ${pageviews.length} pageviews found in ${totalElapsed}ms`);
+    
+    return pageviews;
+    
+  } catch (error) {
+    console.error(`❌ Error scanning pageviews for date ${date}:`, error);
+    return pageviews; // Return what we found so far
   }
 }
 
@@ -403,10 +698,10 @@ async function reviewStagedRecoveries(event, headers) {
   }
 }
 
-// Get global progress for resume capability - UPDATED FOR REPROCESSING
+// Get global progress for resume capability - UPDATED FOR SECOND REPROCESSING
 async function getGlobalProgress(event, headers) {
   try {
-    console.log('📊 Getting global progress (including reprocessing)...');
+    console.log('📊 Getting global progress (including second reprocessing pass)...');
     
     // Get original progress
     const globalProgressKey = 'recovery_global_progress';
@@ -425,7 +720,7 @@ async function getGlobalProgress(event, headers) {
       originalProgress = JSON.parse(originalProgressData.result);
     }
     
-    // Get reprocessing progress
+    // Get first reprocessing progress
     const reprocessProgressKey = 'recovery_reprocessing_progress';
     const reprocessProgressData = await redis(`get/${reprocessProgressKey}`);
     
@@ -442,21 +737,39 @@ async function getGlobalProgress(event, headers) {
       reprocessProgress = JSON.parse(reprocessProgressData.result);
     }
     
+    // Get second reprocessing progress
+    const reprocess2ProgressKey = 'recovery_reprocessing_2_progress';
+    const reprocess2ProgressData = await redis(`get/${reprocess2ProgressKey}`);
+    
+    let reprocess2Progress = {
+      total_reprocessed_2: 0,
+      attribution_found: 0,
+      no_attribution: 0,
+      started_at: null,
+      last_updated: null,
+      last_reprocessed_2_email: null
+    };
+    
+    if (reprocess2ProgressData?.result) {
+      reprocess2Progress = JSON.parse(reprocess2ProgressData.result);
+    }
+    
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        progress: reprocessProgress.total_reprocessed > 0 ? reprocessProgress : originalProgress,
+        progress: reprocess2Progress.total_reprocessed_2 > 0 ? reprocess2Progress : 
+                  reprocessProgress.total_reprocessed > 0 ? reprocessProgress : originalProgress,
         reprocessing_progress: reprocessProgress,
-        attribution_rate: reprocessProgress.total_reprocessed > 0 
-          ? `${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%`
-          : originalProgress.total_processed > 0 
-            ? `${((originalProgress.attribution_found / originalProgress.total_processed) * 100).toFixed(1)}%`
-            : '0%',
-        reprocessing_attribution_rate: reprocessProgress.total_reprocessed > 0 
-          ? `${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%`
-          : '0%'
+        reprocessing_2_progress: reprocess2Progress,
+        attribution_rate: reprocess2Progress.total_reprocessed_2 > 0 
+          ? `${((reprocess2Progress.attribution_found / reprocess2Progress.total_reprocessed_2) * 100).toFixed(1)}%`
+          : reprocessProgress.total_reprocessed > 0 
+            ? `${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%`
+            : originalProgress.total_processed > 0 
+              ? `${((originalProgress.attribution_found / originalProgress.total_processed) * 100).toFixed(1)}%`
+              : '0%'
       })
     };
     
@@ -628,230 +941,6 @@ async function clearStagingArea(event, headers) {
   }
 }
 
-// Find attribution using 24-hour window approach with timeout protection
-async function findAttributionByBothIPsWithTimeout(pageviewIP, conversionIP, originalTimestamp) {
-  try {
-    console.log('🔍 24-Hour Window Attribution Search:', {
-      pageview_ip: pageviewIP,
-      conversion_ip: conversionIP,
-      conversion_time: originalTimestamp
-    });
-    
-    const ipsToCheck = [];
-    
-    // Add both IPs to check list (remove duplicates)
-    if (pageviewIP) ipsToCheck.push({ ip: pageviewIP, type: 'pageview' });
-    if (conversionIP && conversionIP !== pageviewIP) {
-      ipsToCheck.push({ ip: conversionIP, type: 'conversion' });
-    }
-    
-    console.log(`🎯 Will check ${ipsToCheck.length} unique IP(s) for attribution data`);
-    
-    // Method 1: Try direct IP lookup keys first (fastest)
-    for (const { ip, type } of ipsToCheck) {
-      console.log(`🔍 Trying direct lookup for ${type} IP: ${ip}`);
-      
-      const ipKey = `attribution_ip_${encodeIPForKey(ip)}`;
-      let lookupResult = await redis(`get/${ipKey}`);
-      
-      if (lookupResult?.result) {
-        console.log(`✅ Found attribution via ${type} IP lookup key`);
-        const mainKey = lookupResult.result;
-        const attributionData = await redis(`get/${mainKey}`);
-        if (attributionData?.result) {
-          const attribution = JSON.parse(attributionData.result);
-          
-          // Verify it's within 24-hour window
-          const conversionTime = new Date(originalTimestamp);
-          const pageviewTime = new Date(attribution.timestamp);
-          const timeDiff = conversionTime - pageviewTime;
-          const twentyFourHours = 24 * 60 * 60 * 1000;
-          
-          if (timeDiff >= 0 && timeDiff <= twentyFourHours) {
-            attribution.confidence = 'high';
-            attribution.method = `${type}_ip_lookup_key`;
-            attribution.matched_ip = ip;
-            attribution.ip_type = type;
-            attribution.time_diff_minutes = Math.round(timeDiff / (1000 * 60));
-            console.log(`✅ Direct match within 24h window: ${attribution.time_diff_minutes} minutes before conversion`);
-            return attribution;
-          } else {
-            console.log(`⏰ Direct match found but outside 24h window: ${Math.round(timeDiff / (1000 * 60 * 60))} hours`);
-          }
-        }
-      }
-    }
-    
-    // Method 2: 24-hour window pageview scanning
-    console.log('🔍 Scanning pageviews within 24-hour window...');
-    
-    const conversionTime = new Date(originalTimestamp);
-    const windowStart = new Date(conversionTime.getTime() - (24 * 60 * 60 * 1000));
-    
-    console.log(`📅 24-hour window: ${windowStart.toISOString()} to ${conversionTime.toISOString()}`);
-    
-    const pageviewsInWindow = await getPageviewsInTimeWindow(windowStart, conversionTime);
-    
-    if (pageviewsInWindow.length === 0) {
-      console.log('❌ No pageviews found in 24-hour window');
-      return null;
-    }
-    
-    console.log(`📊 Found ${pageviewsInWindow.length} pageviews in 24-hour window`);
-    
-    // Search pageviews for IP matches
-    for (const pageview of pageviewsInWindow) {
-      for (const { ip, type } of ipsToCheck) {
-        if (pageview.ip_address === ip) {
-          const timeDiff = conversionTime - new Date(pageview.timestamp);
-          const timeDiffMinutes = Math.round(timeDiff / (1000 * 60));
-          
-          console.log(`🎯 IP MATCH in 24h window! ${type} IP: ${ip}`);
-          console.log(`   Time difference: ${timeDiffMinutes} minutes before conversion`);
-          console.log(`   Landing page: ${pageview.landing_page}`);
-          console.log(`   Source: ${pageview.source}`);
-          
-          return {
-            ...pageview,
-            confidence: 'high',
-            method: `${type}_ip_24h_window_match`,
-            matched_ip: ip,
-            ip_type: type,
-            time_diff_minutes: timeDiffMinutes
-          };
-        }
-      }
-    }
-    
-    console.log('❌ No IP matches found in 24-hour window pageviews');
-    return null;
-    
-  } catch (error) {
-    console.error('❌ Error in 24-hour window attribution search:', error);
-    return null;
-  }
-}
-
-// Get pageviews within specific time window with timeout protection
-async function getPageviewsInTimeWindow(windowStart, windowEnd) {
-  const pageviews = [];
-  const startTime = Date.now();
-  const maxScanTime = 15000; // 15 seconds max for pageview scanning
-  
-  try {
-    console.log('🔍 Scanning for pageviews in time window...');
-    
-    let cursor = '0';
-    let totalScanned = 0;
-    let maxIterations = 20; // Limit iterations
-    let iterationCount = 0;
-    
-    do {
-      // Check timeout before each scan
-      const elapsed = Date.now() - startTime;
-      if (elapsed > maxScanTime) {
-        console.log(`⏰ Pageview scan timeout after ${elapsed}ms, ${totalScanned} keys scanned`);
-        break;
-      }
-      
-      if (iterationCount >= maxIterations) {
-        console.log(`🔄 Reached max iterations (${maxIterations}), stopping scan`);
-        break;
-      }
-      
-      try {
-        const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/50`);
-        
-        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-          break;
-        }
-        
-        cursor = scanResult.result[0];
-        const keys = scanResult.result[1] || [];
-        totalScanned += keys.length;
-        iterationCount++;
-        
-        // Process keys in smaller batches to manage memory and time
-        const batchSize = 20;
-        for (let i = 0; i < keys.length; i += batchSize) {
-          // Check timeout during batch processing
-          if (Date.now() - startTime > maxScanTime) {
-            console.log(`⏰ Timeout during batch processing`);
-            return pageviews;
-          }
-          
-          const batch = keys.slice(i, i + batchSize);
-          
-          // Skip lookup keys to focus on main pageview data
-          const mainKeys = batch.filter(key => 
-            !key.includes('_ip_') && 
-            !key.includes('_session_') && 
-            !key.includes('_fp_') && 
-            !key.includes('_screen_') && 
-            !key.includes('_webgl_') && 
-            !key.includes('_geo_')
-          );
-          
-          for (const key of mainKeys) {
-            try {
-              const data = await redis(`get/${key}`);
-              if (data?.result) {
-                const pageview = JSON.parse(data.result);
-                
-                // Check if pageview is within our time window
-                if (pageview.timestamp && pageview.ip_address) {
-                  const pageviewTime = new Date(pageview.timestamp);
-                  
-                  if (pageviewTime >= windowStart && pageviewTime <= windowEnd) {
-                    pageviews.push({
-                      timestamp: pageview.timestamp,
-                      ip_address: pageview.ip_address,
-                      landing_page: pageview.landing_page,
-                      source: pageview.source,
-                      utm_campaign: pageview.utm_campaign,
-                      utm_medium: pageview.utm_medium,
-                      utm_source: pageview.utm_source,
-                      utm_term: pageview.utm_term,
-                      utm_content: pageview.utm_content,
-                      redis_key: key
-                    });
-                  }
-                }
-              }
-            } catch (parseError) {
-              // Skip malformed records
-              continue;
-            }
-          }
-        }
-        
-        // Log progress every 5 iterations
-        if (iterationCount % 5 === 0) {
-          const elapsed = Date.now() - startTime;
-          console.log(`📊 Iteration ${iterationCount}: ${totalScanned} keys scanned, ${pageviews.length} pageviews found (${elapsed}ms)`);
-        }
-        
-      } catch (scanError) {
-        console.log(`❌ Scan error on iteration ${iterationCount}:`, scanError.message);
-        break;
-      }
-      
-    } while (cursor !== '0' && Date.now() - startTime < maxScanTime && iterationCount < maxIterations);
-    
-    const totalElapsed = Date.now() - startTime;
-    console.log(`✅ Pageview scan complete: ${totalScanned} keys scanned, ${pageviews.length} pageviews found in ${totalElapsed}ms`);
-    
-    // Sort pageviews by timestamp (most recent first)
-    pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
-    return pageviews;
-    
-  } catch (error) {
-    console.error('❌ Error scanning pageviews in time window:', error);
-    return pageviews; // Return what we found so far
-  }
-}
-
 function shouldFlagForReview(currentConversion, attributionResult) {
   // Flag for review if:
   
@@ -996,7 +1085,7 @@ async function updateGlobalProgress(email, attributionFound) {
   }
 }
 
-// NEW: Check if a conversion has already been RE-PROCESSED
+// Check if a conversion has already been RE-PROCESSED (first pass)
 async function checkIfAlreadyReprocessed(email, timestamp) {
   try {
     const reprocessKey = `recovery_reprocess:${email}:${timestamp}`;
@@ -1015,69 +1104,88 @@ async function checkIfAlreadyReprocessed(email, timestamp) {
   }
 }
 
-// NEW: Mark a conversion as RE-PROCESSED (separate from original processing)
-async function markAsReprocessed(email, timestamp, recoveryId, attributionFound) {
+// NEW: Check if a conversion has already been processed in SECOND REPROCESSING PASS
+async function checkIfAlreadyReprocessed2(email, timestamp) {
   try {
-    const reprocessKey = `recovery_reprocess:${email}:${timestamp}`;
-    const reprocessEntry = {
-      email: email,
-      timestamp: timestamp,
-      reprocessed_at: new Date().toISOString(),
-      recovery_id: recoveryId,
-      attribution_found: attributionFound,
-      status: 'reprocessed',
-      reprocessing_pass: 'dual_ip_improvement'
-    };
+    const reprocess2Key = `recovery_reprocess_2:${email}:${timestamp}`;
+    const reprocess2Data = await redis(`get/${reprocess2Key}`);
     
-    await redis(`set/${reprocessKey}/${encodeURIComponent(JSON.stringify(reprocessEntry))}`);
-    console.log(`✅ Marked ${email} as RE-PROCESSED (attribution: ${attributionFound ? 'found' : 'not found'})`);
+    if (reprocess2Data?.result) {
+      const reprocess2 = JSON.parse(reprocess2Data.result);
+      console.log(`📋 Found existing SECOND REPROCESS for ${email}: ${reprocess2.recovery_id || 'no attribution found'}`);
+      return reprocess2;
+    }
     
-    // Also update reprocessing progress counter
-    await updateReprocessingProgress(email, attributionFound);
-    
+    return null;
   } catch (error) {
-    console.log(`⚠️ Error marking ${email} as reprocessed:`, error.message);
+    console.log(`⚠️ Error checking second reprocess status for ${email}:`, error.message);
+    return null;
   }
 }
 
-// NEW: Update reprocessing progress statistics (separate from original progress)
-async function updateReprocessingProgress(email, attributionFound) {
+// NEW: Mark a conversion as processed in SECOND REPROCESSING PASS
+async function markAsReprocessed2(email, timestamp, recoveryId, attributionFound) {
   try {
-    const reprocessProgressKey = 'recovery_reprocessing_progress';
-    const progressData = await redis(`get/${reprocessProgressKey}`);
+    const reprocess2Key = `recovery_reprocess_2:${email}:${timestamp}`;
+    const reprocess2Entry = {
+      email: email,
+      timestamp: timestamp,
+      reprocessed_2_at: new Date().toISOString(),
+      recovery_id: recoveryId,
+      attribution_found: attributionFound,
+      status: 'reprocessed_2',
+      reprocessing_pass: 'dual_ip_comprehensive_second_pass'
+    };
     
-    let reprocessProgress = {
-      total_reprocessed: 0,
+    await redis(`set/${reprocess2Key}/${encodeURIComponent(JSON.stringify(reprocess2Entry))}`);
+    console.log(`✅ Marked ${email} as SECOND REPROCESSED (attribution: ${attributionFound ? 'found' : 'not found'})`);
+    
+    // Also update second reprocessing progress counter
+    await updateReprocessing2Progress(email, attributionFound);
+    
+  } catch (error) {
+    console.log(`⚠️ Error marking ${email} as second reprocessed:`, error.message);
+  }
+}
+
+// NEW: Update second reprocessing progress statistics
+async function updateReprocessing2Progress(email, attributionFound) {
+  try {
+    const reprocess2ProgressKey = 'recovery_reprocessing_2_progress';
+    const progressData = await redis(`get/${reprocess2ProgressKey}`);
+    
+    let reprocess2Progress = {
+      total_reprocessed_2: 0,
       attribution_found: 0,
       no_attribution: 0,
       started_at: new Date().toISOString(),
       last_updated: new Date().toISOString(),
-      reprocessing_reason: 'dual_ip_improvement_pass'
+      reprocessing_reason: 'dual_ip_comprehensive_second_pass'
     };
     
     if (progressData?.result) {
-      reprocessProgress = JSON.parse(progressData.result);
+      reprocess2Progress = JSON.parse(progressData.result);
     }
     
-    reprocessProgress.total_reprocessed++;
-    reprocessProgress.last_updated = new Date().toISOString();
-    reprocessProgress.last_reprocessed_email = email;
+    reprocess2Progress.total_reprocessed_2++;
+    reprocess2Progress.last_updated = new Date().toISOString();
+    reprocess2Progress.last_reprocessed_2_email = email;
     
     if (attributionFound) {
-      reprocessProgress.attribution_found++;
+      reprocess2Progress.attribution_found++;
     } else {
-      reprocessProgress.no_attribution++;
+      reprocess2Progress.no_attribution++;
     }
     
-    await redis(`set/${reprocessProgressKey}/${encodeURIComponent(JSON.stringify(reprocessProgress))}`);
+    await redis(`set/${reprocess2ProgressKey}/${encodeURIComponent(JSON.stringify(reprocess2Progress))}`);
     
     // Log progress every 10 conversions
-    if (reprocessProgress.total_reprocessed % 10 === 0) {
-      console.log(`🔄 REPROCESSING Progress: ${reprocessProgress.total_reprocessed} reprocessed, ${reprocessProgress.attribution_found} with attribution (${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%)`);
+    if (reprocess2Progress.total_reprocessed_2 % 10 === 0) {
+      console.log(`🔄 SECOND REPROCESSING Progress: ${reprocess2Progress.total_reprocessed_2} reprocessed, ${reprocess2Progress.attribution_found} with attribution (${((reprocess2Progress.attribution_found / reprocess2Progress.total_reprocessed_2) * 100).toFixed(1)}%)`);
     }
     
   } catch (error) {
-    console.log('⚠️ Error updating reprocessing progress:', error.message);
+    console.log('⚠️ Error updating second reprocessing progress:', error.message);
   }
 }
 
