@@ -1,6 +1,5 @@
-// Staged Recovery System - Safe Attribution Recovery with Review Process
+// Staged Recovery System - Updated for Clean CSV Data with Timeout Protection
 // Path: netlify/functions/staged-recovery.js
-// NO EXTERNAL DEPENDENCIES - Uses only built-in Node.js modules
 
 // Global Redis helper - accessible to all functions
 let redis;
@@ -34,7 +33,6 @@ function initializeRedis() {
       }
       
       const result = await response.json();
-      console.log(`✅ Redis command success: ${command.split('/')[0]} -> ${JSON.stringify(result).substring(0, 100)}`);
       
       return result;
       
@@ -96,6 +94,8 @@ exports.handler = async (event, context) => {
     return await stageRecovery(event, headers);
   } else if (event.httpMethod === 'GET' && path === 'review-staged') {
     return await reviewStagedRecoveries(event, headers);
+  } else if (event.httpMethod === 'GET' && path === 'global-progress') {
+    return await getGlobalProgress(event, headers);
   } else if (event.httpMethod === 'POST' && path === 'apply-recovery') {
     return await applyStagedRecovery(event, headers);
   } else if (event.httpMethod === 'POST' && path === 'clear-staging') {
@@ -109,49 +109,67 @@ exports.handler = async (event, context) => {
   };
 };
 
-// Stage a recovery without updating live data
+// Stage a recovery without updating live data - UPDATED WITH PROGRESS TRACKING
 async function stageRecovery(event, headers) {
   try {
     const data = JSON.parse(event.body);
     
-    console.log('🎭 Staging recovery for:', {
+    console.log('🎭 Staging recovery for clean CSV data:', {
       email: data.email,
       order_id: data.order_id
     });
 
-    // Extract IPs using comprehensive mapping with fallbacks
-    const pageviewIP = data.ip;
-    
-    // Try multiple paths for the second IP
-    let conversionIP = data.checkoutview?.pageviewcheckout?.pageview?.ip;
-    
-    // Fallback paths if nested IP is missing
-    if (!conversionIP) {
-      conversionIP = data.customer?.ip_address || 
-                    data.customer?.ip || 
-                    data.user_ip || 
-                    data.client_ip || 
-                    data.conversion_ip ||
-                    data.customer_ip;
+    // Check if this conversion has already been processed (resume capability)
+    const alreadyProcessed = await checkIfAlreadyProcessed(data.email, data.timestamp);
+    if (alreadyProcessed) {
+      console.log(`⏭️ Conversion already processed: ${data.email}`);
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          staged: false,
+          already_processed: true,
+          existing_recovery_id: alreadyProcessed.recovery_id,
+          message: 'Conversion already processed - skipping to maintain resume capability'
+        })
+      };
     }
+
+    // SIMPLIFIED IP extraction for clean CSV data
+    const pageviewIP = data.pageview_ip;
+    const conversionIP = data.conversion_ip;
     
-    console.log('📍 Comprehensive IP Analysis:', {
+    console.log('📍 Clean IP Analysis:', {
       pageview_ip: pageviewIP,
       conversion_ip: conversionIP,
-      nested_ip_path: data.checkoutview?.pageviewcheckout?.pageview?.ip,
-      customer_ip: data.customer?.ip_address,
-      has_checkoutview: !!data.checkoutview,
-      has_pageviewcheckout: !!data.checkoutview?.pageviewcheckout,
-      has_pageview: !!data.checkoutview?.pageviewcheckout?.pageview
+      has_both_ips: !!(pageviewIP && conversionIP),
+      ips_are_same: pageviewIP === conversionIP
     });
 
-    // Attempt to find attribution using BOTH IPs
-    const attributionResult = await findAttributionByBothIPs(pageviewIP, conversionIP, data.timestamp);
+    // Attempt to find attribution using 24-hour window approach
+    const attributionResult = await findAttributionByBothIPsWithTimeout(
+      pageviewIP, 
+      conversionIP, 
+      data.timestamp
+    );
     
-    // Find the current conversion record (read-only)
-    const currentConversion = await findCurrentConversion(data.email, data.timestamp);
+    // For CSV data, we create a mock conversion record since we don't look up existing ones
+    const mockConversion = {
+      email: data.email,
+      timestamp: data.timestamp,
+      order_id: data.order_id,
+      source_file: data.source_file || 'csv',
+      csv_row_number: data.csv_row_number,
+      // Assume minimal current attribution for CSV data
+      landing_page: null,
+      source: 'direct',
+      utm_campaign: null,
+      utm_source: null,
+      utm_medium: null
+    };
     
-    if (attributionResult && currentConversion) {
+    if (attributionResult) {
       // Stage the recovery (don't update live data yet)
       const stagedRecovery = {
         // Recovery metadata
@@ -159,8 +177,8 @@ async function stageRecovery(event, headers) {
         timestamp: new Date().toISOString(),
         status: 'staged',
         
-        // Original data
-        original_conversion: currentConversion,
+        // Original data (mock for CSV)
+        original_conversion: mockConversion,
         
         // What would be recovered
         recovered_attribution: attributionResult,
@@ -168,38 +186,39 @@ async function stageRecovery(event, headers) {
         // Proposed changes
         proposed_changes: {
           landing_page: {
-            current: currentConversion.landing_page,
+            current: mockConversion.landing_page,
             proposed: attributionResult.landing_page
           },
           source: {
-            current: currentConversion.source,
+            current: mockConversion.source,
             proposed: attributionResult.source
           },
           utm_campaign: {
-            current: currentConversion.utm_campaign,
+            current: mockConversion.utm_campaign,
             proposed: attributionResult.utm_campaign
           },
           utm_source: {
-            current: currentConversion.utm_source,
+            current: mockConversion.utm_source,
             proposed: attributionResult.utm_source
           },
           utm_medium: {
-            current: currentConversion.utm_medium,
+            current: mockConversion.utm_medium,
             proposed: attributionResult.utm_medium
           }
         },
         
         // Technical details
-        recovery_method: 'dual_ip_match',
+        recovery_method: 'dual_ip_24h_window',
         pageview_ip: pageviewIP,
         conversion_ip: conversionIP,
         matched_ip: attributionResult.matched_ip,
         matched_ip_type: attributionResult.ip_type,
         attribution_confidence: attributionResult.confidence || 'medium',
+        time_diff_minutes: attributionResult.time_diff_minutes,
         
         // Validation flags
-        needs_review: shouldFlagForReview(currentConversion, attributionResult),
-        risk_level: assessRiskLevel(currentConversion, attributionResult)
+        needs_review: shouldFlagForReview(mockConversion, attributionResult),
+        risk_level: assessRiskLevel(mockConversion, attributionResult)
       };
 
       // Store in staging area
@@ -208,6 +227,9 @@ async function stageRecovery(event, headers) {
       
       // Add to staging index
       await addToStagingIndex(stagedRecovery.recovery_id, data.email);
+
+      // Mark as processed for resume capability
+      await markAsProcessed(data.email, data.timestamp, stagedRecovery.recovery_id, true);
 
       console.log('✅ Recovery staged successfully');
 
@@ -221,15 +243,19 @@ async function stageRecovery(event, headers) {
           attribution_found: true,
           matched_ip: attributionResult.matched_ip,
           matched_ip_type: attributionResult.ip_type,
+          time_diff_minutes: attributionResult.time_diff_minutes,
           needs_review: stagedRecovery.needs_review,
           risk_level: stagedRecovery.risk_level,
           proposed_changes: stagedRecovery.proposed_changes,
-          message: `Recovery staged successfully using ${attributionResult.ip_type} IP - review before applying`
+          message: `Recovery staged successfully using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before conversion)`
         })
       };
 
     } else {
-      console.log('❌ No attribution found or conversion not found');
+      console.log('❌ No attribution found for either IP in 24-hour window');
+      
+      // Mark as processed even if no attribution found (for resume capability)
+      await markAsProcessed(data.email, data.timestamp, null, false);
       
       return {
         statusCode: 200,
@@ -237,9 +263,9 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: false,
-          attribution_found: !!attributionResult,
-          conversion_found: !!currentConversion,
-          message: 'No recovery possible - no attribution found for either pageview or conversion IP, or conversion not found'
+          attribution_found: false,
+          conversion_found: true, // We always have CSV data
+          message: 'No recovery possible - no attribution found for either pageview or conversion IP within 24-hour window'
         })
       };
     }
@@ -254,7 +280,7 @@ async function stageRecovery(event, headers) {
   }
 }
 
-// Review all staged recoveries
+// Review all staged recoveries (unchanged)
 async function reviewStagedRecoveries(event, headers) {
   try {
     console.log('📋 Reviewing staged recoveries...');
@@ -360,7 +386,50 @@ async function reviewStagedRecoveries(event, headers) {
   }
 }
 
-// Apply a specific staged recovery to live data
+// Get global progress for resume capability
+async function getGlobalProgress(event, headers) {
+  try {
+    console.log('📊 Getting global progress...');
+    
+    const globalProgressKey = 'recovery_global_progress';
+    const progressData = await redis(`get/${globalProgressKey}`);
+    
+    let globalProgress = {
+      total_processed: 0,
+      attribution_found: 0,
+      no_attribution: 0,
+      started_at: null,
+      last_updated: null,
+      last_processed_email: null
+    };
+    
+    if (progressData?.result) {
+      globalProgress = JSON.parse(progressData.result);
+    }
+    
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        success: true,
+        progress: globalProgress,
+        attribution_rate: globalProgress.total_processed > 0 
+          ? `${((globalProgress.attribution_found / globalProgress.total_processed) * 100).toFixed(1)}%`
+          : '0%'
+      })
+    };
+    
+  } catch (error) {
+    console.error('❌ Global progress error:', error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ error: 'Failed to get global progress', message: error.message })
+    };
+  }
+}
+
+// Apply a specific staged recovery to live data (unchanged)
 async function applyStagedRecovery(event, headers) {
   try {
     const { recovery_id, approved_by } = JSON.parse(event.body);
@@ -381,9 +450,9 @@ async function applyStagedRecovery(event, headers) {
 
     const stagedRecovery = JSON.parse(stagingData.result);
     
-    // Apply the recovery to live data
-    const conversionKey = stagedRecovery.original_conversion.key;
-    const updatedConversion = {
+    // For CSV data, we create a new conversion record instead of updating existing one
+    const conversionKey = `conversions:${stagedRecovery.original_conversion.timestamp}:${Date.now()}`;
+    const newConversion = {
       ...stagedRecovery.original_conversion,
       
       // Apply recovered attribution
@@ -407,8 +476,8 @@ async function applyStagedRecovery(event, headers) {
       matched_ip_type: stagedRecovery.matched_ip_type
     };
 
-    // Update live conversion data
-    await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(updatedConversion))}`);
+    // Store new conversion record
+    await redis(`set/${conversionKey}/${encodeURIComponent(JSON.stringify(newConversion))}`);
     
     // Mark staged recovery as applied
     stagedRecovery.status = 'applied';
@@ -416,7 +485,7 @@ async function applyStagedRecovery(event, headers) {
     stagedRecovery.approved_by = approved_by;
     await redis(`set/${stagingKey}/${encodeURIComponent(JSON.stringify(stagedRecovery))}`);
 
-    console.log('✅ Recovery applied to live data');
+    console.log('✅ Recovery applied to new conversion record');
 
     return {
       statusCode: 200,
@@ -426,7 +495,8 @@ async function applyStagedRecovery(event, headers) {
         recovery_id: recovery_id,
         applied: true,
         updated_fields: Object.keys(stagedRecovery.proposed_changes),
-        message: 'Recovery successfully applied to live conversion data'
+        conversion_key: conversionKey,
+        message: 'Recovery successfully applied to new conversion record'
       })
     };
 
@@ -440,7 +510,7 @@ async function applyStagedRecovery(event, headers) {
   }
 }
 
-// Clear staging area (for cleanup)
+// Clear staging area (unchanged)
 async function clearStagingArea(event, headers) {
   try {
     const { confirm, keep_applied } = JSON.parse(event.body || '{}');
@@ -517,12 +587,13 @@ async function clearStagingArea(event, headers) {
   }
 }
 
-// Find attribution using BOTH IP addresses
-async function findAttributionByBothIPs(pageviewIP, conversionIP, originalTimestamp) {
+// Find attribution using 24-hour window approach with timeout protection
+async function findAttributionByBothIPsWithTimeout(pageviewIP, conversionIP, originalTimestamp) {
   try {
-    console.log('🔍 Searching for attribution with BOTH IPs:', {
+    console.log('🔍 24-Hour Window Attribution Search:', {
       pageview_ip: pageviewIP,
-      conversion_ip: conversionIP
+      conversion_ip: conversionIP,
+      conversion_time: originalTimestamp
     });
     
     const ipsToCheck = [];
@@ -535,11 +606,10 @@ async function findAttributionByBothIPs(pageviewIP, conversionIP, originalTimest
     
     console.log(`🎯 Will check ${ipsToCheck.length} unique IP(s) for attribution data`);
     
-    // Try each IP for attribution data
+    // Method 1: Try direct IP lookup keys first (fastest)
     for (const { ip, type } of ipsToCheck) {
-      console.log(`🔍 Trying ${type} IP: ${ip}`);
+      console.log(`🔍 Trying direct lookup for ${type} IP: ${ip}`);
       
-      // Method 1: Try IP lookup keys
       const ipKey = `attribution_ip_${encodeIPForKey(ip)}`;
       let lookupResult = await redis(`get/${ipKey}`);
       
@@ -549,171 +619,195 @@ async function findAttributionByBothIPs(pageviewIP, conversionIP, originalTimest
         const attributionData = await redis(`get/${mainKey}`);
         if (attributionData?.result) {
           const attribution = JSON.parse(attributionData.result);
-          attribution.confidence = 'high';
-          attribution.method = `${type}_ip_lookup_key`;
-          attribution.matched_ip = ip;
-          attribution.ip_type = type;
-          return attribution;
+          
+          // Verify it's within 24-hour window
+          const conversionTime = new Date(originalTimestamp);
+          const pageviewTime = new Date(attribution.timestamp);
+          const timeDiff = conversionTime - pageviewTime;
+          const twentyFourHours = 24 * 60 * 60 * 1000;
+          
+          if (timeDiff >= 0 && timeDiff <= twentyFourHours) {
+            attribution.confidence = 'high';
+            attribution.method = `${type}_ip_lookup_key`;
+            attribution.matched_ip = ip;
+            attribution.ip_type = type;
+            attribution.time_diff_minutes = Math.round(timeDiff / (1000 * 60));
+            console.log(`✅ Direct match within 24h window: ${attribution.time_diff_minutes} minutes before conversion`);
+            return attribution;
+          } else {
+            console.log(`⏰ Direct match found but outside 24h window: ${Math.round(timeDiff / (1000 * 60 * 60))} hours`);
+          }
         }
-      } else {
-        console.log(`⚠️ No lookup key found for ${type} IP: ${ipKey}`);
       }
     }
     
-    // Method 2: Quick scan with early timeout (optimized for speed)
-    console.log('🔍 Fallback: Quick scan for IP matches (limited scope)...');
+    // Method 2: 24-hour window pageview scanning
+    console.log('🔍 Scanning pageviews within 24-hour window...');
     
-    let cursor = '0';
-    let totalScanned = 0;
-    let maxScans = 5; // Much smaller limit to prevent timeouts
-    let scanCount = 0;
-    let startTime = Date.now();
+    const conversionTime = new Date(originalTimestamp);
+    const windowStart = new Date(conversionTime.getTime() - (24 * 60 * 60 * 1000));
     
-    do {
-      try {
-        // Check timeout (max 5 seconds for scanning)
-        if (Date.now() - startTime > 5000) {
-          console.log(`⏰ Scan timeout after ${scanCount} iterations, ${totalScanned} keys`);
-          break;
-        }
-        
-        const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/50`);
-        
-        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-          console.log('⚠️ Invalid scan result, breaking');
-          break;
-        }
-        
-        cursor = scanResult.result[0];
-        const keys = scanResult.result[1] || [];
-        totalScanned += keys.length;
-        scanCount++;
-        
-        console.log(`🔍 Quick scan ${scanCount}: Found ${keys.length} keys, cursor: ${cursor}, total: ${totalScanned}`);
-        
-        // Check only main attribution keys (skip lookup keys entirely)
-        for (const key of keys) {
-          // Skip ALL lookup keys to focus on main data
-          if (key.includes('_ip_') || key.includes('_session_') || key.includes('_fp_') || 
-              key.includes('_screen_') || key.includes('_webgl_') || key.includes('_geo_')) {
-            continue;
-          }
+    console.log(`📅 24-hour window: ${windowStart.toISOString()} to ${conversionTime.toISOString()}`);
+    
+    const pageviewsInWindow = await getPageviewsInTimeWindow(windowStart, conversionTime);
+    
+    if (pageviewsInWindow.length === 0) {
+      console.log('❌ No pageviews found in 24-hour window');
+      return null;
+    }
+    
+    console.log(`📊 Found ${pageviewsInWindow.length} pageviews in 24-hour window`);
+    
+    // Search pageviews for IP matches
+    for (const pageview of pageviewsInWindow) {
+      for (const { ip, type } of ipsToCheck) {
+        if (pageview.ip_address === ip) {
+          const timeDiff = conversionTime - new Date(pageview.timestamp);
+          const timeDiffMinutes = Math.round(timeDiff / (1000 * 60));
           
-          try {
-            const data = await redis(`get/${key}`);
-            if (data?.result) {
-              const attribution = JSON.parse(data.result);
-              
-              // Check if this attribution record matches any of our IPs
-              for (const { ip, type } of ipsToCheck) {
-                if (attribution.ip_address === ip) {
-                  console.log(`🎯 IP MATCH FOUND! ${type} IP: ${ip} in key: ${key}`);
-                  
-                  // Quick timeframe check (within 3 days for initial testing)
-                  const timeDiff = Math.abs(new Date(originalTimestamp) - new Date(attribution.timestamp));
-                  const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
-                  
-                  if (timeDiff < threeDaysMs) {
-                    console.log(`✅ Found matching attribution via ${type} IP scan:`, {
-                      key: key,
-                      matched_ip: ip,
-                      landing_page: attribution.landing_page,
-                      source: attribution.source,
-                      scan_count: scanCount,
-                      total_scanned: totalScanned,
-                      time_diff_hours: Math.round(timeDiff / (1000 * 60 * 60))
-                    });
-                    attribution.confidence = 'medium';
-                    attribution.method = `${type}_ip_scan_match`;
-                    attribution.matched_ip = ip;
-                    attribution.ip_type = type;
-                    return attribution;
-                  } else {
-                    console.log(`⏰ IP match found but outside time window: ${Math.round(timeDiff / (1000 * 60 * 60))} hours`);
-                  }
-                }
-              }
-            }
-          } catch (parseError) {
-            // Skip malformed records silently
-            continue;
-          }
+          console.log(`🎯 IP MATCH in 24h window! ${type} IP: ${ip}`);
+          console.log(`   Time difference: ${timeDiffMinutes} minutes before conversion`);
+          console.log(`   Landing page: ${pageview.landing_page}`);
+          console.log(`   Source: ${pageview.source}`);
+          
+          return {
+            ...pageview,
+            confidence: 'high',
+            method: `${type}_ip_24h_window_match`,
+            matched_ip: ip,
+            ip_type: type,
+            time_diff_minutes: timeDiffMinutes
+          };
         }
-        
-      } catch (scanError) {
-        console.log(`❌ Scan error on iteration ${scanCount}:`, scanError.message);
-        break;
       }
-      
-    } while (cursor !== '0' && scanCount < maxScans && (Date.now() - startTime) < 5000);
+    }
     
-    console.log(`🔍 Quick scan complete: ${scanCount} iterations, ${totalScanned} keys, ${Date.now() - startTime}ms`);
-    console.log('❌ No matching attribution found in quick scan');
+    console.log('❌ No IP matches found in 24-hour window pageviews');
     return null;
     
   } catch (error) {
-    console.error('❌ Error finding attribution:', error);
+    console.error('❌ Error in 24-hour window attribution search:', error);
     return null;
   }
 }
 
-async function findCurrentConversion(email, timestamp) {
+// Get pageviews within specific time window with timeout protection
+async function getPageviewsInTimeWindow(windowStart, windowEnd) {
+  const pageviews = [];
+  const startTime = Date.now();
+  const maxScanTime = 15000; // 15 seconds max for pageview scanning
+  
   try {
-    // Use SCAN instead of KEYS to handle large datasets
+    console.log('🔍 Scanning for pageviews in time window...');
+    
     let cursor = '0';
     let totalScanned = 0;
-    let maxScans = 20; // Limit for conversion search
-    let scanCount = 0;
+    let maxIterations = 20; // Limit iterations
+    let iterationCount = 0;
     
     do {
+      // Check timeout before each scan
+      const elapsed = Date.now() - startTime;
+      if (elapsed > maxScanTime) {
+        console.log(`⏰ Pageview scan timeout after ${elapsed}ms, ${totalScanned} keys scanned`);
+        break;
+      }
+      
+      if (iterationCount >= maxIterations) {
+        console.log(`🔄 Reached max iterations (${maxIterations}), stopping scan`);
+        break;
+      }
+      
       try {
-        const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/50`);
+        const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/50`);
         
         if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-          console.log('⚠️ Conversion scan: Invalid result, breaking');
           break;
         }
         
         cursor = scanResult.result[0];
         const keys = scanResult.result[1] || [];
         totalScanned += keys.length;
-        scanCount++;
+        iterationCount++;
         
-        console.log(`🔍 Conversion scan ${scanCount}: Found ${keys.length} keys, total: ${totalScanned}`);
-        
-        // Check each conversion key
-        for (const key of keys) {
-          try {
-            const conversionData = await redis(`get/${key}`);
-            if (conversionData?.result) {
-              const conversion = JSON.parse(conversionData.result);
-              
-              if (conversion.email === email && conversion.timestamp === timestamp) {
-                conversion.key = key; // Store the key for later updates
-                console.log(`✅ Found conversion: ${email} in ${key}`);
-                return conversion;
+        // Process keys in smaller batches to manage memory and time
+        const batchSize = 20;
+        for (let i = 0; i < keys.length; i += batchSize) {
+          // Check timeout during batch processing
+          if (Date.now() - startTime > maxScanTime) {
+            console.log(`⏰ Timeout during batch processing`);
+            return pageviews;
+          }
+          
+          const batch = keys.slice(i, i + batchSize);
+          
+          // Skip lookup keys to focus on main pageview data
+          const mainKeys = batch.filter(key => 
+            !key.includes('_ip_') && 
+            !key.includes('_session_') && 
+            !key.includes('_fp_') && 
+            !key.includes('_screen_') && 
+            !key.includes('_webgl_') && 
+            !key.includes('_geo_')
+          );
+          
+          for (const key of mainKeys) {
+            try {
+              const data = await redis(`get/${key}`);
+              if (data?.result) {
+                const pageview = JSON.parse(data.result);
+                
+                // Check if pageview is within our time window
+                if (pageview.timestamp && pageview.ip_address) {
+                  const pageviewTime = new Date(pageview.timestamp);
+                  
+                  if (pageviewTime >= windowStart && pageviewTime <= windowEnd) {
+                    pageviews.push({
+                      timestamp: pageview.timestamp,
+                      ip_address: pageview.ip_address,
+                      landing_page: pageview.landing_page,
+                      source: pageview.source,
+                      utm_campaign: pageview.utm_campaign,
+                      utm_medium: pageview.utm_medium,
+                      utm_source: pageview.utm_source,
+                      utm_term: pageview.utm_term,
+                      utm_content: pageview.utm_content,
+                      redis_key: key
+                    });
+                  }
+                }
               }
+            } catch (parseError) {
+              // Skip malformed records
+              continue;
             }
-          } catch (parseError) {
-            // Skip malformed records
-            continue;
           }
         }
         
+        // Log progress every 5 iterations
+        if (iterationCount % 5 === 0) {
+          const elapsed = Date.now() - startTime;
+          console.log(`📊 Iteration ${iterationCount}: ${totalScanned} keys scanned, ${pageviews.length} pageviews found (${elapsed}ms)`);
+        }
+        
       } catch (scanError) {
-        console.log(`❌ Conversion scan error on iteration ${scanCount}:`, scanError.message);
+        console.log(`❌ Scan error on iteration ${iterationCount}:`, scanError.message);
         break;
       }
       
-    } while (cursor !== '0' && scanCount < maxScans);
+    } while (cursor !== '0' && Date.now() - startTime < maxScanTime && iterationCount < maxIterations);
     
-    console.log(`🔍 Conversion scan complete: ${scanCount} iterations, ${totalScanned} keys total`);
-    console.log(`❌ No conversion found for ${email}`);
-    return null;
+    const totalElapsed = Date.now() - startTime;
+    console.log(`✅ Pageview scan complete: ${totalScanned} keys scanned, ${pageviews.length} pageviews found in ${totalElapsed}ms`);
+    
+    // Sort pageviews by timestamp (most recent first)
+    pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    return pageviews;
     
   } catch (error) {
-    console.error('❌ Error finding conversion:', error);
-    return null;
+    console.error('❌ Error scanning pageviews in time window:', error);
+    return pageviews; // Return what we found so far
   }
 }
 
@@ -748,7 +842,7 @@ function assessRiskLevel(currentConversion, attributionResult) {
   
   // Low risk indicators
   if (attributionResult.confidence === 'high') riskScore -= 1;
-  if (attributionResult.method === 'ip_lookup_key') riskScore -= 1;
+  if (attributionResult.method?.includes('lookup_key')) riskScore -= 1;
   
   // Medium risk indicators
   if (!currentConversion.landing_page && attributionResult.landing_page) riskScore += 1;
@@ -773,6 +867,91 @@ async function addToStagingIndex(recoveryId, email) {
     await redis(`set/${indexKey}:${recoveryId}/${encodeURIComponent(JSON.stringify(indexEntry))}`);
   } catch (error) {
     console.log('⚠️ Failed to update staging index:', error.message);
+  }
+}
+
+// Progress tracking functions for resume capability
+
+// Check if a conversion has already been processed
+async function checkIfAlreadyProcessed(email, timestamp) {
+  try {
+    const progressKey = `recovery_progress:${email}:${timestamp}`;
+    const progressData = await redis(`get/${progressKey}`);
+    
+    if (progressData?.result) {
+      const progress = JSON.parse(progressData.result);
+      console.log(`📋 Found existing progress for ${email}: ${progress.recovery_id || 'no attribution found'}`);
+      return progress;
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`⚠️ Error checking progress for ${email}:`, error.message);
+    return null;
+  }
+}
+
+// Mark a conversion as processed (with or without attribution found)
+async function markAsProcessed(email, timestamp, recoveryId, attributionFound) {
+  try {
+    const progressKey = `recovery_progress:${email}:${timestamp}`;
+    const progressEntry = {
+      email: email,
+      timestamp: timestamp,
+      processed_at: new Date().toISOString(),
+      recovery_id: recoveryId,
+      attribution_found: attributionFound,
+      status: 'processed'
+    };
+    
+    await redis(`set/${progressKey}/${encodeURIComponent(JSON.stringify(progressEntry))}`);
+    console.log(`✅ Marked ${email} as processed (attribution: ${attributionFound ? 'found' : 'not found'})`);
+    
+    // Also update global progress counter
+    await updateGlobalProgress(email, attributionFound);
+    
+  } catch (error) {
+    console.log(`⚠️ Error marking ${email} as processed:`, error.message);
+  }
+}
+
+// Update global progress statistics
+async function updateGlobalProgress(email, attributionFound) {
+  try {
+    const globalProgressKey = 'recovery_global_progress';
+    const progressData = await redis(`get/${globalProgressKey}`);
+    
+    let globalProgress = {
+      total_processed: 0,
+      attribution_found: 0,
+      no_attribution: 0,
+      started_at: new Date().toISOString(),
+      last_updated: new Date().toISOString()
+    };
+    
+    if (progressData?.result) {
+      globalProgress = JSON.parse(progressData.result);
+    }
+    
+    globalProgress.total_processed++;
+    globalProgress.last_updated = new Date().toISOString();
+    globalProgress.last_processed_email = email;
+    
+    if (attributionFound) {
+      globalProgress.attribution_found++;
+    } else {
+      globalProgress.no_attribution++;
+    }
+    
+    await redis(`set/${globalProgressKey}/${encodeURIComponent(JSON.stringify(globalProgress))}`);
+    
+    // Log progress every 10 conversions
+    if (globalProgress.total_processed % 10 === 0) {
+      console.log(`📊 Global Progress: ${globalProgress.total_processed} processed, ${globalProgress.attribution_found} with attribution (${((globalProgress.attribution_found / globalProgress.total_processed) * 100).toFixed(1)}%)`);
+    }
+    
+  } catch (error) {
+    console.log('⚠️ Error updating global progress:', error.message);
   }
 }
 
