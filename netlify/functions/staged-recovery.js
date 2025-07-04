@@ -1,4 +1,4 @@
-// Staged Recovery System - Updated for Clean CSV Data with Timeout Protection
+// Staged Recovery System - Updated for Clean CSV Data with Timeout Protection and Reprocessing
 // Path: netlify/functions/staged-recovery.js
 
 // Global Redis helper - accessible to all functions
@@ -109,20 +109,20 @@ exports.handler = async (event, context) => {
   };
 };
 
-// Stage a recovery without updating live data - UPDATED WITH PROGRESS TRACKING
+// Stage a recovery without updating live data - UPDATED FOR REPROCESSING
 async function stageRecovery(event, headers) {
   try {
     const data = JSON.parse(event.body);
     
-    console.log('🎭 Staging recovery for clean CSV data:', {
+    console.log('🔄 REPROCESSING for improved attribution:', {
       email: data.email,
       order_id: data.order_id
     });
 
-    // Check if this conversion has already been processed (resume capability)
-    const alreadyProcessed = await checkIfAlreadyProcessed(data.email, data.timestamp);
-    if (alreadyProcessed) {
-      console.log(`⏭️ Conversion already processed: ${data.email}`);
+    // Check if this conversion has already been RE-PROCESSED (not just processed)
+    const alreadyReprocessed = await checkIfAlreadyReprocessed(data.email, data.timestamp);
+    if (alreadyReprocessed) {
+      console.log(`⏭️ Conversion already RE-PROCESSED: ${data.email}`);
       return {
         statusCode: 200,
         headers,
@@ -130,10 +130,17 @@ async function stageRecovery(event, headers) {
           success: true,
           staged: false,
           already_processed: true,
-          existing_recovery_id: alreadyProcessed.recovery_id,
-          message: 'Conversion already processed - skipping to maintain resume capability'
+          already_reprocessed: true,
+          existing_recovery_id: alreadyReprocessed.recovery_id,
+          message: 'Conversion already re-processed with improved system - skipping'
         })
       };
+    }
+
+    // Log if this conversion was processed before (but we're reprocessing it now)
+    const previouslyProcessed = await checkIfAlreadyProcessed(data.email, data.timestamp);
+    if (previouslyProcessed) {
+      console.log(`🔄 REPROCESSING previously processed conversion: ${data.email} (improving attribution)`);
     }
 
     // SIMPLIFIED IP extraction for clean CSV data
@@ -144,7 +151,8 @@ async function stageRecovery(event, headers) {
       pageview_ip: pageviewIP,
       conversion_ip: conversionIP,
       has_both_ips: !!(pageviewIP && conversionIP),
-      ips_are_same: pageviewIP === conversionIP
+      ips_are_same: pageviewIP === conversionIP,
+      reprocessing: !!previouslyProcessed
     });
 
     // Attempt to find attribution using 24-hour window approach
@@ -166,16 +174,23 @@ async function stageRecovery(event, headers) {
       source: 'direct',
       utm_campaign: null,
       utm_source: null,
-      utm_medium: null
+      utm_medium: null,
+      // Mark as reprocessing attempt
+      reprocessing_attempt: true,
+      previously_processed: !!previouslyProcessed
     };
     
     if (attributionResult) {
       // Stage the recovery (don't update live data yet)
       const stagedRecovery = {
         // Recovery metadata
-        recovery_id: `recovery_${Date.now()}_${data.email.replace('@', '_at_')}`,
+        recovery_id: `reprocess_${Date.now()}_${data.email.replace('@', '_at_')}`,
         timestamp: new Date().toISOString(),
         status: 'staged',
+        
+        // Mark this as a reprocessing recovery
+        reprocessing: true,
+        previously_processed: !!previouslyProcessed,
         
         // Original data (mock for CSV)
         original_conversion: mockConversion,
@@ -208,7 +223,7 @@ async function stageRecovery(event, headers) {
         },
         
         // Technical details
-        recovery_method: 'dual_ip_24h_window',
+        recovery_method: 'dual_ip_24h_window_reprocess',
         pageview_ip: pageviewIP,
         conversion_ip: conversionIP,
         matched_ip: attributionResult.matched_ip,
@@ -228,10 +243,10 @@ async function stageRecovery(event, headers) {
       // Add to staging index
       await addToStagingIndex(stagedRecovery.recovery_id, data.email);
 
-      // Mark as processed for resume capability
-      await markAsProcessed(data.email, data.timestamp, stagedRecovery.recovery_id, true);
+      // Mark as RE-PROCESSED for resume capability
+      await markAsReprocessed(data.email, data.timestamp, stagedRecovery.recovery_id, true);
 
-      console.log('✅ Recovery staged successfully');
+      console.log('✅ Recovery staged successfully (REPROCESSED)');
 
       return {
         statusCode: 200,
@@ -239,6 +254,7 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: true,
+          reprocessed: true,
           recovery_id: stagedRecovery.recovery_id,
           attribution_found: true,
           matched_ip: attributionResult.matched_ip,
@@ -247,15 +263,15 @@ async function stageRecovery(event, headers) {
           needs_review: stagedRecovery.needs_review,
           risk_level: stagedRecovery.risk_level,
           proposed_changes: stagedRecovery.proposed_changes,
-          message: `Recovery staged successfully using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before conversion)`
+          message: `Recovery staged successfully using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before conversion) [REPROCESSED]`
         })
       };
 
     } else {
-      console.log('❌ No attribution found for either IP in 24-hour window');
+      console.log('❌ No attribution found for either IP in 24-hour window (REPROCESSED)');
       
-      // Mark as processed even if no attribution found (for resume capability)
-      await markAsProcessed(data.email, data.timestamp, null, false);
+      // Mark as RE-PROCESSED even if no attribution found (for resume capability)
+      await markAsReprocessed(data.email, data.timestamp, null, false);
       
       return {
         statusCode: 200,
@@ -263,9 +279,10 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: false,
+          reprocessed: true,
           attribution_found: false,
           conversion_found: true, // We always have CSV data
-          message: 'No recovery possible - no attribution found for either pageview or conversion IP within 24-hour window'
+          message: 'No recovery possible - no attribution found for either pageview or conversion IP within 24-hour window [REPROCESSED]'
         })
       };
     }
@@ -386,15 +403,16 @@ async function reviewStagedRecoveries(event, headers) {
   }
 }
 
-// Get global progress for resume capability
+// Get global progress for resume capability - UPDATED FOR REPROCESSING
 async function getGlobalProgress(event, headers) {
   try {
-    console.log('📊 Getting global progress...');
+    console.log('📊 Getting global progress (including reprocessing)...');
     
+    // Get original progress
     const globalProgressKey = 'recovery_global_progress';
-    const progressData = await redis(`get/${globalProgressKey}`);
+    const originalProgressData = await redis(`get/${globalProgressKey}`);
     
-    let globalProgress = {
+    let originalProgress = {
       total_processed: 0,
       attribution_found: 0,
       no_attribution: 0,
@@ -403,8 +421,25 @@ async function getGlobalProgress(event, headers) {
       last_processed_email: null
     };
     
-    if (progressData?.result) {
-      globalProgress = JSON.parse(progressData.result);
+    if (originalProgressData?.result) {
+      originalProgress = JSON.parse(originalProgressData.result);
+    }
+    
+    // Get reprocessing progress
+    const reprocessProgressKey = 'recovery_reprocessing_progress';
+    const reprocessProgressData = await redis(`get/${reprocessProgressKey}`);
+    
+    let reprocessProgress = {
+      total_reprocessed: 0,
+      attribution_found: 0,
+      no_attribution: 0,
+      started_at: null,
+      last_updated: null,
+      last_reprocessed_email: null
+    };
+    
+    if (reprocessProgressData?.result) {
+      reprocessProgress = JSON.parse(reprocessProgressData.result);
     }
     
     return {
@@ -412,9 +447,15 @@ async function getGlobalProgress(event, headers) {
       headers,
       body: JSON.stringify({
         success: true,
-        progress: globalProgress,
-        attribution_rate: globalProgress.total_processed > 0 
-          ? `${((globalProgress.attribution_found / globalProgress.total_processed) * 100).toFixed(1)}%`
+        progress: reprocessProgress.total_reprocessed > 0 ? reprocessProgress : originalProgress,
+        reprocessing_progress: reprocessProgress,
+        attribution_rate: reprocessProgress.total_reprocessed > 0 
+          ? `${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%`
+          : originalProgress.total_processed > 0 
+            ? `${((originalProgress.attribution_found / originalProgress.total_processed) * 100).toFixed(1)}%`
+            : '0%',
+        reprocessing_attribution_rate: reprocessProgress.total_reprocessed > 0 
+          ? `${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%`
           : '0%'
       })
     };
@@ -952,6 +993,91 @@ async function updateGlobalProgress(email, attributionFound) {
     
   } catch (error) {
     console.log('⚠️ Error updating global progress:', error.message);
+  }
+}
+
+// NEW: Check if a conversion has already been RE-PROCESSED
+async function checkIfAlreadyReprocessed(email, timestamp) {
+  try {
+    const reprocessKey = `recovery_reprocess:${email}:${timestamp}`;
+    const reprocessData = await redis(`get/${reprocessKey}`);
+    
+    if (reprocessData?.result) {
+      const reprocess = JSON.parse(reprocessData.result);
+      console.log(`📋 Found existing REPROCESS for ${email}: ${reprocess.recovery_id || 'no attribution found'}`);
+      return reprocess;
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`⚠️ Error checking reprocess status for ${email}:`, error.message);
+    return null;
+  }
+}
+
+// NEW: Mark a conversion as RE-PROCESSED (separate from original processing)
+async function markAsReprocessed(email, timestamp, recoveryId, attributionFound) {
+  try {
+    const reprocessKey = `recovery_reprocess:${email}:${timestamp}`;
+    const reprocessEntry = {
+      email: email,
+      timestamp: timestamp,
+      reprocessed_at: new Date().toISOString(),
+      recovery_id: recoveryId,
+      attribution_found: attributionFound,
+      status: 'reprocessed',
+      reprocessing_pass: 'dual_ip_improvement'
+    };
+    
+    await redis(`set/${reprocessKey}/${encodeURIComponent(JSON.stringify(reprocessEntry))}`);
+    console.log(`✅ Marked ${email} as RE-PROCESSED (attribution: ${attributionFound ? 'found' : 'not found'})`);
+    
+    // Also update reprocessing progress counter
+    await updateReprocessingProgress(email, attributionFound);
+    
+  } catch (error) {
+    console.log(`⚠️ Error marking ${email} as reprocessed:`, error.message);
+  }
+}
+
+// NEW: Update reprocessing progress statistics (separate from original progress)
+async function updateReprocessingProgress(email, attributionFound) {
+  try {
+    const reprocessProgressKey = 'recovery_reprocessing_progress';
+    const progressData = await redis(`get/${reprocessProgressKey}`);
+    
+    let reprocessProgress = {
+      total_reprocessed: 0,
+      attribution_found: 0,
+      no_attribution: 0,
+      started_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+      reprocessing_reason: 'dual_ip_improvement_pass'
+    };
+    
+    if (progressData?.result) {
+      reprocessProgress = JSON.parse(progressData.result);
+    }
+    
+    reprocessProgress.total_reprocessed++;
+    reprocessProgress.last_updated = new Date().toISOString();
+    reprocessProgress.last_reprocessed_email = email;
+    
+    if (attributionFound) {
+      reprocessProgress.attribution_found++;
+    } else {
+      reprocessProgress.no_attribution++;
+    }
+    
+    await redis(`set/${reprocessProgressKey}/${encodeURIComponent(JSON.stringify(reprocessProgress))}`);
+    
+    // Log progress every 10 conversions
+    if (reprocessProgress.total_reprocessed % 10 === 0) {
+      console.log(`🔄 REPROCESSING Progress: ${reprocessProgress.total_reprocessed} reprocessed, ${reprocessProgress.attribution_found} with attribution (${((reprocessProgress.attribution_found / reprocessProgress.total_reprocessed) * 100).toFixed(1)}%)`);
+    }
+    
+  } catch (error) {
+    console.log('⚠️ Error updating reprocessing progress:', error.message);
   }
 }
 
