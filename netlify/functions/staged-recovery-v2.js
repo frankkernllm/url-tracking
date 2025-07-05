@@ -374,5 +374,5 @@ function encodeIPForKey(ip) {
   return ip.replace(/:/g, '_');
 }
 
-// Export the updated handler with all other functions unchanged
-module.exports = { handler: exports.handler };
+// The main handler should be defined elsewhere in your staged-recovery-v2.js file
+// This code shows the updated functions to replace in your existing file
