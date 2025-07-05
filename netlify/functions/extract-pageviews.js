@@ -309,4 +309,4 @@ async function storeExtractionMetadata(redis, metadata) {
   console.log('📋 Extraction metadata stored');
 }
 
-module.exports = { handler };
+// Handler is already exported via exports.handler above
