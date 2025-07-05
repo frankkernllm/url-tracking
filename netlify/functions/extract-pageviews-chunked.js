@@ -88,7 +88,7 @@ exports.handler = async (event, context) => {
           ? 'Extraction complete! Check query system status.'
           : `Run again with start_cursor: "${chunkResult.final_cursor}" to continue`,
         continue_command: isComplete ? null : {
-          curl: `curl -X POST /extract-pageviews-chunked -d '{"start_cursor":"${chunkResult.final_cursor}","pattern":"${pattern}"}'`
+          curl: `curl -X POST https://trackingojoy.netlify.app/.netlify/functions/extract-pageviews-chunked -H "Content-Type: application/json" -d '{"start_cursor":"${chunkResult.final_cursor}","pattern":"${pattern}"}'`
         }
       })
     };
