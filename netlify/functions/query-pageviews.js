@@ -388,4 +388,4 @@ async function getQuerySystemStatus(redis) {
   }
 }
 
-module.exports = { handler };
+// Handler is already exported via exports.handler above
