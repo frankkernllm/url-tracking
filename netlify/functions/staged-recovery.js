@@ -1,4 +1,4 @@
-// Staged Recovery System - SERVERLESS OPTIMIZED for Netlify Timeout Constraints
+// Staged Recovery System - COMPLETE FIXED VERSION (Process All Conversions)
 // Path: netlify/functions/staged-recovery.js
 
 // Global Redis helper - accessible to all functions
@@ -8,15 +8,12 @@ function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   
-  return async (command, timeoutMs = 3000) => { // Reduced timeout for serverless
+  return async (command, timeoutMs = 3000) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
       console.log(`⏰ Redis timeout after ${timeoutMs}ms for command: ${command.split('/')[0]}`);
-    }
-
-    const pageviewIP = data.pageview_ip;
-    const conversionIP = data.conversion_ip;, timeoutMs);
+    }, timeoutMs);
     
     try {
       const response = await fetch(`${redisUrl}/${command}`, {
@@ -142,6 +139,9 @@ async function stageRecovery(event, headers) {
     } else {
       console.log(`🆕 NEW CONVERSION: ${data.email} - PROCESSING`);
     }
+
+    const pageviewIP = data.pageview_ip;
+    const conversionIP = data.conversion_ip;
     
     console.log('📍 Quick IP Analysis:', {
       pageview_ip: pageviewIP,
@@ -169,7 +169,7 @@ async function stageRecovery(event, headers) {
       utm_campaign: null,
       utm_source: null,
       utm_medium: null,
-      reprocessing_attempt: 2
+      reprocessing_attempt: 'process_all'
     };
     
     if (attributionResult) {
@@ -177,7 +177,7 @@ async function stageRecovery(event, headers) {
         recovery_id: `process_all_${Date.now()}_${Math.random().toString(36).substr(2, 9)}_${data.email.replace('@', '_at_')}`,
         timestamp: new Date().toISOString(),
         status: 'staged',
-        reprocessing: 2,
+        reprocessing: 'process_all',
         original_conversion: mockConversion,
         recovered_attribution: attributionResult,
         proposed_changes: {
@@ -229,7 +229,7 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: true,
-          reprocessed: 2,
+          reprocessed: 'process_all',
           recovery_id: stagedRecovery.recovery_id,
           attribution_found: true,
           matched_ip: attributionResult.matched_ip,
@@ -244,7 +244,7 @@ async function stageRecovery(event, headers) {
       };
 
     } else {
-      console.log('❌ No attribution found in fast scan');
+      console.log('❌ No attribution found in comprehensive scan');
       
       await markAsReprocessed2(data.email, data.timestamp, null, false);
       
@@ -256,7 +256,7 @@ async function stageRecovery(event, headers) {
         body: JSON.stringify({
           success: true,
           staged: false,
-          reprocessed: 2,
+          reprocessed: 'process_all',
           attribution_found: false,
           conversion_found: true,
           processing_time_ms: totalTime,
@@ -307,7 +307,7 @@ async function findAttributionFast(pageviewIP, conversionIP, originalTimestamp, 
       console.log(`🔍 Direct lookup for ${type} IP: ${ip}`);
       
       const ipKey = `attribution_ip_${encodeIPForKey(ip)}`;
-      const lookupResult = await redis(`get/${ipKey}`, 1000); // 1 second timeout
+      const lookupResult = await redis(`get/${ipKey}`, 1000);
       
       if (lookupResult?.result) {
         console.log(`✅ Found attribution via ${type} IP lookup key`);
@@ -340,7 +340,7 @@ async function findAttributionFast(pageviewIP, conversionIP, originalTimestamp, 
     const timeUsed = Date.now() - searchStartTime;
     const timeLeft = remainingTime - timeUsed;
     
-    if (timeLeft > 2000) { // Only scan if we have at least 2 seconds left
+    if (timeLeft > 2000) {
       console.log(`🔍 Limited scanning with ${timeLeft}ms remaining`);
       
       const conversionTime = new Date(originalTimestamp);
@@ -390,7 +390,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
     let cursor = '0';
     let iterationCount = 0;
     let totalScanned = 0;
-    const maxIterations = 25; // Increased for better coverage
+    const maxIterations = 25;
     
     do {
       const elapsed = Date.now() - scanStartTime;
@@ -399,7 +399,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
         break;
       }
       
-      const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/100`, 2000); // Larger batches for efficiency
+      const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/100`, 2000);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -418,7 +418,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
         !key.includes('_screen_') && 
         !key.includes('_webgl_') && 
         !key.includes('_geo_')
-      ); // Process ALL main keys, not just 10
+      );
       
       console.log(`📊 Iteration ${iterationCount}: ${keys.length} total keys, ${mainKeys.length} main keys to process`);
       
@@ -432,7 +432,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
         // Process batch in parallel for speed
         const batchPromises = batch.map(async (key) => {
           try {
-            const data = await redis(`get/${key}`, 1500); // Longer timeout for reliability
+            const data = await redis(`get/${key}`, 1500);
             if (data?.result) {
               const pageview = JSON.parse(data.result);
               
@@ -455,7 +455,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
               }
             }
           } catch (parseError) {
-            return null; // Skip malformed records
+            return null;
           }
           return null;
         });
@@ -491,8 +491,6 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
   }
 }
 
-// Rest of the functions remain the same but with optimized timeouts...
-
 // Review all staged recoveries
 async function reviewStagedRecoveries(event, headers) {
   try {
@@ -500,7 +498,7 @@ async function reviewStagedRecoveries(event, headers) {
     
     let cursor = '0';
     let allStagingKeys = [];
-    let maxScans = 5; // Reduced for serverless
+    let maxScans = 5;
     let scanCount = 0;
 
     do {
@@ -547,7 +545,7 @@ async function reviewStagedRecoveries(event, headers) {
     };
 
     // Load each staged recovery (limited for serverless)
-    for (const key of allStagingKeys.slice(0, 100)) { // Limit to prevent timeout
+    for (const key of allStagingKeys.slice(0, 100)) {
       try {
         const data = await redis(`get/${key}`, 1000);
         if (data?.result) {
@@ -672,7 +670,7 @@ async function applyStagedRecovery(event, headers) {
       utm_content: stagedRecovery.recovered_attribution.utm_content,
       recovery_applied: true,
       recovery_timestamp: new Date().toISOString(),
-      recovery_method: 'fast_serverless_dual_ip',
+      recovery_method: 'process_all_no_skip',
       recovery_id: recovery_id,
       approved_by: approved_by || 'system'
     };
@@ -822,6 +820,42 @@ function assessRiskLevel(currentConversion, attributionResult) {
   if (riskScore <= 0) return 'low';
   if (riskScore <= 2) return 'medium';
   return 'high';
+}
+
+// Check if a conversion has already been processed
+async function checkIfAlreadyProcessed(email, timestamp) {
+  try {
+    const progressKey = `recovery_progress:${email}:${timestamp}`;
+    const progressData = await redis(`get/${progressKey}`, 1000);
+    
+    if (progressData?.result) {
+      const progress = JSON.parse(progressData.result);
+      return progress;
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`⚠️ Error checking progress for ${email}:`, error.message);
+    return null;
+  }
+}
+
+// Check if a conversion has already been RE-PROCESSED (first pass)
+async function checkIfAlreadyReprocessed(email, timestamp) {
+  try {
+    const reprocessKey = `recovery_reprocess:${email}:${timestamp}`;
+    const reprocessData = await redis(`get/${reprocessKey}`, 1000);
+    
+    if (reprocessData?.result) {
+      const reprocess = JSON.parse(reprocessData.result);
+      return reprocess;
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`⚠️ Error checking reprocess status for ${email}:`, error.message);
+    return null;
+  }
 }
 
 async function checkIfAlreadyReprocessed2(email, timestamp) {
