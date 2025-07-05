@@ -13,7 +13,10 @@ function initializeRedis() {
     const timeoutId = setTimeout(() => {
       controller.abort();
       console.log(`⏰ Redis timeout after ${timeoutMs}ms for command: ${command.split('/')[0]}`);
-    }, timeoutMs);
+    }
+
+    const pageviewIP = data.pageview_ip;
+    const conversionIP = data.conversion_ip;, timeoutMs);
     
     try {
       const response = await fetch(`${redisUrl}/${command}`, {
@@ -112,7 +115,7 @@ exports.handler = async (event, context) => {
   };
 };
 
-// Stage a recovery without updating live data - SERVERLESS OPTIMIZED
+// Stage a recovery without updating live data - PROCESS ALL CONVERSIONS (NO SKIPPING)
 async function stageRecovery(event, headers) {
   const startTime = Date.now();
   const maxProcessingTime = 8000; // 8 seconds max to stay under Netlify timeout
@@ -120,31 +123,25 @@ async function stageRecovery(event, headers) {
   try {
     const data = JSON.parse(event.body);
     
-    console.log('🔄 SERVERLESS OPTIMIZED REPROCESSING:', {
+    console.log('🔄 PROCESS ALL CONVERSIONS (NO SKIPPING):', {
       email: data.email,
       order_id: data.order_id
     });
 
-    // Quick check if already processed in this pass
-    const alreadyReprocessed2 = await checkIfAlreadyReprocessed2(data.email, data.timestamp);
-    if (alreadyReprocessed2) {
-      console.log(`⏭️ Already processed in second pass: ${data.email}`);
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          success: true,
-          staged: false,
-          already_processed: true,
-          already_reprocessed_2: true,
-          existing_recovery_id: alreadyReprocessed2.recovery_id,
-          message: 'Already processed in second pass - skipping'
-        })
-      };
+    // Log previous processing status (but NEVER skip - process every conversion)
+    const previouslyProcessed = await checkIfAlreadyProcessed(data.email, data.timestamp);
+    const previouslyReprocessed = await checkIfAlreadyReprocessed(data.email, data.timestamp);
+    const previouslyReprocessed2 = await checkIfAlreadyReprocessed2(data.email, data.timestamp);
+    
+    if (previouslyReprocessed2) {
+      console.log(`🔄 RE-PROCESSING (was in 2nd pass): ${data.email} - PROCESSING ANYWAY`);
+    } else if (previouslyReprocessed) {
+      console.log(`🔄 RE-PROCESSING (was in 1st pass): ${data.email} - PROCESSING ANYWAY`);
+    } else if (previouslyProcessed) {
+      console.log(`🔄 RE-PROCESSING (was processed): ${data.email} - PROCESSING ANYWAY`);
+    } else {
+      console.log(`🆕 NEW CONVERSION: ${data.email} - PROCESSING`);
     }
-
-    const pageviewIP = data.pageview_ip;
-    const conversionIP = data.conversion_ip;
     
     console.log('📍 Quick IP Analysis:', {
       pageview_ip: pageviewIP,
@@ -177,7 +174,7 @@ async function stageRecovery(event, headers) {
     
     if (attributionResult) {
       const stagedRecovery = {
-        recovery_id: `reprocess2_${Date.now()}_${data.email.replace('@', '_at_')}`,
+        recovery_id: `process_all_${Date.now()}_${Math.random().toString(36).substr(2, 9)}_${data.email.replace('@', '_at_')}`,
         timestamp: new Date().toISOString(),
         status: 'staged',
         reprocessing: 2,
@@ -205,7 +202,7 @@ async function stageRecovery(event, headers) {
             proposed: attributionResult.utm_medium
           }
         },
-        recovery_method: 'fast_dual_ip_serverless',
+        recovery_method: 'process_all_no_skip_serverless',
         pageview_ip: pageviewIP,
         conversion_ip: conversionIP,
         matched_ip: attributionResult.matched_ip,
@@ -242,7 +239,7 @@ async function stageRecovery(event, headers) {
           risk_level: stagedRecovery.risk_level,
           proposed_changes: stagedRecovery.proposed_changes,
           processing_time_ms: totalTime,
-          message: `Recovery staged using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before) [FAST SERVERLESS]`
+          message: `Recovery staged using ${attributionResult.ip_type} IP (${attributionResult.time_diff_minutes} min before) [PROCESS ALL - NO SKIPPING]`
         })
       };
 
@@ -263,7 +260,7 @@ async function stageRecovery(event, headers) {
           attribution_found: false,
           conversion_found: true,
           processing_time_ms: totalTime,
-          message: 'No attribution found in fast serverless scan'
+          message: 'No attribution found in comprehensive scan [PROCESS ALL - NO SKIPPING]'
         })
       };
     }
@@ -829,32 +826,34 @@ function assessRiskLevel(currentConversion, attributionResult) {
 
 async function checkIfAlreadyReprocessed2(email, timestamp) {
   try {
-    const reprocess2Key = `recovery_reprocess_2:${email}:${timestamp}`;
-    const reprocess2Data = await redis(`get/${reprocess2Key}`, 1000);
+    // Check for any processing under the new pattern (won't skip, just for logging)
+    let cursor = '0';
+    const scanResult = await redis(`scan/${cursor}/match/recovery_process_all:${email}:${timestamp}:*/count/10`, 1000);
     
-    if (reprocess2Data?.result) {
-      const reprocess2 = JSON.parse(reprocess2Data.result);
-      return reprocess2;
+    if (scanResult?.result && Array.isArray(scanResult.result) && scanResult.result[1]?.length > 0) {
+      console.log(`📋 Found previous PROCESS ALL entries for ${email}`);
+      return { found_previous: true };
     }
     
     return null;
   } catch (error) {
-    console.log(`⚠️ Error checking reprocess2 status for ${email}:`, error.message);
+    console.log(`⚠️ Error checking process all status for ${email}:`, error.message);
     return null;
   }
 }
 
 async function markAsReprocessed2(email, timestamp, recoveryId, attributionFound) {
   try {
-    const reprocess2Key = `recovery_reprocess_2:${email}:${timestamp}`;
+    // Use unique key with timestamp to allow multiple processing of same email
+    const reprocess2Key = `recovery_process_all:${email}:${timestamp}:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`;
     const reprocess2Entry = {
       email: email,
       timestamp: timestamp,
-      reprocessed_2_at: new Date().toISOString(),
+      processed_all_at: new Date().toISOString(),
       recovery_id: recoveryId,
       attribution_found: attributionFound,
-      status: 'reprocessed_2',
-      reprocessing_pass: 'fast_serverless_dual_ip'
+      status: 'processed_all_no_skip',
+      processing_pass: 'process_all_comprehensive'
     };
     
     await redis(`set/${reprocess2Key}/${encodeURIComponent(JSON.stringify(reprocess2Entry))}`, 2000);
@@ -862,7 +861,7 @@ async function markAsReprocessed2(email, timestamp, recoveryId, attributionFound
     await updateReprocessing2Progress(email, attributionFound);
     
   } catch (error) {
-    console.log(`⚠️ Error marking ${email} as reprocessed2:`, error.message);
+    console.log(`⚠️ Error marking ${email} as processed (all):`, error.message);
   }
 }
 
@@ -877,7 +876,7 @@ async function updateReprocessing2Progress(email, attributionFound) {
       no_attribution: 0,
       started_at: new Date().toISOString(),
       last_updated: new Date().toISOString(),
-      reprocessing_reason: 'fast_serverless_dual_ip'
+      reprocessing_reason: 'process_all_comprehensive_no_skip'
     };
     
     if (progressData?.result) {
@@ -897,7 +896,7 @@ async function updateReprocessing2Progress(email, attributionFound) {
     await redis(`set/${reprocess2ProgressKey}/${encodeURIComponent(JSON.stringify(reprocess2Progress))}`, 2000);
     
     if (reprocess2Progress.total_reprocessed_2 % 10 === 0) {
-      console.log(`🔄 Fast Progress: ${reprocess2Progress.total_reprocessed_2} processed, ${reprocess2Progress.attribution_found} with attribution (${((reprocess2Progress.attribution_found / reprocess2Progress.total_reprocessed_2) * 100).toFixed(1)}%)`);
+      console.log(`🔄 PROCESS ALL Progress: ${reprocess2Progress.total_reprocessed_2} processed, ${reprocess2Progress.attribution_found} with attribution (${((reprocess2Progress.attribution_found / reprocess2Progress.total_reprocessed_2) * 100).toFixed(1)}%)`);
     }
     
   } catch (error) {
