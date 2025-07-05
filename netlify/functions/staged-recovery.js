@@ -382,26 +382,27 @@ async function findAttributionFast(pageviewIP, conversionIP, originalTimestamp, 
   }
 }
 
-// Get limited pageviews with strict time constraints
+// Get comprehensive pageviews optimized for 600/day volume
 async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
   const pageviews = [];
   const scanStartTime = Date.now();
   
   try {
-    console.log(`🔍 Limited pageview scan with ${maxTimeMs}ms budget`);
+    console.log(`🔍 Comprehensive pageview scan with ${maxTimeMs}ms budget (optimized for ~600/day)`);
     
     let cursor = '0';
     let iterationCount = 0;
-    const maxIterations = 5; // Very limited for serverless
+    let totalScanned = 0;
+    const maxIterations = 25; // Increased for better coverage
     
     do {
       const elapsed = Date.now() - scanStartTime;
       if (elapsed > maxTimeMs || iterationCount >= maxIterations) {
-        console.log(`⏰ Limited scan timeout: ${elapsed}ms, ${iterationCount} iterations`);
+        console.log(`⏰ Scan completed: ${elapsed}ms, ${iterationCount} iterations, ${totalScanned} keys scanned`);
         break;
       }
       
-      const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/20`, 1000); // Small batches, short timeout
+      const scanResult = await redis(`scan/${cursor}/match/attribution_*/count/100`, 2000); // Larger batches for efficiency
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -409,9 +410,10 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
       
       cursor = scanResult.result[0];
       const keys = scanResult.result[1] || [];
+      totalScanned += keys.length;
       iterationCount++;
       
-      // Process only main keys (skip lookup keys)
+      // Process main keys (skip lookup keys) in larger batches
       const mainKeys = keys.filter(key => 
         !key.includes('_ip_') && 
         !key.includes('_session_') && 
@@ -419,43 +421,67 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
         !key.includes('_screen_') && 
         !key.includes('_webgl_') && 
         !key.includes('_geo_')
-      ).slice(0, 10); // Limit to 10 keys per iteration
+      ); // Process ALL main keys, not just 10
       
-      for (const key of mainKeys) {
+      console.log(`📊 Iteration ${iterationCount}: ${keys.length} total keys, ${mainKeys.length} main keys to process`);
+      
+      // Process keys in parallel batches for speed
+      const batchSize = 20;
+      for (let i = 0; i < mainKeys.length; i += batchSize) {
         if (Date.now() - scanStartTime > maxTimeMs) break;
         
-        try {
-          const data = await redis(`get/${key}`, 500); // Very short timeout
-          if (data?.result) {
-            const pageview = JSON.parse(data.result);
-            
-            if (pageview.timestamp && pageview.ip_address) {
-              const pageviewTime = new Date(pageview.timestamp);
+        const batch = mainKeys.slice(i, i + batchSize);
+        
+        // Process batch in parallel for speed
+        const batchPromises = batch.map(async (key) => {
+          try {
+            const data = await redis(`get/${key}`, 1500); // Longer timeout for reliability
+            if (data?.result) {
+              const pageview = JSON.parse(data.result);
               
-              if (pageviewTime >= windowStart && pageviewTime <= windowEnd) {
-                pageviews.push({
-                  timestamp: pageview.timestamp,
-                  ip_address: pageview.ip_address,
-                  landing_page: pageview.landing_page,
-                  source: pageview.source,
-                  utm_campaign: pageview.utm_campaign,
-                  utm_medium: pageview.utm_medium,
-                  utm_source: pageview.utm_source,
-                  utm_term: pageview.utm_term,
-                  utm_content: pageview.utm_content
-                });
+              if (pageview.timestamp && pageview.ip_address) {
+                const pageviewTime = new Date(pageview.timestamp);
+                
+                if (pageviewTime >= windowStart && pageviewTime <= windowEnd) {
+                  return {
+                    timestamp: pageview.timestamp,
+                    ip_address: pageview.ip_address,
+                    landing_page: pageview.landing_page,
+                    source: pageview.source,
+                    utm_campaign: pageview.utm_campaign,
+                    utm_medium: pageview.utm_medium,
+                    utm_source: pageview.utm_source,
+                    utm_term: pageview.utm_term,
+                    utm_content: pageview.utm_content
+                  };
+                }
               }
             }
+          } catch (parseError) {
+            return null; // Skip malformed records
           }
-        } catch (parseError) {
-          continue; // Skip malformed records
+          return null;
+        });
+        
+        try {
+          const batchResults = await Promise.all(batchPromises);
+          const validResults = batchResults.filter(result => result !== null);
+          pageviews.push(...validResults);
+        } catch (batchError) {
+          console.log(`⚠️ Batch processing error: ${batchError.message}`);
         }
+      }
+      
+      // Log progress every 5 iterations
+      if (iterationCount % 5 === 0) {
+        const elapsed = Date.now() - scanStartTime;
+        console.log(`📊 Progress: ${pageviews.length} pageviews found, ${elapsed}ms elapsed`);
       }
       
     } while (cursor !== '0' && Date.now() - scanStartTime < maxTimeMs && iterationCount < maxIterations);
     
     const totalTime = Date.now() - scanStartTime;
-    console.log(`📊 Limited scan: ${pageviews.length} pageviews found in ${totalTime}ms`);
+    console.log(`📊 Comprehensive scan complete: ${pageviews.length} pageviews found in ${totalTime}ms (${totalScanned} keys scanned)`);
     
     // Sort by timestamp (most recent first)
     pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -463,7 +489,7 @@ async function getLimitedPageviews(windowStart, windowEnd, maxTimeMs) {
     return pageviews;
     
   } catch (error) {
-    console.error('❌ Limited pageview scan error:', error);
+    console.error('❌ Comprehensive pageview scan error:', error);
     return pageviews;
   }
 }
