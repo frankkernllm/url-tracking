@@ -106,7 +106,7 @@ exports.handler = async (event, context) => {
     if (results.system_ready) {
       nextSteps.push({
         action: 'test_fast_analytics',
-        command: 'curl "https://trackingojoy.netlify.app/.netlify/functions/fast-analytics?start_date=2025-07-10&end_date=2025-07-11" -H "X-API-Key: ojoy_track_2025_secure_key_v1"'
+        command: 'curl "https://trackingojoy.netlify.app/.netlify/functions/fast-analytics?start_date=2025-07-10&end_date=2025-07-11" -H "X-API-Key: YOUR_API_KEY"'
       });
     }
     
