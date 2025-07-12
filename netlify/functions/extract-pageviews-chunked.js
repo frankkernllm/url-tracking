@@ -1,6 +1,6 @@
-// Auto-Complete Pageview Extractor - NO MANUAL INTERVENTION
+// Smart Resume Auto-Complete Pageview Extractor
 // Path: netlify/functions/extract-pageviews-chunked.js
-// Purpose: Extract ALL pageviews automatically in one execution
+// Purpose: Extract ALL pageviews with smart resume from last position
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -22,28 +22,53 @@ exports.handler = async (event, context) => {
     
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
-    const chunkSize = body.chunk_size || 1000; // Smaller chunks for auto-complete
     const pattern = body.pattern || 'attribution_*';
     
-    console.log(`🚀 Starting AUTO-COMPLETE extraction: pattern=${pattern}`);
+    console.log(`🚀 Starting SMART RESUME extraction: pattern=${pattern}`);
     
-    // AUTO-COMPLETE: Continue until all data is extracted
-    const extractionResult = await extractAllPageviewsAutomatically(
+    // Load existing progress or start fresh
+    const progressKey = 'smart_extraction_progress';
+    const existingProgress = await getSmartProgress(redis, progressKey);
+    
+    console.log(`📊 Resuming from previous progress:`, {
+      total_extracted: existingProgress.total_extracted,
+      last_cursor: existingProgress.last_cursor,
+      chunks_completed: existingProgress.chunks_completed
+    });
+    
+    // SMART RESUME: Continue from last cursor position
+    const extractionResult = await extractWithSmartResume(
       redis, 
       pattern, 
-      chunkSize,
+      existingProgress,
       maxProcessingTime - (Date.now() - startTime)
     );
     
-    // Build indexes immediately if extraction completed
+    // Update progress after extraction
+    const updatedProgress = {
+      total_extracted: existingProgress.total_extracted + extractionResult.pageviews_extracted_this_run,
+      total_keys_scanned: existingProgress.total_keys_scanned + extractionResult.keys_scanned_this_run,
+      last_cursor: extractionResult.final_cursor,
+      chunks_completed: existingProgress.chunks_completed + extractionResult.chunks_processed_this_run,
+      chunks_stored: existingProgress.chunks_stored + extractionResult.chunks_stored_this_run,
+      unique_ips_found: extractionResult.total_unique_ips,
+      last_updated: new Date().toISOString(),
+      is_complete: extractionResult.is_complete,
+      earliest_pageview: extractionResult.earliest_pageview || existingProgress.earliest_pageview,
+      latest_pageview: extractionResult.latest_pageview || existingProgress.latest_pageview
+    };
+    
+    await storeSmartProgress(redis, progressKey, updatedProgress);
+    
+    // Build indexes if complete
     let indexResults = null;
     if (extractionResult.is_complete && Date.now() - startTime < maxProcessingTime - 3000) {
-      console.log('🏗️ Auto-building indexes after complete extraction...');
-      indexResults = await buildBasicIndexes(redis, extractionResult);
+      console.log('🏗️ Building indexes after complete extraction...');
+      indexResults = await buildExtractionMetadata(redis, updatedProgress);
     }
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ AUTO-COMPLETE extraction finished in ${totalTime}ms`);
+    console.log(`✅ SMART RESUME extraction finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -52,21 +77,31 @@ exports.handler = async (event, context) => {
         success: true,
         extraction_complete: extractionResult.is_complete,
         extraction_summary: {
-          total_pageviews_extracted: extractionResult.total_pageviews_extracted,
-          total_keys_scanned: extractionResult.total_keys_scanned,
-          chunks_processed: extractionResult.chunks_processed,
-          chunks_stored: extractionResult.chunks_stored,
+          // This run stats
+          pageviews_extracted_this_run: extractionResult.pageviews_extracted_this_run,
+          keys_scanned_this_run: extractionResult.keys_scanned_this_run,
+          chunks_processed_this_run: extractionResult.chunks_processed_this_run,
           processing_time_ms: totalTime,
-          extraction_method: 'auto_complete_no_manual_intervention'
+          
+          // Total stats across all runs
+          total_pageviews_extracted: updatedProgress.total_extracted,
+          total_keys_scanned: updatedProgress.total_keys_scanned,
+          total_chunks_completed: updatedProgress.chunks_completed,
+          extraction_method: 'smart_resume_auto_complete'
         },
         performance: {
-          pageviews_per_second: Math.round(extractionResult.total_pageviews_extracted / (totalTime / 1000)),
-          keys_per_second: Math.round(extractionResult.total_keys_scanned / (totalTime / 1000))
+          pageviews_per_second_this_run: Math.round(extractionResult.pageviews_extracted_this_run / (totalTime / 1000)),
+          total_pageviews_per_second: Math.round(updatedProgress.total_extracted / ((Date.now() - new Date(existingProgress.started_at).getTime()) / 1000))
         },
         coverage: {
-          earliest_pageview: extractionResult.earliest_pageview,
-          latest_pageview: extractionResult.latest_pageview,
-          unique_ips_found: extractionResult.unique_ips_found
+          earliest_pageview: updatedProgress.earliest_pageview,
+          latest_pageview: updatedProgress.latest_pageview,
+          unique_ips_found: updatedProgress.unique_ips_found
+        },
+        resume_info: {
+          started_from_cursor: existingProgress.last_cursor,
+          final_cursor: extractionResult.final_cursor,
+          can_continue: !extractionResult.is_complete
         },
         indexes_built: indexResults ? true : false,
         next_steps: extractionResult.is_complete ? [
@@ -74,39 +109,75 @@ exports.handler = async (event, context) => {
           'Run build-indexes-complete.js to build comprehensive indexes',
           'System ready for attribution queries'
         ] : [
-          'Extraction partially complete due to time constraints',
-          'Run extraction again to continue processing remaining pageviews',
-          'All progress is saved and will continue from where it left off'
+          'Extraction continuing... Run the same command again to continue',
+          'Progress is automatically saved and will resume from where it left off',
+          `Next run will start from cursor: ${extractionResult.final_cursor}`
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Auto-complete extraction failed:', error);
+    console.error('❌ Smart resume extraction failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Auto-complete extraction failed', 
+        error: 'Smart resume extraction failed', 
         message: error.message 
       })
     };
   }
 };
 
-// AUTO-COMPLETE: Extract all pageviews in one execution
-async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTime) {
-  const extractionStartTime = Date.now();
-  let cursor = '0';
-  let totalPageviews = [];
-  let totalKeysScanned = 0;
-  let chunksProcessed = 0;
-  let chunksStored = 0;
-  let uniqueIPs = new Set();
-  let earliestPageview = null;
-  let latestPageview = null;
+// Get smart progress (resume from last position)
+async function getSmartProgress(redis, progressKey) {
+  try {
+    const progressData = await redis(`get/${progressKey}`);
+    
+    if (progressData?.result) {
+      const progress = JSON.parse(decodeURIComponent(progressData.result));
+      console.log(`🔄 Found existing progress: ${progress.total_extracted} pageviews extracted`);
+      return progress;
+    }
+  } catch (error) {
+    console.log('⚠️ No existing progress found, starting fresh');
+  }
   
-  console.log(`🔄 AUTO-COMPLETE: Starting continuous extraction...`);
+  // Default fresh start
+  return {
+    total_extracted: 0,
+    total_keys_scanned: 0,
+    last_cursor: '0',
+    chunks_completed: 0,
+    chunks_stored: 0,
+    unique_ips_found: 0,
+    started_at: new Date().toISOString(),
+    is_complete: false,
+    earliest_pageview: null,
+    latest_pageview: null
+  };
+}
+
+// Store smart progress
+async function storeSmartProgress(redis, progressKey, progress) {
+  await redis(`setex/${progressKey}/3600/${encodeURIComponent(JSON.stringify(progress))}`); // 1 hour TTL
+  console.log(`💾 Progress saved: ${progress.total_extracted} total pageviews, cursor: ${progress.last_cursor}`);
+}
+
+// Extract with smart resume capability
+async function extractWithSmartResume(redis, pattern, existingProgress, maxTime) {
+  const extractionStartTime = Date.now();
+  let cursor = existingProgress.last_cursor; // RESUME FROM LAST POSITION
+  let thisRunPageviews = [];
+  let thisRunKeysScanned = 0;
+  let thisRunChunksProcessed = 0;
+  let thisRunChunksStored = 0;
+  let allUniqueIPs = new Set();
+  let earliestPageview = existingProgress.earliest_pageview;
+  let latestPageview = existingProgress.latest_pageview;
+  
+  console.log(`🔄 SMART RESUME: Starting from cursor: ${cursor}`);
+  console.log(`📊 Previous progress: ${existingProgress.total_extracted} pageviews already extracted`);
   
   try {
     do {
@@ -117,22 +188,23 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
         break;
       }
       
-      console.log(`🔍 Processing cursor: ${cursor}, pageviews so far: ${totalPageviews.length}`);
+      console.log(`🔍 Processing cursor: ${cursor}, this run: ${thisRunPageviews.length} pageviews`);
       
-      // Extract one chunk
+      // Scan for next batch
       const scanResult = await redis(`scan/${cursor}/match/${pattern}/count/500`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         console.log(`🏁 Scan complete: no more results`);
+        cursor = '0'; // Mark as complete
         break;
       }
       
       cursor = scanResult.result[0];
       const keys = scanResult.result[1] || [];
-      totalKeysScanned += keys.length;
-      chunksProcessed++;
+      thisRunKeysScanned += keys.length;
+      thisRunChunksProcessed++;
       
-      console.log(`📊 Chunk ${chunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
+      console.log(`📊 Chunk ${thisRunChunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
       
       // Filter main attribution keys
       const mainKeys = keys.filter(key => {
@@ -159,7 +231,7 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
         continue;
       }
       
-      // Process keys in batches to avoid timeout
+      // Process keys in batches
       const batchSize = 50;
       const chunkPageviews = [];
       
@@ -174,7 +246,7 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
         
         const batchPromises = batch.map(async (key) => {
           try {
-            const data = await redis(`get/${key}`, 1000); // Faster timeout
+            const data = await redis(`get/${key}`, 1000);
             if (data?.result) {
               
               let parsed;
@@ -191,7 +263,7 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
               if (parsed && parsed.timestamp && parsed.ip_address) {
                 
                 // Track unique IPs and time range
-                uniqueIPs.add(parsed.ip_address);
+                allUniqueIPs.add(parsed.ip_address);
                 
                 const pvTime = new Date(parsed.timestamp);
                 if (!earliestPageview || pvTime < new Date(earliestPageview)) {
@@ -235,22 +307,24 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
         console.log(`📦 Batch processed: ${validResults.length} pageviews from ${batch.length} keys`);
       }
       
-      // Add to total pageviews
-      totalPageviews.push(...chunkPageviews);
+      // Add to this run's pageviews
+      thisRunPageviews.push(...chunkPageviews);
       
       // Store chunk if we have data
       if (chunkPageviews.length > 0) {
-        await storePageviewChunk(redis, chunkPageviews, `auto_chunk_${chunksProcessed}`);
-        chunksStored++;
-        console.log(`💾 Stored chunk ${chunksStored} with ${chunkPageviews.length} pageviews`);
+        const chunkId = `smart_chunk_${existingProgress.chunks_completed + thisRunChunksStored + 1}`;
+        await storePageviewChunk(redis, chunkPageviews, chunkId);
+        thisRunChunksStored++;
+        console.log(`💾 Stored chunk ${chunkId} with ${chunkPageviews.length} pageviews`);
       }
       
       // Progress update
-      console.log(`📊 Progress: ${totalPageviews.length} total pageviews, ${totalKeysScanned} keys scanned`);
+      const totalSoFar = existingProgress.total_extracted + thisRunPageviews.length;
+      console.log(`📊 Progress: ${thisRunPageviews.length} this run, ${totalSoFar} total pageviews`);
       
       // Safety check: don't run forever
-      if (chunksProcessed >= 50) {
-        console.log(`🛑 Safety limit: processed 50 chunks, stopping to avoid infinite loop`);
+      if (thisRunChunksProcessed >= 50) {
+        console.log(`🛑 Safety limit: processed 50 chunks this run, stopping to avoid infinite loop`);
         break;
       }
       
@@ -259,21 +333,23 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
     const isComplete = cursor === '0';
     const processingTime = Date.now() - extractionStartTime;
     
-    console.log(`🏁 AUTO-COMPLETE extraction summary:`);
-    console.log(`   📊 Total pageviews: ${totalPageviews.length}`);
-    console.log(`   🔍 Total keys scanned: ${totalKeysScanned}`);
-    console.log(`   📦 Chunks processed: ${chunksProcessed}`);
-    console.log(`   💾 Chunks stored: ${chunksStored}`);
-    console.log(`   🌐 Unique IPs: ${uniqueIPs.size}`);
+    console.log(`🏁 SMART RESUME extraction summary for this run:`);
+    console.log(`   📊 This run pageviews: ${thisRunPageviews.length}`);
+    console.log(`   📊 Total pageviews: ${existingProgress.total_extracted + thisRunPageviews.length}`);
+    console.log(`   🔍 This run keys scanned: ${thisRunKeysScanned}`);
+    console.log(`   📦 This run chunks: ${thisRunChunksProcessed}`);
+    console.log(`   💾 This run chunks stored: ${thisRunChunksStored}`);
+    console.log(`   🌐 Total unique IPs: ${allUniqueIPs.size}`);
     console.log(`   ✅ Complete: ${isComplete}`);
-    console.log(`   ⏱️ Time: ${processingTime}ms`);
+    console.log(`   🎯 Final cursor: ${cursor}`);
+    console.log(`   ⏱️ This run time: ${processingTime}ms`);
     
     return {
-      total_pageviews_extracted: totalPageviews.length,
-      total_keys_scanned: totalKeysScanned,
-      chunks_processed: chunksProcessed,
-      chunks_stored: chunksStored,
-      unique_ips_found: uniqueIPs.size,
+      pageviews_extracted_this_run: thisRunPageviews.length,
+      keys_scanned_this_run: thisRunKeysScanned,
+      chunks_processed_this_run: thisRunChunksProcessed,
+      chunks_stored_this_run: thisRunChunksStored,
+      total_unique_ips: allUniqueIPs.size,
       earliest_pageview: earliestPageview,
       latest_pageview: latestPageview,
       is_complete: isComplete,
@@ -282,14 +358,15 @@ async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTi
     };
     
   } catch (error) {
-    console.error('❌ Auto-complete extraction error:', error);
+    console.error('❌ Smart resume extraction error:', error);
     return {
-      total_pageviews_extracted: totalPageviews.length,
-      total_keys_scanned: totalKeysScanned,
-      chunks_processed: chunksProcessed,
-      chunks_stored: chunksStored,
-      unique_ips_found: uniqueIPs.size,
+      pageviews_extracted_this_run: thisRunPageviews.length,
+      keys_scanned_this_run: thisRunKeysScanned,
+      chunks_processed_this_run: thisRunChunksProcessed,
+      chunks_stored_this_run: thisRunChunksStored,
+      total_unique_ips: allUniqueIPs.size,
       is_complete: false,
+      final_cursor: cursor,
       error: error.message
     };
   }
@@ -310,32 +387,33 @@ async function storePageviewChunk(redis, pageviews, chunkId) {
   await redis(`setex/${chunkKey}/2592000/${encodeURIComponent(JSON.stringify(chunkData))}`); // 30 days TTL
 }
 
-// Build basic indexes from extraction
-async function buildBasicIndexes(redis, extractionResult) {
-  console.log(`🏗️ Building basic indexes for ${extractionResult.total_pageviews_extracted} pageviews...`);
+// Build extraction metadata
+async function buildExtractionMetadata(redis, progress) {
+  console.log(`🏗️ Building extraction metadata for ${progress.total_extracted} pageviews...`);
   
   try {
     const metadataKey = 'pageview_extraction_metadata';
     const metadata = {
       extraction_timestamp: new Date().toISOString(),
-      total_pageviews: extractionResult.total_pageviews_extracted,
-      total_keys_scanned: extractionResult.total_keys_scanned,
-      chunks_stored: extractionResult.chunks_stored,
-      unique_ips_found: extractionResult.unique_ips_found,
-      extraction_method: 'auto_complete_fixed',
-      extraction_complete: extractionResult.is_complete,
-      coverage_start: extractionResult.earliest_pageview,
-      coverage_end: extractionResult.latest_pageview,
-      processing_time_ms: extractionResult.processing_time_ms
+      total_pageviews: progress.total_extracted,
+      total_keys_scanned: progress.total_keys_scanned,
+      chunks_stored: progress.chunks_stored,
+      unique_ips_found: progress.unique_ips_found,
+      extraction_method: 'smart_resume_complete',
+      extraction_complete: progress.is_complete,
+      coverage_start: progress.earliest_pageview,
+      coverage_end: progress.latest_pageview,
+      started_at: progress.started_at,
+      completed_at: new Date().toISOString()
     };
     
     await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`); // 30 days TTL
-    console.log('✅ Basic extraction metadata stored');
+    console.log('✅ Extraction metadata stored');
     
-    return { basic_metadata_created: true };
+    return { metadata_created: true };
     
   } catch (error) {
-    console.error('❌ Basic index building error:', error);
+    console.error('❌ Metadata building error:', error);
     return null;
   }
 }
