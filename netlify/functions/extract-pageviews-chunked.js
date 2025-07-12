@@ -1,6 +1,6 @@
-// Complete Pageview Extractor - Runs to Completion Automatically
+// Complete Pageview Extractor - Focused on Extraction Only
 // Path: netlify/functions/extract-pageviews-chunked.js
-// Purpose: Extract ALL pageviews in one execution without manual cursor management
+// Purpose: Extract ALL pageviews efficiently without indexing (use build-indexes-complete.js for indexing)
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -36,7 +36,7 @@ exports.handler = async (event, context) => {
       chunks_completed: 0
     };
     
-    console.log(`📊 Extracting ALL pageviews automatically...`);
+    console.log(`📊 Extracting ALL pageviews automatically (extraction only)...`);
     
     const completeResult = await extractAllPageviewsToCompletion(
       redis, 
@@ -53,35 +53,27 @@ exports.handler = async (event, context) => {
       last_updated: new Date().toISOString(),
       current_pattern: pattern,
       chunks_completed: completeResult.chunks_processed,
-      extraction_complete: true
+      extraction_complete: completeResult.extraction_complete
     };
     
     await storeExtractionProgress(redis, progressKey, finalProgress);
     
-    // Build indexes from extracted data
-    console.log('🏗️ Building indexes from extracted pageviews...');
-    const indexResults = await buildIndexesFromAllPageviews(redis, completeResult.all_pageviews);
-    
     const totalTime = Date.now() - startTime;
-    console.log(`✅ COMPLETE extraction finished in ${totalTime}ms`);
+    console.log(`✅ EXTRACTION ${completeResult.extraction_complete ? 'COMPLETE' : 'PARTIAL'} in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        extraction_complete: true,
-        complete_extraction_summary: {
+        extraction_complete: completeResult.extraction_complete,
+        extraction_summary: {
           total_pageviews_extracted: completeResult.pageviews_extracted,
           total_keys_scanned: completeResult.keys_scanned,
           chunks_processed: completeResult.chunks_processed,
+          chunks_stored: completeResult.chunks_stored,
           processing_time_ms: totalTime,
-          extraction_method: 'complete_automatic'
-        },
-        indexes_built: {
-          ip_indexes_created: indexResults.ip_indexes_created,
-          time_indexes_created: indexResults.time_indexes_created,
-          total_indexes: indexResults.ip_indexes_created + indexResults.time_indexes_created
+          extraction_method: 'complete_automatic_extraction_only'
         },
         performance: {
           pageviews_per_second: Math.round(completeResult.pageviews_extracted / (totalTime / 1000)),
@@ -90,12 +82,16 @@ exports.handler = async (event, context) => {
         coverage: {
           earliest_pageview: completeResult.earliest_timestamp,
           latest_pageview: completeResult.latest_timestamp,
-          unique_ips_found: completeResult.unique_ips.size
+          unique_ips_found: completeResult.unique_ips_count
         },
-        next_steps: [
+        next_steps: completeResult.extraction_complete ? [
           'Pageview extraction is now complete',
-          'Indexes have been built automatically', 
-          'System ready for attribution queries'
+          'Run build-indexes-complete.js to build indexes from extracted data',
+          'curl -X POST .../build-indexes-complete'
+        ] : [
+          'Extraction partially complete due to time constraints',
+          'Run extraction again to continue processing remaining pageviews',
+          'Then run build-indexes-complete.js to build indexes'
         ]
       })
     };
@@ -113,29 +109,30 @@ exports.handler = async (event, context) => {
   }
 };
 
-// Extract ALL pageviews to completion in one execution
+// Extract ALL pageviews to completion - EXTRACTION ONLY
 async function extractAllPageviewsToCompletion(redis, pattern, maxTime) {
   const extractionStartTime = Date.now();
-  const allPageviews = [];
   const uniqueIPs = new Set();
   
+  let totalPageviewsExtracted = 0;
   let totalKeysScanned = 0;
   let chunksProcessed = 0;
+  let chunksStored = 0;
   let cursor = '0';
   let earliestTimestamp = null;
   let latestTimestamp = null;
   
-  console.log(`📊 Beginning complete extraction with ${maxTime}ms available`);
+  console.log(`📊 Beginning extraction-only processing with ${maxTime}ms available`);
   
   try {
     let iterations = 0;
-    const maxIterations = 25; // Safety valve to prevent infinite loops
+    const maxIterations = 15; // Reduced for reliability - focus on extraction only
     
     do {
       // Conservative timeout management - leave 8 seconds buffer for final processing
       if (Date.now() - extractionStartTime > maxTime - 8000 || iterations >= maxIterations) {
         console.log(`⏰ Time/iteration limit reached: ${Date.now() - extractionStartTime}ms, iteration ${iterations}`);
-        console.log(`🔄 Graceful stop - extracted ${allPageviews.length} pageviews so far`);
+        console.log(`🔄 Graceful stop - extracted ${totalPageviewsExtracted} pageviews so far`);
         break;
       }
       
@@ -169,108 +166,61 @@ async function extractAllPageviewsToCompletion(redis, pattern, maxTime) {
       
       console.log(`📊 Found ${mainKeys.length} main attribution keys in this chunk`);
       
-      // Process in conservative batches to avoid timeout
-      const batchSize = 25; // Conservative batch size
-      for (let i = 0; i < mainKeys.length; i += batchSize) {
-        // Conservative timeout check - leave 6 seconds for final processing
-        if (Date.now() - extractionStartTime > maxTime - 6000) {
-          console.log(`⏰ Time limit approaching, stopping batch processing`);
-          break;
-        }
-        
-        const batch = mainKeys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const data = await redis(`get/${key}`, 2000); // Conservative timeout
-            if (data?.result) {
-              const parsed = JSON.parse(decodeURIComponent(data.result));
-              
-              if (parsed.timestamp && parsed.ip_address && 
-                  (parsed.landing_page || parsed.url || parsed.page_url)) {
-                
-                // Track time range
-                const pvTime = new Date(parsed.timestamp);
-                if (!earliestTimestamp || pvTime < earliestTimestamp) {
-                  earliestTimestamp = pvTime;
-                }
-                if (!latestTimestamp || pvTime > latestTimestamp) {
-                  latestTimestamp = pvTime;
-                }
-                
-                // Track unique IPs
-                uniqueIPs.add(parsed.ip_address);
-                
-                return {
-                  timestamp: parsed.timestamp,
-                  ip_address: parsed.ip_address,
-                  landing_page: parsed.landing_page || parsed.url || parsed.page_url,
-                  source: parsed.source || 'unknown',
-                  utm_campaign: parsed.utm_campaign,
-                  utm_medium: parsed.utm_medium,
-                  utm_source: parsed.utm_source,
-                  utm_term: parsed.utm_term,
-                  utm_content: parsed.utm_content,
-                  referrer_url: parsed.referrer_url,
-                  session_id: parsed.session_id,
-                  canvas_fingerprint: parsed.canvas_fingerprint,
-                  webgl_fingerprint: parsed.webgl_fingerprint,
-                  cpu_cores: parsed.cpu_cores,
-                  memory_gb: parsed.memory_gb,
-                  city: parsed.city,
-                  region: parsed.region,
-                  isp: parsed.isp,
-                  redis_key: key
-                };
-              }
-            }
-          } catch (parseError) {
-            // Skip invalid data - graceful error handling
-          }
-          return null;
-        });
-        
-        try {
-          const batchResults = await Promise.all(batchPromises);
-          const validResults = batchResults.filter(result => result !== null);
-          allPageviews.push(...validResults);
-        } catch (batchError) {
-          console.log(`⚠️ Batch processing error (continuing): ${batchError.message}`);
-          // Continue processing even if some batches fail
-        }
-        
-        // Progress logging
-        if (allPageviews.length % 500 === 0 && allPageviews.length > 0) {
-          console.log(`📊 Extraction progress: ${allPageviews.length} pageviews from ${totalKeysScanned} keys scanned`);
+      // Process and store this chunk's pageviews
+      const chunkPageviews = await processChunkPageviews(redis, mainKeys, maxTime - (Date.now() - extractionStartTime));
+      
+      // Track statistics without keeping pageviews in memory
+      totalPageviewsExtracted += chunkPageviews.pageviews_extracted;
+      
+      // Update time range and unique IPs
+      if (chunkPageviews.earliest_timestamp) {
+        const chunkEarliest = new Date(chunkPageviews.earliest_timestamp);
+        if (!earliestTimestamp || chunkEarliest < earliestTimestamp) {
+          earliestTimestamp = chunkEarliest;
         }
       }
       
+      if (chunkPageviews.latest_timestamp) {
+        const chunkLatest = new Date(chunkPageviews.latest_timestamp);
+        if (!latestTimestamp || chunkLatest > latestTimestamp) {
+          latestTimestamp = chunkLatest;
+        }
+      }
+      
+      // Add unique IPs from this chunk
+      chunkPageviews.unique_ips.forEach(ip => uniqueIPs.add(ip));
+      
+      // Store chunk if it has pageviews
+      if (chunkPageviews.pageviews_extracted > 0) {
+        await storePageviewChunk(redis, chunkPageviews.pageviews, `chunk_${chunksProcessed}`);
+        chunksStored++;
+      }
+      
       // Log chunk completion
-      console.log(`✅ Chunk ${chunksProcessed} complete: ${allPageviews.length} total pageviews extracted`);
+      console.log(`✅ Chunk ${chunksProcessed} complete: ${chunkPageviews.pageviews_extracted} pageviews extracted and stored`);
+      console.log(`📊 Running total: ${totalPageviewsExtracted} pageviews, ${uniqueIPs.size} unique IPs`);
       
       // Conservative timeout check for loop continuation
     } while (cursor !== '0' && Date.now() - extractionStartTime < maxTime - 5000);
     
-    // Sort all pageviews by timestamp
-    allPageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-    
     const extractionTime = Date.now() - extractionStartTime;
     const isComplete = cursor === '0';
     
-    console.log(`✅ Extraction ${isComplete ? 'COMPLETE' : 'PARTIAL'}: ${allPageviews.length} pageviews in ${extractionTime}ms`);
+    console.log(`✅ Extraction ${isComplete ? 'COMPLETE' : 'PARTIAL'}: ${totalPageviewsExtracted} pageviews in ${extractionTime}ms`);
     console.log(`📊 Coverage: ${earliestTimestamp?.toISOString()} to ${latestTimestamp?.toISOString()}`);
     console.log(`🌐 Unique IPs found: ${uniqueIPs.size}`);
+    console.log(`💾 Chunks stored: ${chunksStored}`);
     
     if (!isComplete) {
       console.log(`⚠️ Extraction stopped due to time constraints. Processed ${chunksProcessed} chunks.`);
     }
     
     return {
-      pageviews_extracted: allPageviews.length,
+      pageviews_extracted: totalPageviewsExtracted,
       keys_scanned: totalKeysScanned,
       chunks_processed: chunksProcessed,
-      all_pageviews: allPageviews,
-      unique_ips: uniqueIPs,
+      chunks_stored: chunksStored,
+      unique_ips_count: uniqueIPs.size,
       earliest_timestamp: earliestTimestamp?.toISOString(),
       latest_timestamp: latestTimestamp?.toISOString(),
       processing_time_ms: extractionTime,
@@ -278,13 +228,13 @@ async function extractAllPageviewsToCompletion(redis, pattern, maxTime) {
     };
     
   } catch (error) {
-    console.error('❌ Complete extraction error:', error);
+    console.error('❌ Extraction error:', error);
     return {
-      pageviews_extracted: allPageviews.length,
+      pageviews_extracted: totalPageviewsExtracted,
       keys_scanned: totalKeysScanned,
       chunks_processed: chunksProcessed,
-      all_pageviews: allPageviews,
-      unique_ips: uniqueIPs,
+      chunks_stored: chunksStored,
+      unique_ips_count: uniqueIPs.size,
       earliest_timestamp: earliestTimestamp?.toISOString(),
       latest_timestamp: latestTimestamp?.toISOString(),
       error: error.message,
