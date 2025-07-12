@@ -653,7 +653,7 @@ function createEnhancedAttributionQuerier() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': process.env.OJOY_API_KEY || 'ojoy_track_2025_secure_key_v1'  // Use environment variable
+          'X-API-Key': process.env.OJOY_API_KEY  // Use environment variable (required)
         },
         body: JSON.stringify(params)
       });
