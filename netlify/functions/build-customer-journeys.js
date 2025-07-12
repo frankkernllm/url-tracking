@@ -34,6 +34,13 @@ exports.handler = async (event, context) => {
       skip_existing = false       // Whether to skip already processed conversions
     } = body;
     
+    console.log(`🔧 DEBUG: Received parameters:`, { 
+      date_range_days, 
+      journey_window_hours, 
+      batch_size, 
+      rebuild_existing, 
+      skip_existing 
+    });
     console.log(`📊 Journey Parameters: ${date_range_days} days of conversions, ${journey_window_hours}h lookback window`);
     if (skip_existing) {
       console.log(`🔄 Resume mode: Will skip existing journeys and process only new conversions`);
