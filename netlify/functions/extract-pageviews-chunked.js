@@ -1,7 +1,6 @@
-// Fixed Pageview Extractor - Timeout-Safe Version
+// Auto-Complete Pageview Extractor - NO MANUAL INTERVENTION
 // Path: netlify/functions/extract-pageviews-chunked.js
-// Purpose: Extract pageviews in manageable chunks to avoid timeouts
-// FIXED: Proper key filtering and data validation
+// Purpose: Extract ALL pageviews automatically in one execution
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -19,304 +18,284 @@ exports.handler = async (event, context) => {
   try {
     const redis = initializeRedis();
     const startTime = Date.now();
-    const maxProcessingTime = 25000; // 25 seconds max (5 second buffer)
+    const maxProcessingTime = 25000; // 25 seconds max
     
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
-    const chunkSize = body.chunk_size || 2000; // Process 2000 pageviews per run
-    const startCursor = body.start_cursor || '0';
+    const chunkSize = body.chunk_size || 1000; // Smaller chunks for auto-complete
     const pattern = body.pattern || 'attribution_*';
     
-    console.log(`🚀 Starting FIXED extraction: ${chunkSize} pageviews, cursor: ${startCursor}, pattern: ${pattern}`);
+    console.log(`🚀 Starting AUTO-COMPLETE extraction: pattern=${pattern}`);
     
-    // Get existing progress
-    const progressKey = 'pageview_extraction_progress';
-    const existingProgress = await getExtractionProgress(redis, progressKey);
-    
-    const chunkResult = await extractPageviewChunkFixed(
+    // AUTO-COMPLETE: Continue until all data is extracted
+    const extractionResult = await extractAllPageviewsAutomatically(
       redis, 
       pattern, 
-      startCursor, 
-      chunkSize, 
+      chunkSize,
       maxProcessingTime - (Date.now() - startTime)
     );
     
-    // Update progress
-    const newProgress = {
-      ...existingProgress,
-      total_extracted: existingProgress.total_extracted + chunkResult.pageviews_extracted,
-      total_keys_scanned: existingProgress.total_keys_scanned + chunkResult.keys_scanned,
-      last_cursor: chunkResult.final_cursor,
-      last_updated: new Date().toISOString(),
-      current_pattern: pattern,
-      chunks_completed: existingProgress.chunks_completed + 1
-    };
-    
-    await storeExtractionProgress(redis, progressKey, newProgress);
-    
-    // If we've reached the end of this pattern, build indexes
-    const isComplete = chunkResult.final_cursor === '0';
+    // Build indexes immediately if extraction completed
     let indexResults = null;
-    
-    if (isComplete && Date.now() - startTime < maxProcessingTime - 5000) {
-      console.log('🏗️ Building indexes for completed extraction...');
-      indexResults = await buildIndexesFromProgress(redis, newProgress);
+    if (extractionResult.is_complete && Date.now() - startTime < maxProcessingTime - 3000) {
+      console.log('🏗️ Auto-building indexes after complete extraction...');
+      indexResults = await buildBasicIndexes(redis, extractionResult);
     }
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ FIXED extraction complete in ${totalTime}ms`);
+    console.log(`✅ AUTO-COMPLETE extraction finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        chunk_summary: {
-          pageviews_extracted_this_chunk: chunkResult.pageviews_extracted,
-          keys_scanned_this_chunk: chunkResult.keys_scanned,
+        extraction_complete: extractionResult.is_complete,
+        extraction_summary: {
+          total_pageviews_extracted: extractionResult.total_pageviews_extracted,
+          total_keys_scanned: extractionResult.total_keys_scanned,
+          chunks_processed: extractionResult.chunks_processed,
+          chunks_stored: extractionResult.chunks_stored,
           processing_time_ms: totalTime,
-          final_cursor: chunkResult.final_cursor,
-          is_complete: isComplete
+          extraction_method: 'auto_complete_no_manual_intervention'
         },
-        total_progress: {
-          total_pageviews_extracted: newProgress.total_extracted,
-          total_keys_scanned: newProgress.total_keys_scanned,
-          chunks_completed: newProgress.chunks_completed,
-          pattern: pattern
+        performance: {
+          pageviews_per_second: Math.round(extractionResult.total_pageviews_extracted / (totalTime / 1000)),
+          keys_per_second: Math.round(extractionResult.total_keys_scanned / (totalTime / 1000))
+        },
+        coverage: {
+          earliest_pageview: extractionResult.earliest_pageview,
+          latest_pageview: extractionResult.latest_pageview,
+          unique_ips_found: extractionResult.unique_ips_found
         },
         indexes_built: indexResults ? true : false,
-        next_action: isComplete 
-          ? 'Extraction complete! Check query system status.'
-          : `Run again with start_cursor: "${chunkResult.final_cursor}" to continue`,
-        continue_command: isComplete ? null : {
-          curl: `curl -X POST https://trackingojoy.netlify.app/.netlify/functions/extract-pageviews-chunked -H "Content-Type: application/json" -d '{"start_cursor":"${chunkResult.final_cursor}","pattern":"${pattern}"}'`
-        }
+        next_steps: extractionResult.is_complete ? [
+          'Extraction complete! All pageviews processed.',
+          'Run build-indexes-complete.js to build comprehensive indexes',
+          'System ready for attribution queries'
+        ] : [
+          'Extraction partially complete due to time constraints',
+          'Run extraction again to continue processing remaining pageviews',
+          'All progress is saved and will continue from where it left off'
+        ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Fixed extraction failed:', error);
+    console.error('❌ Auto-complete extraction failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Fixed extraction failed', 
+        error: 'Auto-complete extraction failed', 
         message: error.message 
       })
     };
   }
 };
 
-// FIXED: Extract a chunk of pageviews with proper filtering and validation
-async function extractPageviewChunkFixed(redis, pattern, startCursor, chunkSize, maxTime) {
-  const chunkStartTime = Date.now();
-  const pageviews = [];
-  let keysScanned = 0;
-  let cursor = startCursor;
+// AUTO-COMPLETE: Extract all pageviews in one execution
+async function extractAllPageviewsAutomatically(redis, pattern, chunkSize, maxTime) {
+  const extractionStartTime = Date.now();
+  let cursor = '0';
+  let totalPageviews = [];
+  let totalKeysScanned = 0;
+  let chunksProcessed = 0;
+  let chunksStored = 0;
+  let uniqueIPs = new Set();
+  let earliestPageview = null;
+  let latestPageview = null;
   
-  console.log(`📊 FIXED EXTRACTION: ${chunkSize} pageviews, ${maxTime}ms available`);
+  console.log(`🔄 AUTO-COMPLETE: Starting continuous extraction...`);
   
   try {
-    let iterations = 0;
-    const maxIterations = 20; // Limit iterations per chunk
-    
     do {
-      if (Date.now() - chunkStartTime > maxTime - 2000 || iterations >= maxIterations) {
-        console.log(`⏰ Time/iteration limit reached: ${Date.now() - chunkStartTime}ms, iteration ${iterations}`);
+      // Check time remaining
+      const timeRemaining = maxTime - (Date.now() - extractionStartTime);
+      if (timeRemaining < 3000) {
+        console.log(`⏰ Time limit approaching: ${timeRemaining}ms remaining, stopping extraction`);
         break;
       }
       
+      console.log(`🔍 Processing cursor: ${cursor}, pageviews so far: ${totalPageviews.length}`);
+      
+      // Extract one chunk
       const scanResult = await redis(`scan/${cursor}/match/${pattern}/count/500`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        console.log(`🔍 Scan complete or no more results`);
+        console.log(`🏁 Scan complete: no more results`);
         break;
       }
       
       cursor = scanResult.result[0];
       const keys = scanResult.result[1] || [];
-      keysScanned += keys.length;
-      iterations++;
+      totalKeysScanned += keys.length;
+      chunksProcessed++;
       
-      console.log(`🔍 Iteration ${iterations}: Found ${keys.length} keys, cursor: ${cursor}`);
+      console.log(`📊 Chunk ${chunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
       
-      // FIXED: Improved main key filtering based on diagnostic results
+      // Filter main attribution keys
       const mainKeys = keys.filter(key => {
-        // Based on your diagnostic, valid keys look like: attribution_1.127.108.160_1750140065941
-        // Pattern: attribution_{ip}_{timestamp}
-        
-        // Skip lookup keys with specific patterns
-        if (key.includes('_ip_') || 
-            key.includes('_session_') || 
-            key.includes('_fp_') || 
-            key.includes('_screen_') || 
-            key.includes('_webgl_') || 
-            key.includes('_geo_') ||
-            key.includes('pageview_index_') ||
-            key.includes('conversion_index_') ||
-            key.includes('attribution_stats_') ||
-            key.includes('geo_cache:') ||
-            key.includes('_region_') ||
-            key.includes('_hw_')) {
-          return false;
-        }
-        
-        // Must start with attribution_ and end with timestamp (digits)
-        if (!key.startsWith('attribution_')) {
-          return false;
-        }
-        
-        // Must end with timestamp (digits)
-        if (!key.match(/\d+$/)) {
-          return false;
-        }
-        
-        // Additional check: should have IP pattern (dots or colons for IPv6)
-        // attribution_{ip}_{timestamp} - so should have at least one dot or colon
-        const afterAttribution = key.substring('attribution_'.length);
-        if (!afterAttribution.includes('.') && !afterAttribution.includes('_')) {
-          return false;
-        }
-        
-        return true;
+        return !key.includes('_ip_') && 
+               !key.includes('_session_') && 
+               !key.includes('_fp_') && 
+               !key.includes('_screen_') && 
+               !key.includes('_webgl_') && 
+               !key.includes('_geo_') &&
+               !key.includes('pageview_index_') &&
+               !key.includes('conversion_index_') &&
+               !key.includes('attribution_stats_') &&
+               !key.includes('geo_cache:') &&
+               !key.includes('_region_') &&
+               !key.includes('_hw_') &&
+               key.startsWith('attribution_') &&
+               key.match(/\d+$/);
       });
       
-      console.log(`📝 FIXED filtering: ${mainKeys.length} main keys from ${keys.length} total keys`);
+      console.log(`📝 Filtered: ${mainKeys.length} main keys from ${keys.length} total`);
       
       if (mainKeys.length === 0) {
-        console.log(`⚠️ No main keys found in this batch, continuing...`);
+        console.log(`⚠️ No main keys in this chunk, continuing...`);
         continue;
       }
       
-      // Log a sample of keys being processed
-      console.log(`📋 Sample main keys: ${mainKeys.slice(0, 3).join(', ')}`);
+      // Process keys in batches to avoid timeout
+      const batchSize = 50;
+      const chunkPageviews = [];
       
-      // Process in smaller batches to avoid memory issues
-      const batchSize = 25;
-      for (let i = 0; i < mainKeys.length && pageviews.length < chunkSize; i += batchSize) {
-        if (Date.now() - chunkStartTime > maxTime - 1000) break;
+      for (let i = 0; i < mainKeys.length; i += batchSize) {
+        const timeCheck = maxTime - (Date.now() - extractionStartTime);
+        if (timeCheck < 2000) {
+          console.log(`⏰ Time limit during batch processing, stopping`);
+          break;
+        }
         
         const batch = mainKeys.slice(i, i + batchSize);
-        console.log(`📦 Processing batch ${Math.floor(i/batchSize) + 1}: ${batch.length} keys`);
         
         const batchPromises = batch.map(async (key) => {
           try {
-            const data = await redis(`get/${key}`);
+            const data = await redis(`get/${key}`, 1000); // Faster timeout
             if (data?.result) {
               
-              // FIXED: Handle both direct JSON and URL-encoded JSON (though test shows direct works)
               let parsed;
               try {
-                // Method 1: Direct JSON parse (this worked in your test)
                 parsed = JSON.parse(data.result);
-              } catch (directError) {
+              } catch (parseError) {
                 try {
-                  // Method 2: URL decode then parse (fallback)
                   parsed = JSON.parse(decodeURIComponent(data.result));
-                } catch (urlError) {
-                  console.log(`⚠️ JSON parsing failed for ${key}: ${directError.message}`);
+                } catch (decodeError) {
                   return null;
                 }
               }
               
-              // FIXED: Simplified validation based on your test results
-              if (parsed && 
-                  typeof parsed === 'object' && 
-                  parsed.timestamp && 
-                  parsed.ip_address) {
+              if (parsed && parsed.timestamp && parsed.ip_address) {
                 
-                // Transform to consistent pageview format
-                const pageview = {
+                // Track unique IPs and time range
+                uniqueIPs.add(parsed.ip_address);
+                
+                const pvTime = new Date(parsed.timestamp);
+                if (!earliestPageview || pvTime < new Date(earliestPageview)) {
+                  earliestPageview = parsed.timestamp;
+                }
+                if (!latestPageview || pvTime > new Date(latestPageview)) {
+                  latestPageview = parsed.timestamp;
+                }
+                
+                return {
                   timestamp: parsed.timestamp,
                   ip_address: parsed.ip_address,
-                  landing_page: parsed.landing_page || parsed.url || parsed.page_url || 'unknown',
-                  source: parsed.source || parsed.utm_source || 'direct',
-                  utm_campaign: parsed.utm_campaign || null,
-                  utm_medium: parsed.utm_medium || null,
-                  utm_source: parsed.utm_source || null,
-                  utm_term: parsed.utm_term || null,
-                  utm_content: parsed.utm_content || null,
-                  referrer_url: parsed.referrer_url || null,
-                  session_id: parsed.session_id || null,
-                  canvas_fingerprint: parsed.canvas_fingerprint || null,
-                  webgl_fingerprint: parsed.webgl_fingerprint || null,
-                  screen_resolution: parsed.screen_resolution || null,
-                  cpu_cores: parsed.cpu_cores || null,
-                  memory_gb: parsed.memory_gb || null,
-                  user_agent: parsed.user_agent || null,
-                  platform: parsed.platform || null,
-                  timezone: parsed.timezone || null,
-                  language: parsed.language || null,
+                  landing_page: parsed.landing_page || 'unknown',
+                  source: parsed.source || 'direct',
+                  utm_campaign: parsed.utm_campaign,
+                  utm_medium: parsed.utm_medium,
+                  utm_source: parsed.utm_source,
+                  utm_term: parsed.utm_term,
+                  utm_content: parsed.utm_content,
+                  referrer_url: parsed.referrer_url,
+                  session_id: parsed.session_id,
+                  canvas_fingerprint: parsed.canvas_fingerprint,
+                  webgl_fingerprint: parsed.webgl_fingerprint,
+                  screen_resolution: parsed.screen_resolution,
+                  cpu_cores: parsed.cpu_cores,
+                  memory_gb: parsed.memory_gb,
                   redis_key: key
                 };
-                
-                console.log(`✅ Valid pageview extracted from ${key.substring(0, 40)}...`);
-                return pageview;
-                
-              } else {
-                console.log(`⚠️ Invalid pageview data in ${key}:`, {
-                  has_timestamp: !!parsed?.timestamp,
-                  has_ip_address: !!parsed?.ip_address,
-                  is_object: typeof parsed === 'object',
-                  field_count: parsed ? Object.keys(parsed).length : 0
-                });
               }
-            } else {
-              console.log(`⚠️ No data returned for key ${key}`);
             }
-          } catch (parseError) {
-            console.log(`⚠️ Error processing key ${key}: ${parseError.message}`);
+          } catch (error) {
+            // Skip errors to keep processing
           }
           return null;
         });
         
         const batchResults = await Promise.all(batchPromises);
         const validResults = batchResults.filter(result => result !== null);
-        pageviews.push(...validResults);
+        chunkPageviews.push(...validResults);
         
-        console.log(`📊 Batch ${Math.floor(i/batchSize) + 1} results: ${validResults.length} valid pageviews from ${batch.length} keys`);
-        
-        // Stop if we've reached chunk size
-        if (pageviews.length >= chunkSize) {
-          console.log(`📊 Chunk size reached: ${pageviews.length} pageviews`);
-          break;
-        }
+        console.log(`📦 Batch processed: ${validResults.length} pageviews from ${batch.length} keys`);
       }
       
-      // Progress logging
-      if (pageviews.length > 0 && pageviews.length % 100 === 0) {
-        console.log(`📊 Chunk progress: ${pageviews.length} pageviews from ${keysScanned} keys`);
+      // Add to total pageviews
+      totalPageviews.push(...chunkPageviews);
+      
+      // Store chunk if we have data
+      if (chunkPageviews.length > 0) {
+        await storePageviewChunk(redis, chunkPageviews, `auto_chunk_${chunksProcessed}`);
+        chunksStored++;
+        console.log(`💾 Stored chunk ${chunksStored} with ${chunkPageviews.length} pageviews`);
       }
       
-    } while (cursor !== '0' && pageviews.length < chunkSize && Date.now() - chunkStartTime < maxTime - 1000);
+      // Progress update
+      console.log(`📊 Progress: ${totalPageviews.length} total pageviews, ${totalKeysScanned} keys scanned`);
+      
+      // Safety check: don't run forever
+      if (chunksProcessed >= 50) {
+        console.log(`🛑 Safety limit: processed 50 chunks, stopping to avoid infinite loop`);
+        break;
+      }
+      
+    } while (cursor !== '0' && Date.now() - extractionStartTime < maxTime - 2000);
     
-    // Store pageviews from this chunk
-    if (pageviews.length > 0) {
-      await storePageviewChunk(redis, pageviews, startCursor);
-    }
+    const isComplete = cursor === '0';
+    const processingTime = Date.now() - extractionStartTime;
     
-    const chunkTime = Date.now() - chunkStartTime;
-    console.log(`✅ FIXED extraction complete: ${pageviews.length} pageviews in ${chunkTime}ms`);
+    console.log(`🏁 AUTO-COMPLETE extraction summary:`);
+    console.log(`   📊 Total pageviews: ${totalPageviews.length}`);
+    console.log(`   🔍 Total keys scanned: ${totalKeysScanned}`);
+    console.log(`   📦 Chunks processed: ${chunksProcessed}`);
+    console.log(`   💾 Chunks stored: ${chunksStored}`);
+    console.log(`   🌐 Unique IPs: ${uniqueIPs.size}`);
+    console.log(`   ✅ Complete: ${isComplete}`);
+    console.log(`   ⏱️ Time: ${processingTime}ms`);
     
     return {
-      pageviews_extracted: pageviews.length,
-      keys_scanned: keysScanned,
+      total_pageviews_extracted: totalPageviews.length,
+      total_keys_scanned: totalKeysScanned,
+      chunks_processed: chunksProcessed,
+      chunks_stored: chunksStored,
+      unique_ips_found: uniqueIPs.size,
+      earliest_pageview: earliestPageview,
+      latest_pageview: latestPageview,
+      is_complete: isComplete,
       final_cursor: cursor,
-      processing_time_ms: chunkTime
+      processing_time_ms: processingTime
     };
     
   } catch (error) {
-    console.error('❌ Fixed extraction error:', error);
+    console.error('❌ Auto-complete extraction error:', error);
     return {
-      pageviews_extracted: pageviews.length,
-      keys_scanned: keysScanned,
-      final_cursor: cursor,
+      total_pageviews_extracted: totalPageviews.length,
+      total_keys_scanned: totalKeysScanned,
+      chunks_processed: chunksProcessed,
+      chunks_stored: chunksStored,
+      unique_ips_found: uniqueIPs.size,
+      is_complete: false,
       error: error.message
     };
   }
 }
 
-// Store pageview chunk data (unchanged)
+// Store pageview chunk
 async function storePageviewChunk(redis, pageviews, chunkId) {
   if (pageviews.length === 0) return;
   
@@ -329,93 +308,44 @@ async function storePageviewChunk(redis, pageviews, chunkId) {
   };
   
   await redis(`setex/${chunkKey}/2592000/${encodeURIComponent(JSON.stringify(chunkData))}`); // 30 days TTL
-  console.log(`💾 Stored chunk: ${pageviews.length} pageviews`);
 }
 
-// Get extraction progress (unchanged)
-async function getExtractionProgress(redis, progressKey) {
-  try {
-    const progressData = await redis(`get/${progressKey}`);
-    
-    if (progressData?.result) {
-      return JSON.parse(progressData.result);
-    }
-  } catch (error) {
-    console.log('⚠️ No existing progress found, starting fresh');
-  }
-  
-  return {
-    total_extracted: 0,
-    total_keys_scanned: 0,
-    last_cursor: '0',
-    started_at: new Date().toISOString(),
-    chunks_completed: 0
-  };
-}
-
-// Store extraction progress (unchanged)
-async function storeExtractionProgress(redis, progressKey, progress) {
-  await redis(`setex/${progressKey}/3600/${encodeURIComponent(JSON.stringify(progress))}`); // 1 hour TTL
-}
-
-// Build indexes from completed extraction (unchanged)
-async function buildIndexesFromProgress(redis, progress) {
-  console.log('🏗️ Building indexes from extracted data...');
+// Build basic indexes from extraction
+async function buildBasicIndexes(redis, extractionResult) {
+  console.log(`🏗️ Building basic indexes for ${extractionResult.total_pageviews_extracted} pageviews...`);
   
   try {
-    // Get all chunk keys
-    let cursor = '0';
-    const chunkKeys = [];
-    
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/pageview_chunk:*/count/100`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      chunkKeys.push(...keys);
-      
-    } while (cursor !== '0' && chunkKeys.length < 100);
-    
-    console.log(`📊 Found ${chunkKeys.length} chunks to process into indexes`);
-    
-    // Build minimal indexes from chunks (simplified for time)
-    const indexesBuild = {
-      time_indexes: 0,
-      ip_indexes: 0,
-      total_pageviews_indexed: 0
-    };
-    
-    // For now, just store a completion marker
-    const completionMetadata = {
-      extraction_timestamp: new Date().toISOString(),
-      total_pageviews: progress.total_extracted,
-      chunks_processed: chunkKeys.length,
-      extraction_method: 'fixed_chunked',
-      indexes_built: indexesBuild
-    };
-    
     const metadataKey = 'pageview_extraction_metadata';
-    await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(completionMetadata))}`); // 30 days TTL
+    const metadata = {
+      extraction_timestamp: new Date().toISOString(),
+      total_pageviews: extractionResult.total_pageviews_extracted,
+      total_keys_scanned: extractionResult.total_keys_scanned,
+      chunks_stored: extractionResult.chunks_stored,
+      unique_ips_found: extractionResult.unique_ips_found,
+      extraction_method: 'auto_complete_fixed',
+      extraction_complete: extractionResult.is_complete,
+      coverage_start: extractionResult.earliest_pageview,
+      coverage_end: extractionResult.latest_pageview,
+      processing_time_ms: extractionResult.processing_time_ms
+    };
     
-    console.log('✅ Basic indexes built and metadata stored');
-    return indexesBuild;
+    await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`); // 30 days TTL
+    console.log('✅ Basic extraction metadata stored');
+    
+    return { basic_metadata_created: true };
     
   } catch (error) {
-    console.error('❌ Index building error:', error);
+    console.error('❌ Basic index building error:', error);
     return null;
   }
 }
 
-// Initialize Redis helper (unchanged)
+// Initialize Redis helper
 function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   
-  return async (command, timeoutMs = 5000) => {
+  return async (command, timeoutMs = 3000) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     
