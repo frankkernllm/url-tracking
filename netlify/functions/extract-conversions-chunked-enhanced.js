@@ -1,6 +1,6 @@
-// extract-conversions-chunked-enhanced.js - Build conversion indexes with ALL IP data
+// extract-conversions-chunked-enhanced.js - Build conversion indexes with ALL IP data and 30-day TTL
 // Path: netlify/functions/extract-conversions-chunked-enhanced.js
-// ENHANCED: Captures all IP data stored by track.js
+// ENHANCED: Captures all IP data stored by track.js with consistent 30-day retention
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -17,7 +17,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('💰 ENHANCED CONVERSION EXTRACTOR: Starting with ALL IP data capture...');
+    console.log('💰 ENHANCED CONVERSION EXTRACTOR: Starting with ALL IP data capture and 30-day TTL...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -42,10 +42,10 @@ exports.handler = async (event, context) => {
     const allConversions = await loadAllConversionsEnhanced(redis, conversionKeys, maxProcessingTime - (Date.now() - startTime));
     console.log(`💰 Loaded ${allConversions.length} conversions with complete IP data`);
     
-    // Step 3: Build enhanced date-based indexes
+    // Step 3: Build enhanced date-based indexes with 30-day TTL
     const indexResults = await buildEnhancedConversionDateIndexes(redis, allConversions, maxProcessingTime - (Date.now() - startTime));
     
-    // Step 4: Build IP-specific analytics indexes
+    // Step 4: Build IP-specific analytics indexes with 30-day TTL
     const ipAnalyticsResults = await buildIPAnalyticsIndexes(redis, allConversions, maxProcessingTime - (Date.now() - startTime));
     
     const totalTime = Date.now() - startTime;
@@ -64,7 +64,8 @@ exports.handler = async (event, context) => {
           dual_ip_conversions_found: ipAnalyticsResults.dual_ip_count,
           ipv6_conversions_found: ipAnalyticsResults.ipv6_count,
           date_range_covered: indexResults.date_range,
-          processing_time_ms: totalTime
+          processing_time_ms: totalTime,
+          ttl_days: 30
         },
         ip_analytics: {
           unique_primary_ips: ipAnalyticsResults.unique_primary_ips,
@@ -78,7 +79,7 @@ exports.handler = async (event, context) => {
         },
         next_steps: [
           'Test enhanced fast-analytics endpoint',
-          'Verify conversion_index_date:* and ip_analytics:* keys exist in Redis',
+          'Verify conversion_index_date:* and ip_analytics:* keys exist in Redis (30-day TTL)',
           'Use IP analytics for dual-stack analysis'
         ]
       })
@@ -252,10 +253,10 @@ async function loadAllConversionsEnhanced(redis, conversionKeys, maxTime) {
   return conversions;
 }
 
-// ENHANCED: Build date-based indexes with complete IP data
+// ENHANCED: Build date-based indexes with complete IP data and 30-day TTL
 async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
   const indexStartTime = Date.now();
-  console.log(`📅 Building ENHANCED date indexes for ${conversions.length} conversions...`);
+  console.log(`📅 Building ENHANCED date indexes for ${conversions.length} conversions with 30-day TTL...`);
   
   // Group conversions by date
   const dateGroups = {};
@@ -279,7 +280,7 @@ async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
   
   console.log(`📅 Grouped into ${Object.keys(dateGroups).length} date buckets`);
   
-  // Create enhanced date indexes in Redis
+  // Create enhanced date indexes in Redis with 30-day TTL
   let dateIndexesCreated = 0;
   const dateEntries = Object.entries(dateGroups);
   
@@ -300,6 +301,7 @@ async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
         conversion_count: dateConversions.length,
         conversions: dateConversions, // Store all conversions with complete IP analysis data
         created_at: new Date().toISOString(),
+        ttl_days: 30,
         
         // Enhanced metrics with detailed IP attribution analysis
         total_revenue: dailyMetrics.total_revenue,
@@ -347,11 +349,11 @@ async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
         }
       };
       
-      await redis(`setex/${indexKey}/7200/${encodeURIComponent(JSON.stringify(indexData))}`); // 2 hours TTL
+      await redis(`setex/${indexKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`); // 30 days TTL
       dateIndexesCreated++;
       
       if (dateIndexesCreated % 10 === 0) {
-        console.log(`📅 Enhanced date indexing progress: ${dateIndexesCreated}/${dateEntries.length} indexes created`);
+        console.log(`📅 Enhanced date indexing progress: ${dateIndexesCreated}/${dateEntries.length} indexes created (30-day TTL)`);
       }
       
     } catch (dateError) {
@@ -359,7 +361,7 @@ async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
     }
   }
   
-  console.log(`✅ Enhanced date indexes: ${dateIndexesCreated} created`);
+  console.log(`✅ Enhanced date indexes: ${dateIndexesCreated} created with 30-day TTL`);
   
   return {
     date_indexes_created: dateIndexesCreated,
@@ -372,10 +374,10 @@ async function buildEnhancedConversionDateIndexes(redis, conversions, maxTime) {
   };
 }
 
-// NEW: Build IP-specific analytics indexes
+// NEW: Build IP-specific analytics indexes with 30-day TTL
 async function buildIPAnalyticsIndexes(redis, conversions, maxTime) {
   const indexStartTime = Date.now();
-  console.log(`🌐 Building IP analytics indexes...`);
+  console.log(`🌐 Building IP analytics indexes with 30-day TTL...`);
   
   const ipAnalytics = {
     primary_ips: new Set(),
@@ -426,7 +428,7 @@ async function buildIPAnalyticsIndexes(redis, conversions, maxTime) {
     }
   }
   
-  // Store IP analytics index
+  // Store IP analytics index with 30-day TTL
   let ipIndexesCreated = 0;
   
   try {
@@ -439,23 +441,34 @@ async function buildIPAnalyticsIndexes(redis, conversions, maxTime) {
       dual_ip_percentage: ((ipAnalytics.dual_ip_conversions.length / conversions.length) * 100).toFixed(2),
       extraction_methods: ipAnalytics.extraction_methods,
       created_at: new Date().toISOString(),
-      total_conversions_analyzed: conversions.length
+      total_conversions_analyzed: conversions.length,
+      ttl_days: 30
     };
     
-    await redis(`setex/${analyticsKey}/7200/${encodeURIComponent(JSON.stringify(analyticsData))}`);
+    await redis(`setex/${analyticsKey}/2592000/${encodeURIComponent(JSON.stringify(analyticsData))}`); // 30 days TTL
     ipIndexesCreated++;
     
     // Store detailed dual IP index if we have time
     if (Date.now() - indexStartTime < maxTime - 2000 && ipAnalytics.dual_ip_conversions.length > 0) {
       const dualIPKey = 'ip_analytics:dual_ip_details';
-      await redis(`setex/${dualIPKey}/7200/${encodeURIComponent(JSON.stringify(ipAnalytics.dual_ip_conversions))}`);
+      const dualIPData = {
+        ...ipAnalytics.dual_ip_conversions,
+        created_at: new Date().toISOString(),
+        ttl_days: 30
+      };
+      await redis(`setex/${dualIPKey}/2592000/${encodeURIComponent(JSON.stringify(dualIPData))}`); // 30 days TTL
       ipIndexesCreated++;
     }
     
     // Store IPv6 usage index if we have time
     if (Date.now() - indexStartTime < maxTime - 1000 && ipAnalytics.ipv6_conversions.length > 0) {
       const ipv6Key = 'ip_analytics:ipv6_usage';
-      await redis(`setex/${ipv6Key}/7200/${encodeURIComponent(JSON.stringify(ipAnalytics.ipv6_conversions))}`);
+      const ipv6Data = {
+        ...ipAnalytics.ipv6_conversions,
+        created_at: new Date().toISOString(),
+        ttl_days: 30
+      };
+      await redis(`setex/${ipv6Key}/2592000/${encodeURIComponent(JSON.stringify(ipv6Data))}`); // 30 days TTL
       ipIndexesCreated++;
     }
     
@@ -463,7 +476,7 @@ async function buildIPAnalyticsIndexes(redis, conversions, maxTime) {
     console.log(`⚠️ Error creating IP analytics indexes:`, analyticsError.message);
   }
   
-  console.log(`✅ IP analytics indexes: ${ipIndexesCreated} created`);
+  console.log(`✅ IP analytics indexes: ${ipIndexesCreated} created with 30-day TTL`);
   
   return {
     ip_indexes_created: ipIndexesCreated,
