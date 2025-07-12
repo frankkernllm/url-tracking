@@ -1,4 +1,4 @@
-// Optimized Index Builder - All Chunks
+// Optimized Index Builder - All Chunks with 30-Day TTL
 // Path: netlify/functions/build-indexes-complete.js
 // Purpose: Index ALL chunks efficiently within timeout limits
 
@@ -51,7 +51,8 @@ exports.handler = async (event, context) => {
       coverage_start: results.earliest_timestamp,
       coverage_end: results.latest_timestamp,
       extraction_method: 'optimized_complete_indexing',
-      unique_ips_found: results.unique_ips_found
+      unique_ips_found: results.unique_ips_found,
+      ttl_days: 30
     };
     
     await storeExtractionMetadata(redis, metadata);
@@ -71,7 +72,8 @@ exports.handler = async (event, context) => {
           time_indexes_created: results.time_indexes_created,
           unique_ips_found: results.unique_ips_found,
           processing_time_ms: totalTime,
-          indexing_efficiency: `${((results.ip_indexes_created / results.unique_ips_found) * 100).toFixed(1)}%`
+          indexing_efficiency: `${((results.ip_indexes_created / results.unique_ips_found) * 100).toFixed(1)}%`,
+          ttl_days: 30
         },
         performance: {
           pageviews_per_second: Math.round(results.total_pageviews / (totalTime / 1000)),
@@ -204,9 +206,9 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   
   console.log(`📊 Grouping complete: ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
   
-  // Step 2: Rapidly create IP indexes (OPTIMIZED)
+  // Step 2: Rapidly create IP indexes with 30-day TTL (OPTIMIZED)
   const remainingTime = maxTime - (Date.now() - processStartTime);
-  console.log(`🏗️ Creating IP indexes with ${remainingTime}ms remaining...`);
+  console.log(`🏗️ Creating IP indexes with 30-day TTL using ${remainingTime}ms remaining...`);
   
   const ipIndexArray = Array.from(ipIndexMap.entries());
   const batchSize = 20; // Process in batches for speed
@@ -231,10 +233,11 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
           pageview_count: ipData.pageviews.length,
           latest_timestamp: ipData.latest_timestamp,
           pageviews: ipData.pageviews, // Already limited to 10
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
+          ttl_days: 30
         };
         
-        await redis(`setex/${ipKey}/7200/${encodeURIComponent(JSON.stringify(indexData))}`, 2000); // 2 hours TTL, faster timeout
+        await redis(`setex/${ipKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 2000); // 30 days TTL, faster timeout
         return 1;
         
       } catch (ipError) {
@@ -248,7 +251,7 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
       ipIndexesCreated += batchResults.reduce((sum, result) => sum + result, 0);
       
       if ((i + batchSize) % 200 === 0) {
-        console.log(`🏗️ IP indexing progress: ${ipIndexesCreated}/${ipIndexMap.size} indexes created`);
+        console.log(`🏗️ IP indexing progress: ${ipIndexesCreated}/${ipIndexMap.size} indexes created (30-day TTL)`);
       }
       
     } catch (batchError) {
@@ -261,7 +264,7 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   const finalRemainingTime = maxTime - (Date.now() - processStartTime);
   
   if (finalRemainingTime > 3000) {
-    console.log(`🕐 Creating time indexes with ${finalRemainingTime}ms remaining...`);
+    console.log(`🕐 Creating time indexes with 30-day TTL using ${finalRemainingTime}ms remaining...`);
     timeIndexesCreated = await createSimpleTimeIndexes(redis, timeStats, finalRemainingTime - 1000);
   }
   
@@ -271,8 +274,8 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   
   console.log(`✅ OPTIMIZED processing complete:`);
   console.log(`   📊 ${totalPageviews} pageviews from ${chunksProcessed} chunks`);
-  console.log(`   🌐 ${ipIndexesCreated} IP indexes created from ${ipIndexMap.size} unique IPs`);
-  console.log(`   🕐 ${timeIndexesCreated} time indexes created`);
+  console.log(`   🌐 ${ipIndexesCreated} IP indexes created from ${ipIndexMap.size} unique IPs (30-day TTL)`);
+  console.log(`   🕐 ${timeIndexesCreated} time indexes created (30-day TTL)`);
   
   return {
     total_pageviews: totalPageviews,
@@ -286,7 +289,7 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   };
 }
 
-// Create simple time indexes quickly
+// Create simple time indexes quickly with 30-day TTL
 async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
   if (!timeStats.earliest || !timeStats.latest) return 0;
   
@@ -307,10 +310,11 @@ async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
       const timeData = {
         reference: ref.key,
         timestamp: ref.timestamp.toISOString(),
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        ttl_days: 30
       };
       
-      await redis(`setex/${timeKey}/3600/${encodeURIComponent(JSON.stringify(timeData))}`, 1000);
+      await redis(`setex/${timeKey}/2592000/${encodeURIComponent(JSON.stringify(timeData))}`, 1000); // 30 days TTL
       created++;
     }
     
@@ -351,11 +355,11 @@ async function findAllPageviewChunks(redis) {
   return chunks;
 }
 
-// Store extraction metadata
+// Store extraction metadata with 30-day TTL
 async function storeExtractionMetadata(redis, metadata) {
   const metadataKey = 'pageview_extraction_metadata';
-  await redis(`setex/${metadataKey}/3600/${encodeURIComponent(JSON.stringify(metadata))}`);
-  console.log('📋 Complete extraction metadata stored');
+  await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`); // 30 days TTL
+  console.log('📋 Complete extraction metadata stored (30-day TTL)');
 }
 
 // Initialize Redis helper
