@@ -1,6 +1,6 @@
-// Optimized Index Builder - All Chunks with 30-Day TTL
+// Optimized Index Builder - All Chunks - ENHANCED FOR MULTI-SIGNAL ATTRIBUTION
 // Path: netlify/functions/build-indexes-complete.js
-// Purpose: Index ALL chunks efficiently within timeout limits
+// Purpose: Index ALL chunks efficiently within timeout limits with COMPLETE attribution data
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -16,7 +16,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 OPTIMIZED index building for ALL chunks...');
+    console.log('🚀 ENHANCED index building for ALL chunks with MULTI-SIGNAL attribution...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -37,8 +37,8 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // Step 2: Process chunks and build indexes simultaneously (OPTIMIZED)
-    const results = await processChunksAndBuildIndexes(redis, allChunks, maxProcessingTime - (Date.now() - startTime));
+    // Step 2: Process chunks and build ENHANCED indexes simultaneously
+    const results = await processChunksAndBuildEnhancedIndexes(redis, allChunks, maxProcessingTime - (Date.now() - startTime));
     
     // Step 3: Store final metadata
     const metadata = {
@@ -50,22 +50,23 @@ exports.handler = async (event, context) => {
       processing_time_ms: Date.now() - startTime,
       coverage_start: results.earliest_timestamp,
       coverage_end: results.latest_timestamp,
-      extraction_method: 'optimized_complete_indexing',
+      extraction_method: 'enhanced_multi_signal_indexing',
       unique_ips_found: results.unique_ips_found,
-      ttl_days: 30
+      attribution_fields_included: results.attribution_fields_included,
+      multi_signal_ready: true
     };
     
     await storeExtractionMetadata(redis, metadata);
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ COMPLETE indexing finished in ${totalTime}ms`);
+    console.log(`✅ ENHANCED indexing finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        complete_indexing_summary: {
+        enhanced_indexing_summary: {
           total_pageviews_processed: results.total_pageviews,
           chunks_processed: results.chunks_processed,
           ip_indexes_created: results.ip_indexes_created,
@@ -73,7 +74,8 @@ exports.handler = async (event, context) => {
           unique_ips_found: results.unique_ips_found,
           processing_time_ms: totalTime,
           indexing_efficiency: `${((results.ip_indexes_created / results.unique_ips_found) * 100).toFixed(1)}%`,
-          ttl_days: 30
+          attribution_fields_included: results.attribution_fields_included,
+          multi_signal_ready: true
         },
         performance: {
           pageviews_per_second: Math.round(results.total_pageviews / (totalTime / 1000)),
@@ -83,27 +85,35 @@ exports.handler = async (event, context) => {
           earliest_pageview: results.earliest_timestamp,
           latest_pageview: results.latest_timestamp,
           time_span_days: results.time_span_days
+        },
+        multi_signal_capabilities: {
+          session_id_attribution: true,
+          device_fingerprint_attribution: true,
+          screen_signature_attribution: true,
+          webgl_attribution: true,
+          hardware_fingerprint_attribution: true,
+          geographic_correlation: true
         }
       })
     };
     
   } catch (error) {
-    console.error('❌ Optimized indexing failed:', error);
+    console.error('❌ Enhanced indexing failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Optimized indexing failed', 
+        error: 'Enhanced indexing failed', 
         message: error.message 
       })
     };
   }
 };
 
-// OPTIMIZED: Process chunks and build indexes simultaneously
-async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
+// ENHANCED: Process chunks and build indexes with COMPLETE attribution data
+async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
   const processStartTime = Date.now();
-  console.log(`⚡ OPTIMIZED processing: ${chunkKeys.length} chunks in ${maxTime}ms`);
+  console.log(`⚡ ENHANCED processing: ${chunkKeys.length} chunks with MULTI-SIGNAL attribution in ${maxTime}ms`);
   
   const ipIndexMap = new Map(); // Use Map for better performance
   const timeStats = {
@@ -114,8 +124,9 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   let totalPageviews = 0;
   let chunksProcessed = 0;
   let ipIndexesCreated = 0;
+  let attributionFieldsIncluded = [];
   
-  // Step 1: Process all chunks and group by IP in memory (FAST)
+  // Step 1: Process all chunks and group by IP in memory with COMPLETE data (FAST)
   for (let i = 0; i < chunkKeys.length; i++) {
     if (Date.now() - processStartTime > maxTime - 8000) {
       console.log(`⏰ Time management: stopping chunk processing to ensure indexing completes`);
@@ -157,15 +168,52 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
               
               const ipGroup = ipIndexMap.get(encodedIP);
               
-              // Store only essential data + keep most recent
-              if (ipGroup.pageviews.length < 10) { // Limit to 10 per IP for speed
+              // 🚀 ENHANCED: Store COMPLETE attribution data (increased limit for multi-signal)
+              if (ipGroup.pageviews.length < 15) { // Increased from 10 to 15 for better attribution coverage
                 ipGroup.pageviews.push({
+                  // Basic pageview data
                   timestamp: pageview.timestamp,
-                  landing_page: pageview.landing_page,
-                  source: pageview.source,
+                  ip_address: pageview.ip_address,
+                  landing_page: pageview.landing_page || pageview.url || pageview.page_url || 'unknown',
+                  source: pageview.source || 'direct',
+                  
+                  // UTM parameters  
                   utm_campaign: pageview.utm_campaign,
                   utm_medium: pageview.utm_medium,
-                  utm_source: pageview.utm_source
+                  utm_source: pageview.utm_source,
+                  utm_term: pageview.utm_term,
+                  utm_content: pageview.utm_content,
+                  referrer_url: pageview.referrer_url,
+                  
+                  // 🚀 CRITICAL: Multi-signal attribution fields
+                  session_id: pageview.session_id,                     // For session matching
+                  canvas_fingerprint: pageview.canvas_fingerprint,     // For device matching  
+                  webgl_fingerprint: pageview.webgl_fingerprint,       // For GPU matching
+                  screen_resolution: pageview.screen_resolution,       // For screen matching
+                  cpu_cores: pageview.cpu_cores,                       // For hardware matching
+                  memory_gb: pageview.memory_gb,                       // For hardware matching
+                  user_agent: pageview.user_agent,                     // For browser matching
+                  platform: pageview.platform,                         // For platform matching
+                  timezone: pageview.timezone,                          // For timezone matching
+                  language: pageview.language,                          // For language matching
+                  
+                  // Additional attribution signals
+                  device_type: pageview.device_type,                    // Mobile/Desktop
+                  browser_name: pageview.browser_name,                  // Chrome/Safari/etc
+                  os_name: pageview.os_name,                           // Windows/macOS/etc
+                  screen_width: pageview.screen_width,                 // Screen dimensions
+                  screen_height: pageview.screen_height,               // Screen dimensions
+                  color_depth: pageview.color_depth,                   // Display color depth
+                  pixel_ratio: pageview.pixel_ratio,                   // Device pixel ratio
+                  
+                  // Geographic and network data
+                  country: pageview.country,                           // Country code
+                  region: pageview.region,                             // State/region
+                  city: pageview.city,                                 // City name
+                  isp: pageview.isp,                                   // ISP information
+                  
+                  // Metadata
+                  redis_key: pageview.redis_key || 'unknown'
                 });
               } else {
                 // Replace oldest if this one is newer
@@ -174,12 +222,39 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
                 );
                 if (oldestIndex !== -1) {
                   ipGroup.pageviews[oldestIndex] = {
+                    // Complete attribution data (same as above)
                     timestamp: pageview.timestamp,
-                    landing_page: pageview.landing_page,
-                    source: pageview.source,
+                    ip_address: pageview.ip_address,
+                    landing_page: pageview.landing_page || pageview.url || pageview.page_url || 'unknown',
+                    source: pageview.source || 'direct',
                     utm_campaign: pageview.utm_campaign,
                     utm_medium: pageview.utm_medium,
-                    utm_source: pageview.utm_source
+                    utm_source: pageview.utm_source,
+                    utm_term: pageview.utm_term,
+                    utm_content: pageview.utm_content,
+                    referrer_url: pageview.referrer_url,
+                    session_id: pageview.session_id,
+                    canvas_fingerprint: pageview.canvas_fingerprint,
+                    webgl_fingerprint: pageview.webgl_fingerprint,
+                    screen_resolution: pageview.screen_resolution,
+                    cpu_cores: pageview.cpu_cores,
+                    memory_gb: pageview.memory_gb,
+                    user_agent: pageview.user_agent,
+                    platform: pageview.platform,
+                    timezone: pageview.timezone,
+                    language: pageview.language,
+                    device_type: pageview.device_type,
+                    browser_name: pageview.browser_name,
+                    os_name: pageview.os_name,
+                    screen_width: pageview.screen_width,
+                    screen_height: pageview.screen_height,
+                    color_depth: pageview.color_depth,
+                    pixel_ratio: pageview.pixel_ratio,
+                    country: pageview.country,
+                    region: pageview.region,
+                    city: pageview.city,
+                    isp: pageview.isp,
+                    redis_key: pageview.redis_key || 'unknown'
                   };
                 }
               }
@@ -204,11 +279,19 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
     }
   }
   
-  console.log(`📊 Grouping complete: ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
+  console.log(`📊 ENHANCED grouping complete: ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs with COMPLETE attribution data`);
   
-  // Step 2: Rapidly create IP indexes with 30-day TTL (OPTIMIZED)
+  // Track which attribution fields are actually included
+  attributionFieldsIncluded = [
+    'session_id', 'canvas_fingerprint', 'webgl_fingerprint', 'screen_resolution',
+    'cpu_cores', 'memory_gb', 'user_agent', 'platform', 'timezone', 'language',
+    'device_type', 'browser_name', 'os_name', 'screen_width', 'screen_height',
+    'color_depth', 'pixel_ratio', 'country', 'region', 'city', 'isp'
+  ];
+  
+  // Step 2: Rapidly create ENHANCED IP indexes (OPTIMIZED)
   const remainingTime = maxTime - (Date.now() - processStartTime);
-  console.log(`🏗️ Creating IP indexes with 30-day TTL using ${remainingTime}ms remaining...`);
+  console.log(`🏗️ Creating ENHANCED IP indexes with ${remainingTime}ms remaining...`);
   
   const ipIndexArray = Array.from(ipIndexMap.entries());
   const batchSize = 20; // Process in batches for speed
@@ -228,20 +311,30 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
         ipData.pageviews.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
         
         const ipKey = `pageview_index_ip:${encodedIP}`;
+        
+        // 🚀 ENHANCED: Complete attribution data in indexes
         const indexData = {
           ip_address: ipData.ip_address,
           pageview_count: ipData.pageviews.length,
           latest_timestamp: ipData.latest_timestamp,
-          pageviews: ipData.pageviews, // Already limited to 10
+          pageviews: ipData.pageviews, // Now includes ALL attribution fields
           created_at: new Date().toISOString(),
-          ttl_days: 30
+          
+          // Enhanced index metadata
+          multi_signal_ready: true,
+          attribution_fields_available: attributionFieldsIncluded,
+          session_ids_available: ipData.pageviews.filter(pv => pv.session_id).length,
+          device_fingerprints_available: ipData.pageviews.filter(pv => pv.canvas_fingerprint).length,
+          screen_resolutions_available: ipData.pageviews.filter(pv => pv.screen_resolution).length,
+          webgl_fingerprints_available: ipData.pageviews.filter(pv => pv.webgl_fingerprint).length
         };
         
-        await redis(`setex/${ipKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 2000); // 30 days TTL, faster timeout
+        // Store with 30-day TTL (2,592,000 seconds)
+        await redis(`setex/${ipKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 2000);
         return 1;
         
       } catch (ipError) {
-        console.log(`⚠️ Error creating IP index: ${ipError.message}`);
+        console.log(`⚠️ Error creating enhanced IP index: ${ipError.message}`);
         return 0;
       }
     });
@@ -251,7 +344,7 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
       ipIndexesCreated += batchResults.reduce((sum, result) => sum + result, 0);
       
       if ((i + batchSize) % 200 === 0) {
-        console.log(`🏗️ IP indexing progress: ${ipIndexesCreated}/${ipIndexMap.size} indexes created (30-day TTL)`);
+        console.log(`🏗️ Enhanced IP indexing progress: ${ipIndexesCreated}/${ipIndexMap.size} indexes created`);
       }
       
     } catch (batchError) {
@@ -264,7 +357,7 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
   const finalRemainingTime = maxTime - (Date.now() - processStartTime);
   
   if (finalRemainingTime > 3000) {
-    console.log(`🕐 Creating time indexes with 30-day TTL using ${finalRemainingTime}ms remaining...`);
+    console.log(`🕐 Creating time indexes with ${finalRemainingTime}ms remaining...`);
     timeIndexesCreated = await createSimpleTimeIndexes(redis, timeStats, finalRemainingTime - 1000);
   }
   
@@ -272,10 +365,11 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
     ? Math.round((timeStats.latest - timeStats.earliest) / (1000 * 60 * 60 * 24))
     : 0;
   
-  console.log(`✅ OPTIMIZED processing complete:`);
+  console.log(`✅ ENHANCED processing complete:`);
   console.log(`   📊 ${totalPageviews} pageviews from ${chunksProcessed} chunks`);
-  console.log(`   🌐 ${ipIndexesCreated} IP indexes created from ${ipIndexMap.size} unique IPs (30-day TTL)`);
-  console.log(`   🕐 ${timeIndexesCreated} time indexes created (30-day TTL)`);
+  console.log(`   🌐 ${ipIndexesCreated} ENHANCED IP indexes created from ${ipIndexMap.size} unique IPs`);
+  console.log(`   🚀 ${attributionFieldsIncluded.length} attribution fields included per pageview`);
+  console.log(`   🕐 ${timeIndexesCreated} time indexes created`);
   
   return {
     total_pageviews: totalPageviews,
@@ -285,11 +379,12 @@ async function processChunksAndBuildIndexes(redis, chunkKeys, maxTime) {
     unique_ips_found: ipIndexMap.size,
     earliest_timestamp: timeStats.earliest?.toISOString(),
     latest_timestamp: timeStats.latest?.toISOString(),
-    time_span_days: timeSpanDays
+    time_span_days: timeSpanDays,
+    attribution_fields_included: attributionFieldsIncluded
   };
 }
 
-// Create simple time indexes quickly with 30-day TTL
+// Create simple time indexes quickly
 async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
   if (!timeStats.earliest || !timeStats.latest) return 0;
   
@@ -310,11 +405,11 @@ async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
       const timeData = {
         reference: ref.key,
         timestamp: ref.timestamp.toISOString(),
-        created_at: new Date().toISOString(),
-        ttl_days: 30
+        created_at: new Date().toISOString()
       };
       
-      await redis(`setex/${timeKey}/2592000/${encodeURIComponent(JSON.stringify(timeData))}`, 1000); // 30 days TTL
+      // Store with 30-day TTL (2,592,000 seconds)
+      await redis(`setex/${timeKey}/2592000/${encodeURIComponent(JSON.stringify(timeData))}`, 1000);
       created++;
     }
     
@@ -355,11 +450,12 @@ async function findAllPageviewChunks(redis) {
   return chunks;
 }
 
-// Store extraction metadata with 30-day TTL
+// Store extraction metadata
 async function storeExtractionMetadata(redis, metadata) {
   const metadataKey = 'pageview_extraction_metadata';
-  await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`); // 30 days TTL
-  console.log('📋 Complete extraction metadata stored (30-day TTL)');
+  // Store with 30-day TTL (2,592,000 seconds)
+  await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`);
+  console.log('📋 Enhanced extraction metadata stored with 30-day TTL');
 }
 
 // Initialize Redis helper
