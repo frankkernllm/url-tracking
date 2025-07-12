@@ -524,7 +524,7 @@ function createEnhancedAttributionQuerier() {
   return async function queryEnhancedAttribution(redis, params) {
     try {
       // Use the existing query-pageviews-enhanced.js logic
-      // This simulates calling your enhanced attribution function
+      // This calls your enhanced attribution function with required API key
       
       const queryUrl = `${process.env.NETLIFY_URL || 'https://trackingojoy.netlify.app'}/.netlify/functions/query-pageviews-enhanced`;
       
@@ -532,7 +532,7 @@ function createEnhancedAttributionQuerier() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': process.env.OJOY_API_KEY
+          'X-API-Key': 'ojoy_track_2025_secure_key_v1'  // Required API key for enhanced attribution
         },
         body: JSON.stringify(params)
       });
