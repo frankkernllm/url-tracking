@@ -1,6 +1,7 @@
 // netlify/functions/build-customer-journeys.js
-// RESUME-CAPABLE Customer Journey Reconstruction Engine
-// SAFE: Does not modify existing Redis key patterns, maintains identical data structure
+// STATELESS Customer Journey Reconstruction Engine
+// Pattern: Same proven approach as extract-conversions-chunked-enhanced.js
+// Processes ALL conversions in database, naturally resumable, no progress corruption
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -17,9 +18,9 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🔄 RESUME-CAPABLE CUSTOMER JOURNEY RECONSTRUCTION: Starting smart resume...');
+    console.log('🚀 STATELESS CUSTOMER JOURNEY BUILDER: Starting...');
     const startTime = Date.now();
-    const maxProcessingTime = 25000; // 25 seconds max (5 second buffer)
+    const maxProcessingTime = 25000; // 25 seconds max
     
     // Validate required environment variables
     if (!process.env.OJOY_API_KEY) {
@@ -28,8 +29,7 @@ exports.handler = async (event, context) => {
         headers,
         body: JSON.stringify({
           error: 'Configuration error',
-          message: 'OJOY_API_KEY environment variable not set',
-          required_env_vars: ['OJOY_API_KEY', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']
+          message: 'OJOY_API_KEY environment variable not set'
         })
       };
     }
@@ -39,434 +39,135 @@ exports.handler = async (event, context) => {
     
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
-    const {
-      date_range_days = 7,        // How many days of conversions to process
-      journey_window_hours = 168, // 7-day journey lookback window
-      batch_size = 20,           // REDUCED: Safe batch size for timeout protection
-      force_rebuild = false,     // Whether to rebuild ALL journeys (ignore existing)
-      reset_progress = false,    // Whether to reset progress tracking and start fresh
-      max_batches = 10           // NEW: Maximum batches to process in single execution (auto-continue)
-    } = body;
+    const { journey_window_hours = 168 } = body; // 7-day journey lookback window
     
-    console.log(`📊 Resume Parameters: ${date_range_days} days, ${journey_window_hours}h window, batch size: ${batch_size}, max batches: ${max_batches}`);
-    if (force_rebuild) {
-      console.log(`🔄 FORCE REBUILD: Will rebuild all journeys regardless of existing records`);
-    }
-    if (reset_progress) {
-      console.log(`🔄 RESET PROGRESS: Will clear progress tracking and start from batch 1`);
-    }
+    console.log(`📊 Parameters: ${journey_window_hours}h journey window`);
     
-    // Step 1: Load progress tracking to resume from last position
-    const progressKey = 'customer_journey_build_progress';
-    let buildProgress;
-    
-    if (reset_progress) {
-      // Clear progress and start fresh
-      buildProgress = {
-        journeys_completed: 0,
-        last_batch_completed: 0,
-        started_at: new Date().toISOString(),
-        total_conversions_to_process: 0
-      };
-      console.log(`📋 Progress Reset: Starting fresh from batch 1`);
-    } else {
-      buildProgress = await loadBuildProgress(redis, progressKey);
-      console.log(`📋 Previous Progress: ${buildProgress.journeys_completed} journeys built, last batch: ${buildProgress.last_batch_completed}`);
-      
-      // DEBUG: Show what the progress tracking contains
-      console.log(`🔍 DEBUG Progress Details:`, {
-        journeys_completed: buildProgress.journeys_completed,
-        last_batch_completed: buildProgress.last_batch_completed,
-        started_at: buildProgress.started_at,
-        total_conversions_to_process: buildProgress.total_conversions_to_process
-      });
-    }
-    
-    // Step 2: Load conversions for journey reconstruction
-    const allConversions = await loadConversionsForJourneyBuilding(redis, date_range_days);
-    console.log(`💰 Found ${allConversions.length} total conversions in ${date_range_days}-day range`);
+    // Step 1: Load ALL conversions (no date limits - scan entire database)
+    const allConversions = await loadAllConversionsForJourneyBuilding(redis, maxProcessingTime - (Date.now() - startTime));
+    console.log(`💰 Found ${allConversions.length} total conversions in database`);
     
     if (allConversions.length === 0) {
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
-          success: false,
-          message: 'No conversions found for journey building',
-          resume_info: {
-            total_conversions: 0,
-            journeys_completed: buildProgress.journeys_completed
-          }
+          success: true,
+          message: 'No conversions found in database'
         })
       };
     }
     
-    // Step 3: Identify which conversions already have journeys (SAFE: reads existing keys)
-    let conversionsToProcess;
-    if (force_rebuild) {
-      conversionsToProcess = allConversions;
-      console.log(`🔄 FORCE REBUILD: Processing all ${allConversions.length} conversions (ignoring existing journeys)`);
-    } else {
-      const existingJourneys = await findExistingJourneyOrderIds(redis);
-      console.log(`🔍 Found ${existingJourneys.length} existing journey records`);
-      
-      // DEBUG: Check data types and sample values
-      const sampleConversions = allConversions.slice(0, 3).map(c => ({ order_id: c.order_id, type: typeof c.order_id }));
-      const sampleExistingIds = existingJourneys.slice(0, 5).map(id => ({ order_id: id, type: typeof id }));
-      const sampleExistingIdsEnd = existingJourneys.slice(-5).map(id => ({ order_id: id, type: typeof id }));
-      console.log(`🔍 DEBUG Sample conversions:`, sampleConversions);
-      console.log(`🔍 DEBUG Sample existing journey order IDs (first 5):`, sampleExistingIds);
-      console.log(`🔍 DEBUG Sample existing journey order IDs (last 5):`, sampleExistingIdsEnd);
-      
-      // Normalize data types for comparison (convert all to strings)
-      const existingOrderIds = new Set(existingJourneys.map(id => String(id)));
-      conversionsToProcess = allConversions.filter(conv => !existingOrderIds.has(String(conv.order_id)));
-      
-      console.log(`📊 Resume Status: ${existingJourneys.length} existing, ${conversionsToProcess.length} new conversions to process`);
-      
-      // DEBUG: Show some conversions that would be processed
-      if (conversionsToProcess.length > 0) {
-        const sampleToProcess = conversionsToProcess.slice(0, 5).map(c => c.order_id);
-        console.log(`🔍 DEBUG Sample conversions to process:`, sampleToProcess);
-      } else {
-        console.log(`🔍 DEBUG: No conversions to process`);
-        // Show range of existing order IDs to understand the coverage
-        const existingOrderIdsArray = Array.from(existingOrderIds).map(id => parseInt(id)).sort((a, b) => a - b);
-        const minExisting = existingOrderIdsArray[0];
-        const maxExisting = existingOrderIdsArray[existingOrderIdsArray.length - 1];
-        console.log(`🔍 DEBUG Existing journey order ID range: ${minExisting} to ${maxExisting} (${existingOrderIdsArray.length} total)`);
-        
-        const conversionOrderIds = allConversions.map(c => parseInt(c.order_id)).sort((a, b) => a - b);
-        const minConversion = conversionOrderIds[0];
-        const maxConversion = conversionOrderIds[conversionOrderIds.length - 1];
-        console.log(`🔍 DEBUG Conversion order ID range: ${minConversion} to ${maxConversion} (${conversionOrderIds.length} total)`);
-      }
-    }
+    // Step 2: Filter out conversions that already have journeys (stateless check)
+    const conversionsNeedingJourneys = await filterConversionsNeedingJourneys(redis, allConversions, maxProcessingTime - (Date.now() - startTime));
+    console.log(`📊 Journey Status: ${conversionsNeedingJourneys.length} need processing, ${allConversions.length - conversionsNeedingJourneys.length} already complete`);
     
-    if (conversionsToProcess.length === 0) {
+    if (conversionsNeedingJourneys.length === 0) {
+      // Update final analytics
+      await updateJourneyAnalytics(redis, allConversions.length);
+      
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          message: 'All conversions already have journeys - build complete!',
+          message: 'ALL CUSTOMER JOURNEYS COMPLETE!',
           completion_summary: {
-            total_conversions_found: allConversions.length,
-            existing_journeys_found: allConversions.length,
-            new_conversions_processed: 0,
-            build_status: 'complete'
-          }
+            total_conversions_in_database: allConversions.length,
+            conversions_with_journeys: allConversions.length,
+            build_status: 'complete',
+            completion_percentage: '100.0%'
+          },
+          next_steps: [
+            '🎉 ALL CUSTOMER JOURNEYS COMPLETE!',
+            `Successfully processed all ${allConversions.length} conversions in database`,
+            'System ready for complete multi-touch attribution analysis',
+            'Use query-customer-journeys.js for comprehensive business intelligence'
+          ]
         })
       };
     }
     
-    // Step 4-8: MULTI-BATCH PROCESSING LOOP
-    console.log(`🚀 Starting multi-batch processing: up to ${max_batches} batches in this execution`);
-    
-    let totalJourneysCreatedThisRun = 0;
-    let totalConversionsProcessedThisRun = 0;
-    let batchesCompletedThisRun = 0;
-    let allQualityMetrics = {
-      multi_touchpoint_journeys: 0,
-      session_linked_journeys: 0,
-      device_linked_journeys: 0,
-      cross_session_journeys: 0,
-      total_journey_span_hours: 0
-    };
-    
-    let currentBuildProgress = { ...buildProgress };
-    let isCompletelyFinished = false;
-    
-    // Process multiple batches in this execution
-    for (let batchIndex = 0; batchIndex < max_batches; batchIndex++) {
-      // Check time remaining (leave 3 seconds for cleanup)
-      const timeRemaining = maxProcessingTime - (Date.now() - startTime);
-      if (timeRemaining < 8000) {  // Need at least 8 seconds for a batch
-        console.log(`⏰ Time limit approaching (${timeRemaining}ms remaining), stopping after ${batchIndex} batches`);
-        break;
-      }
-      
-      // Calculate batch range for this specific batch
-      let startIndex, endIndex, thisBatchConversions;
-      
-      if (force_rebuild || reset_progress) {
-        if (reset_progress) {
-          // TRUE RESET: Start from the beginning regardless of previous progress
-          startIndex = batchesCompletedThisRun * batch_size;
-        } else {
-          // FORCE REBUILD: Continue from where we left off, but rebuild existing journeys
-          startIndex = (currentBuildProgress.last_batch_completed + batchesCompletedThisRun) * batch_size;
-        }
-        endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
-        thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
-      } else {
-        // Normal resume logic using current progress
-        startIndex = (currentBuildProgress.last_batch_completed + batchesCompletedThisRun) * batch_size;
-        endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
-        thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
-      }
-      
-      // Check if we've processed all conversions
-      if (thisBatchConversions.length === 0) {
-        console.log(`✅ All conversions processed! No more work to do.`);
-        isCompletelyFinished = true;
-        
-        // Update final analytics
-        await updateJourneyAnalytics(redis, conversionsToProcess.length);
-        break;
-      }
-      
-      const currentBatchNumber = (force_rebuild || reset_progress) ? 
-        (reset_progress ? batchIndex + 1 : currentBuildProgress.last_batch_completed + batchIndex + 1) :
-        currentBuildProgress.last_batch_completed + batchIndex + 1;
-        
-      console.log(`🎯 Batch ${currentBatchNumber}: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length}`);
-      
-      // DEBUG: Show detailed batch calculation
-      console.log(`🔍 DEBUG Batch Calculation:`, {
-        force_rebuild: force_rebuild,
-        reset_progress: reset_progress,
-        batchIndex: batchIndex,
-        batchesCompletedThisRun: batchesCompletedThisRun,
-        currentBuildProgress_last_batch_completed: currentBuildProgress.last_batch_completed,
-        calculated_startIndex: startIndex,
-        calculated_endIndex: endIndex,
-        conversions_in_this_batch: thisBatchConversions.length
-      });
-      
-      // Build customer journeys for this batch
-      const batchStartTime = Date.now();
-      const journeyResults = await buildCustomerJourneysFromConversions(
-        redis, 
-        thisBatchConversions,
-        queryEnhancedAttribution, 
-        journey_window_hours,
-        maxProcessingTime - (Date.now() - startTime) - 3000  // Leave time for cleanup
-      );
-      
-      // Store journey records for this batch
-      const storageResults = await storeCustomerJourneys(redis, journeyResults.journeys);
-      
-      // Update cumulative metrics
-      totalJourneysCreatedThisRun += journeyResults.journeys.length;
-      totalConversionsProcessedThisRun += thisBatchConversions.length;
-      batchesCompletedThisRun++;
-      
-      // Accumulate quality metrics
-      allQualityMetrics.multi_touchpoint_journeys += journeyResults.quality_metrics.multi_touchpoint_journeys;
-      allQualityMetrics.session_linked_journeys += journeyResults.quality_metrics.session_linked_journeys;
-      allQualityMetrics.device_linked_journeys += journeyResults.quality_metrics.device_linked_journeys;
-      allQualityMetrics.cross_session_journeys += journeyResults.quality_metrics.cross_session_journeys;
-      allQualityMetrics.total_journey_span_hours += journeyResults.quality_metrics.total_journey_span_hours;
-      
-      // Update progress tracking after each batch
-      if (force_rebuild || reset_progress) {
-        currentBuildProgress = {
-          journeys_completed: totalJourneysCreatedThisRun,
-          last_batch_completed: batchIndex + 1,
-          started_at: currentBuildProgress.started_at || new Date().toISOString(),
-          last_updated: new Date().toISOString(),
-          conversions_processed_this_run: totalConversionsProcessedThisRun,
-          total_conversions_to_process: conversionsToProcess.length,
-          mode: force_rebuild ? 'force_rebuild' : 'reset_progress'
-        };
-      } else {
-        currentBuildProgress = {
-          ...currentBuildProgress,
-          journeys_completed: currentBuildProgress.journeys_completed + journeyResults.journeys.length,
-          last_batch_completed: currentBuildProgress.last_batch_completed + 1,
-          last_updated: new Date().toISOString(),
-          conversions_processed_this_run: thisBatchConversions.length,
-          total_conversions_to_process: conversionsToProcess.length
-        };
-      }
-      
-      await storeBuildProgress(redis, progressKey, currentBuildProgress);
-      
-      const batchTime = Date.now() - batchStartTime;
-      console.log(`✅ Batch ${currentBatchNumber} complete: ${journeyResults.journeys.length} journeys in ${batchTime}ms`);
-      
-      // Check if this was the final batch
-      if (endIndex >= conversionsToProcess.length) {
-        console.log(`🎉 Final batch completed! All ${conversionsToProcess.length} conversions processed.`);
-        isCompletelyFinished = true;
-        await updateJourneyAnalytics(redis, conversionsToProcess.length);
-        break;
-      }
-    }
-    
-    // Calculate final metrics for this execution
-    allQualityMetrics.avg_journey_span_hours = allQualityMetrics.total_journey_span_hours / (totalJourneysCreatedThisRun || 1);
+    // Step 3: Process conversions until timeout (stateless batch processing)
+    const processingResults = await processConversionsUntilTimeout(
+      redis, 
+      conversionsNeedingJourneys, 
+      queryEnhancedAttribution, 
+      journey_window_hours,
+      maxProcessingTime - (Date.now() - startTime)
+    );
     
     const totalTime = Date.now() - startTime;
-    const conversionsRemaining = conversionsToProcess.length - (currentBuildProgress.last_batch_completed * batch_size);
-    const batchesRemaining = Math.max(0, Math.ceil(conversionsRemaining / batch_size));
+    console.log(`✅ Stateless processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
     
-    console.log(`🏁 Multi-batch execution complete: ${batchesCompletedThisRun} batches, ${totalJourneysCreatedThisRun} journeys, ${totalTime}ms`);
+    // Update analytics if complete
+    if (processingResults.is_complete) {
+      await updateJourneyAnalytics(redis, allConversions.length);
+    }
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        multi_batch_execution: true,
-        build_complete: isCompletelyFinished,
+        stateless_processing: true,
+        build_complete: processingResults.is_complete,
         execution_summary: {
-          batches_completed_this_run: batchesCompletedThisRun,
-          conversions_processed_this_run: totalConversionsProcessedThisRun,
-          journeys_created_this_run: totalJourneysCreatedThisRun,
+          total_conversions_in_database: allConversions.length,
+          conversions_needing_journeys_at_start: conversionsNeedingJourneys.length,
+          conversions_processed_this_run: processingResults.conversions_processed_this_run,
+          journeys_created_this_run: processingResults.journeys_created_this_run,
+          conversions_remaining: processingResults.conversions_remaining,
           processing_time_ms: totalTime,
-          avg_time_per_batch: Math.round(totalTime / batchesCompletedThisRun),
-          execution_efficiency: `${totalConversionsProcessedThisRun} conversions in ${Math.round(totalTime/1000)} seconds`
+          completion_percentage: (((allConversions.length - processingResults.conversions_remaining) / allConversions.length) * 100).toFixed(1),
+          efficiency: `${processingResults.conversions_processed_this_run} conversions in ${Math.round(totalTime/1000)} seconds`
         },
-        progress_summary: {
-          total_conversions_to_process: conversionsToProcess.length,
-          conversions_completed_so_far: currentBuildProgress.last_batch_completed * batch_size,
-          journeys_completed_so_far: currentBuildProgress.journeys_completed,
-          progress_percentage: ((currentBuildProgress.last_batch_completed * batch_size / conversionsToProcess.length) * 100).toFixed(1),
-          estimated_batches_remaining: batchesRemaining,
-          estimated_executions_remaining: Math.ceil(batchesRemaining / max_batches)
-        },
-        cumulative_quality_metrics: {
-          journeys_with_multiple_touchpoints: allQualityMetrics.multi_touchpoint_journeys,
-          journeys_with_session_linking: allQualityMetrics.session_linked_journeys,
-          journeys_with_device_linking: allQualityMetrics.device_linked_journeys,
-          journeys_with_cross_session_activity: allQualityMetrics.cross_session_journeys,
-          average_journey_span_hours: allQualityMetrics.avg_journey_span_hours
-        },
-        next_steps: isCompletelyFinished ? [
-          '🎉 Customer journey building COMPLETE!',
-          `Successfully processed all ${conversionsToProcess.length} conversions`,
-          'All conversions now have journey records',
-          'Use query-customer-journeys.js for business intelligence',
-          'System ready for advanced attribution analysis'
+        journey_quality_metrics: processingResults.quality_metrics,
+        next_steps: processingResults.is_complete ? [
+          '🎉 ALL CUSTOMER JOURNEYS COMPLETE!',
+          `Successfully processed all ${allConversions.length} conversions in database`,
+          'System ready for complete multi-touch attribution analysis',
+          'Use query-customer-journeys.js for comprehensive business intelligence'
         ] : [
-          `Continue automatically: ${batchesRemaining} batches remaining`,
-          `Estimated ${Math.ceil(batchesRemaining / max_batches)} more executions needed`,
+          `Continue processing: ${processingResults.conversions_remaining} conversions remaining`,
           'Run the same command again to continue automatically',
-          'Each execution will process up to 10 batches (200 conversions)',
-          `Progress: ${((currentBuildProgress.last_batch_completed * batch_size / conversionsToProcess.length) * 100).toFixed(1)}% complete`
+          'Each run will process remaining conversions until timeout',
+          'No manual tracking needed - system finds remaining work automatically',
+          `Database completion: ${(((allConversions.length - processingResults.conversions_remaining) / allConversions.length) * 100).toFixed(1)}%`
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Resume customer journey reconstruction failed:', error);
+    console.error('❌ Stateless journey processing failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Resume customer journey reconstruction failed', 
+        error: 'Stateless journey processing failed', 
         message: error.message 
       })
     };
   }
 };
 
-// SAFE: Load progress tracking (new key, doesn't interfere with existing system)
-async function loadBuildProgress(redis, progressKey) {
-  try {
-    const progressData = await redis(`get/${progressKey}`);
-    
-    if (progressData?.result) {
-      const progress = JSON.parse(decodeURIComponent(progressData.result));
-      console.log(`📋 Resuming from saved progress: batch ${progress.last_batch_completed}`);
-      return progress;
-    }
-  } catch (error) {
-    console.log('📋 No existing progress found, starting fresh');
-  }
+// STEP 1: Load ALL conversions (no date limits - scan entire database)
+async function loadAllConversionsForJourneyBuilding(redis, maxProcessingTime) {
+  console.log('🔍 Scanning ALL conversions in database for journey building...');
   
-  // Default fresh start
-  return {
-    journeys_completed: 0,
-    last_batch_completed: 0,
-    started_at: new Date().toISOString(),
-    total_conversions_to_process: 0
-  };
-}
-
-// SAFE: Store progress tracking (new key, doesn't interfere with existing system)
-async function storeBuildProgress(redis, progressKey, progress) {
-  await redis(`setex/${progressKey}/86400/${encodeURIComponent(JSON.stringify(progress))}`); // 24 hour TTL
-  console.log(`💾 Progress saved: batch ${progress.last_batch_completed}, ${progress.journeys_completed} journeys completed`);
-}
-
-// SAFE: Find existing journey order IDs (reads existing keys without modification)
-async function findExistingJourneyOrderIds(redis) {
-  console.log(`🔍 Scanning for existing customer journey records...`);
-  
-  const existingOrderIds = new Set();
-  let cursor = '0';
-  let iterations = 0;
-  const maxIterations = 20;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/1000`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      iterations++;
-      
-      // Load journey data to get conversion order IDs (SAFE: read-only)
-      const batchSize = 50;
-      for (let i = 0; i < keys.length; i += batchSize) {
-        const batch = keys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const journeyData = await redis(`get/${key}`);
-            if (journeyData?.result) {
-              const journey = JSON.parse(decodeURIComponent(journeyData.result));
-              
-              if (journey.conversion_order_id) {
-                return journey.conversion_order_id;
-              }
-            }
-          } catch (parseError) {
-            // Skip invalid journey data
-          }
-          return null;
-        });
-        
-        const batchResults = await Promise.all(batchPromises);
-        const validOrderIds = batchResults.filter(orderId => orderId !== null);
-        validOrderIds.forEach(orderId => existingOrderIds.add(orderId));
-      }
-      
-      if (existingOrderIds.size % 100 === 0 && existingOrderIds.size > 0) {
-        console.log(`🔍 Existing journey scan progress: ${existingOrderIds.size} order IDs found`);
-      }
-      
-    } while (cursor !== '0' && iterations < maxIterations);
-    
-  } catch (scanError) {
-    console.log(`⚠️ Error scanning existing journeys: ${scanError.message}`);
-  }
-  
-  console.log(`✅ Existing journey scan complete: ${existingOrderIds.size} existing journeys found`);
-  return Array.from(existingOrderIds);
-}
-
-// IDENTICAL: Load conversions (same logic as original)
-async function loadConversionsForJourneyBuilding(redis, dateRangeDays) {
-  console.log(`🔍 Loading conversions from last ${dateRangeDays} days...`);
-  
+  const startTime = Date.now();
   const conversions = [];
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - dateRangeDays);
-  
-  // Scan for recent conversion keys
   let cursor = '0';
   let iterations = 0;
   const maxIterations = 20;
   
   do {
+    // Check timeout
+    if (Date.now() - startTime > maxProcessingTime - 5000) {
+      console.log('⏰ Time limit during conversion scan, stopping');
+      break;
+    }
+    
     try {
       const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
       
@@ -478,57 +179,18 @@ async function loadConversionsForJourneyBuilding(redis, dateRangeDays) {
       const keys = scanResult.result[1] || [];
       iterations++;
       
-      // Process keys in batches
+      // Process conversion keys in batches
       const batchSize = 50;
       for (let i = 0; i < keys.length; i += batchSize) {
+        if (Date.now() - startTime > maxProcessingTime - 3000) break;
+        
         const batch = keys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const conversionData = await redis(`get/${key}`);
-            if (conversionData?.result) {
-              const conversion = JSON.parse(decodeURIComponent(conversionData.result));
-              
-              // Filter by date range
-              const conversionDate = new Date(conversion.timestamp);
-              if (conversionDate >= cutoffDate && conversion.email) {
-                return {
-                  email: conversion.email,
-                  timestamp: conversion.timestamp,
-                  order_id: conversion.order_id,
-                  order_total: conversion.order_total || 0,
-                  
-                  // Attribution signals for journey reconstruction
-                  session_id: conversion.session_id,
-                  device_signature: conversion.device_signature || conversion.dsig,
-                  screen_value: conversion.screen_value || conversion.SVV || conversion.SVVV,
-                  gpu_signature: conversion.gpu_signature || conversion.gsig,
-                  
-                  // IP addresses for multi-IP attribution
-                  primary_ip: conversion.primary_ip,
-                  conversion_ip: conversion.conversion_ip,
-                  pageview_ip: conversion.pageview_ip,
-                  ip_addresses: [conversion.primary_ip, conversion.conversion_ip, conversion.pageview_ip].filter(Boolean),
-                  
-                  // Current attribution (for comparison)
-                  current_attribution_found: conversion.attribution_found,
-                  current_attribution_method: conversion.attribution_method,
-                  current_source: conversion.source,
-                  current_landing_page: conversion.landing_page,
-                  
-                  _redis_key: key
-                };
-              }
-            }
-          } catch (parseError) {
-            console.warn(`⚠️ Failed to parse conversion ${key}`);
-          }
-          return null;
-        });
-        
-        const batchResults = await Promise.all(batchPromises);
-        const validResults = batchResults.filter(result => result !== null);
-        conversions.push(...validResults);
+        const batchConversions = await loadConversionBatch(redis, batch);
+        conversions.push(...batchConversions);
+      }
+      
+      if (conversions.length % 500 === 0 && conversions.length > 0) {
+        console.log(`📊 Conversion scan progress: ${conversions.length} conversions loaded`);
       }
       
     } catch (scanError) {
@@ -538,18 +200,181 @@ async function loadConversionsForJourneyBuilding(redis, dateRangeDays) {
     
   } while (cursor !== '0' && iterations < maxIterations);
   
-  // Sort by timestamp (most recent first)
+  // Sort by timestamp (most recent first for better processing efficiency)
   conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   
-  console.log(`✅ Loaded ${conversions.length} conversions for journey building`);
+  console.log(`✅ Conversion scan complete: ${conversions.length} total conversions found`);
   return conversions;
 }
 
-// IDENTICAL: Build customer journeys (same logic as original)
-async function buildCustomerJourneysFromConversions(redis, conversions, queryEnhancedAttribution, journeyWindowHours, maxTime) {
-  const buildStartTime = Date.now();
-  console.log(`🔗 Building customer journeys for ${conversions.length} conversions...`);
+// Helper: Load a batch of conversions
+async function loadConversionBatch(redis, conversionKeys) {
+  const conversions = [];
   
+  const batchPromises = conversionKeys.map(async (key) => {
+    try {
+      const conversionData = await redis(`get/${key}`);
+      if (conversionData?.result) {
+        const conversion = JSON.parse(decodeURIComponent(conversionData.result));
+        
+        // Validate conversion has required fields
+        if (conversion.timestamp && conversion.email && conversion.order_id) {
+          return {
+            email: conversion.email,
+            timestamp: conversion.timestamp,
+            order_id: conversion.order_id,
+            order_total: conversion.order_total || 0,
+            
+            // Attribution signals for journey reconstruction
+            session_id: conversion.session_id,
+            device_signature: conversion.device_signature || conversion.dsig,
+            screen_value: conversion.screen_value || conversion.SVV || conversion.SVVV,
+            gpu_signature: conversion.gpu_signature || conversion.gsig,
+            
+            // IP addresses for multi-IP attribution
+            primary_ip: conversion.primary_ip,
+            conversion_ip: conversion.conversion_ip,
+            pageview_ip: conversion.pageview_ip,
+            ip_addresses: [conversion.primary_ip, conversion.conversion_ip, conversion.pageview_ip].filter(Boolean),
+            
+            // Current attribution (for comparison)
+            current_attribution_found: conversion.attribution_found,
+            current_attribution_method: conversion.attribution_method,
+            current_source: conversion.source,
+            current_landing_page: conversion.landing_page,
+            
+            _redis_key: key
+          };
+        }
+      }
+    } catch (parseError) {
+      console.warn(`⚠️ Failed to parse conversion ${key}`);
+    }
+    return null;
+  });
+  
+  const batchResults = await Promise.all(batchPromises);
+  const validResults = batchResults.filter(result => result !== null);
+  conversions.push(...validResults);
+  
+  return conversions;
+}
+
+// STEP 2: Filter out conversions that already have journeys (stateless check)
+async function filterConversionsNeedingJourneys(redis, allConversions, maxProcessingTime) {
+  console.log(`🔍 Checking ${allConversions.length} conversions for existing journeys...`);
+  
+  const startTime = Date.now();
+  const conversionsNeedingJourneys = [];
+  
+  // Process conversions in batches to check for existing journeys
+  const batchSize = 50;
+  for (let i = 0; i < allConversions.length; i += batchSize) {
+    if (Date.now() - startTime > maxProcessingTime - 2000) {
+      console.log('⏰ Time limit during journey check, stopping');
+      break;
+    }
+    
+    const batch = allConversions.slice(i, i + batchSize);
+    
+    const batchPromises = batch.map(async (conversion) => {
+      try {
+        // Check for existing journey using order_id pattern
+        // Pattern: customer_journey:journey_{order_id}_{timestamp}
+        const searchPattern = `customer_journey:journey_${conversion.order_id}_*`;
+        const existingJourneys = await redis(`keys/${searchPattern}`);
+        
+        // If no existing journey found, include in processing list
+        if (!existingJourneys.result || existingJourneys.result.length === 0) {
+          return conversion;
+        }
+        
+        return null; // Journey already exists
+      } catch (error) {
+        // Include on error for safety (better to reprocess than miss)
+        console.warn(`⚠️ Error checking journey for order ${conversion.order_id}: ${error.message}`);
+        return conversion;
+      }
+    });
+    
+    const batchResults = await Promise.all(batchPromises);
+    const validResults = batchResults.filter(result => result !== null);
+    conversionsNeedingJourneys.push(...validResults);
+    
+    if ((i + batchSize) % 200 === 0) {
+      console.log(`📊 Journey check progress: ${i + batchSize}/${allConversions.length} checked, ${conversionsNeedingJourneys.length} need journeys`);
+    }
+  }
+  
+  console.log(`✅ Journey check complete: ${conversionsNeedingJourneys.length} conversions need journey processing`);
+  return conversionsNeedingJourneys;
+}
+
+// STEP 3: Process conversions in batches until timeout (stateless)
+async function processConversionsUntilTimeout(redis, conversionsToProcess, queryEnhancedAttribution, journeyWindowHours, maxProcessingTime) {
+  const startTime = Date.now();
+  let journeysCreated = 0;
+  let conversionsProcessed = 0;
+  
+  const qualityMetrics = {
+    multi_touchpoint_journeys: 0,
+    session_linked_journeys: 0,
+    device_linked_journeys: 0,
+    cross_session_journeys: 0,
+    total_journey_span_hours: 0
+  };
+  
+  console.log(`🚀 Processing ${conversionsToProcess.length} conversions until timeout...`);
+  
+  const batchSize = 20; // Journey batch size
+  for (let i = 0; i < conversionsToProcess.length; i += batchSize) {
+    // Check timeout before each batch
+    const timeRemaining = maxProcessingTime - (Date.now() - startTime);
+    if (timeRemaining < 8000) { // Need 8 seconds minimum for a batch
+      console.log(`⏰ Time limit reached after processing ${conversionsProcessed} conversions`);
+      break;
+    }
+    
+    const batch = conversionsToProcess.slice(i, i + batchSize);
+    console.log(`🔗 Processing conversion batch ${Math.floor(i/batchSize) + 1}: ${i + 1}-${i + batch.length} of ${conversionsToProcess.length}`);
+    
+    // Process this batch
+    const batchResults = await processSingleBatch(redis, batch, queryEnhancedAttribution, journeyWindowHours);
+    
+    // Store journey records
+    const storageResults = await storeCustomerJourneys(redis, batchResults.journeys);
+    
+    // Update metrics
+    journeysCreated += batchResults.journeys.length;
+    conversionsProcessed += batch.length;
+    
+    // Accumulate quality metrics
+    qualityMetrics.multi_touchpoint_journeys += batchResults.quality_metrics.multi_touchpoint_journeys;
+    qualityMetrics.session_linked_journeys += batchResults.quality_metrics.session_linked_journeys;
+    qualityMetrics.device_linked_journeys += batchResults.quality_metrics.device_linked_journeys;
+    qualityMetrics.cross_session_journeys += batchResults.quality_metrics.cross_session_journeys;
+    qualityMetrics.total_journey_span_hours += batchResults.quality_metrics.total_journey_span_hours;
+    
+    console.log(`✅ Batch complete: ${batchResults.journeys.length} journeys created (${conversionsProcessed}/${conversionsToProcess.length} total)`);
+  }
+  
+  const remainingConversions = conversionsToProcess.length - conversionsProcessed;
+  
+  // Calculate final quality metrics
+  qualityMetrics.avg_journey_span_hours = qualityMetrics.total_journey_span_hours / (journeysCreated || 1);
+  
+  return {
+    journeys_created_this_run: journeysCreated,
+    conversions_processed_this_run: conversionsProcessed,
+    conversions_remaining: remainingConversions,
+    is_complete: remainingConversions === 0,
+    processing_time_ms: Date.now() - startTime,
+    quality_metrics: qualityMetrics
+  };
+}
+
+// Process a single batch of conversions
+async function processSingleBatch(redis, conversions, queryEnhancedAttribution, journeyWindowHours) {
   const journeys = [];
   const qualityMetrics = {
     multi_touchpoint_journeys: 0,
@@ -559,15 +384,8 @@ async function buildCustomerJourneysFromConversions(redis, conversions, queryEnh
     total_journey_span_hours: 0
   };
   
-  let totalTouchpoints = 0;
-  
   // Process conversions sequentially for timeout safety
   for (let i = 0; i < conversions.length; i++) {
-    if (Date.now() - buildStartTime > maxTime - 3000) {
-      console.log(`⏰ Time limit reached during journey building at conversion ${i + 1}/${conversions.length}`);
-      break;
-    }
-    
     const conversion = conversions[i];
     
     try {
@@ -588,15 +406,11 @@ async function buildCustomerJourneysFromConversions(redis, conversions, queryEnh
         
         // Track quality metrics
         updateQualityMetrics(journey, qualityMetrics);
-        totalTouchpoints += journey.touchpoints.length;
-        
         journeys.push(journey);
       } else {
         // Even if no pageviews found, create journey record with conversion only
         const conversionOnlyJourney = createConversionOnlyJourney(conversion);
         updateQualityMetrics(conversionOnlyJourney, qualityMetrics);
-        totalTouchpoints += conversionOnlyJourney.touchpoints.length;
-        
         journeys.push(conversionOnlyJourney);
       }
       
@@ -607,23 +421,18 @@ async function buildCustomerJourneysFromConversions(redis, conversions, queryEnh
     } catch (journeyError) {
       console.warn(`⚠️ Error building journey for conversion ${conversion.order_id}:`, journeyError.message);
       const fallbackJourney = createConversionOnlyJourney(conversion);
+      updateQualityMetrics(fallbackJourney, qualityMetrics);
       journeys.push(fallbackJourney);
     }
   }
   
-  // Calculate final metrics
-  qualityMetrics.avg_journey_span_hours = qualityMetrics.total_journey_span_hours / journeys.length;
-  
-  console.log(`✅ Customer journey building complete: ${journeys.length} journeys created`);
-  
   return {
     journeys,
-    total_touchpoints: totalTouchpoints,
     quality_metrics: qualityMetrics
   };
 }
 
-// IDENTICAL: Build journey from pageviews (same logic as original)
+// Build journey from pageviews and conversion (IDENTICAL to original)
 function buildJourneyFromPageviews(conversion, pageviews) {
   // Sort pageviews by timestamp (earliest first for journey timeline)
   const sortedPageviews = pageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -712,11 +521,11 @@ function buildJourneyFromPageviews(conversion, pageviews) {
     
     // Journey metadata
     created_at: new Date().toISOString(),
-    reconstruction_method: 'enhanced_multi_signal_attribution'
+    reconstruction_method: 'enhanced_multi_signal_attribution_stateless'
   };
 }
 
-// IDENTICAL: Create conversion-only journey (same logic as original)
+// Create conversion-only journey (IDENTICAL to original)
 function createConversionOnlyJourney(conversion) {
   return {
     journey_id: `journey_${conversion.order_id}_conversion_only`,
@@ -757,11 +566,11 @@ function createConversionOnlyJourney(conversion) {
     }],
     
     created_at: new Date().toISOString(),
-    reconstruction_method: 'conversion_only_fallback'
+    reconstruction_method: 'conversion_only_fallback_stateless'
   };
 }
 
-// IDENTICAL: Update quality metrics (same logic as original)
+// Update quality metrics (IDENTICAL to original)
 function updateQualityMetrics(journey, metrics) {
   if (journey.total_touchpoints > 1) {
     metrics.multi_touchpoint_journeys++;
@@ -782,7 +591,7 @@ function updateQualityMetrics(journey, metrics) {
   metrics.total_journey_span_hours += journey.journey_span_hours;
 }
 
-// IDENTICAL: Store customer journeys (same Redis keys as original - SAFE)
+// Store customer journeys (IDENTICAL to original)
 async function storeCustomerJourneys(redis, journeys) {
   console.log(`💾 Storing ${journeys.length} customer journeys...`);
   
@@ -807,10 +616,10 @@ async function storeCustomerJourneys(redis, journeys) {
   };
 }
 
-// SAFE: Update journey analytics only when complete (same key as original)
-async function updateJourneyAnalytics(redis, totalJourneysProcessed) {
+// Update journey analytics (same key as original)
+async function updateJourneyAnalytics(redis, totalConversionsProcessed) {
   try {
-    console.log(`📊 Updating journey analytics for ${totalJourneysProcessed} completed journeys...`);
+    console.log(`📊 Updating journey analytics for complete dataset...`);
     
     // Load all journey records to calculate final analytics
     const allJourneys = await loadAllJourneyRecords(redis);
@@ -826,7 +635,8 @@ async function updateJourneyAnalytics(redis, totalJourneysProcessed) {
         avg_journey_span_hours: allJourneys.reduce((sum, j) => sum + j.journey_span_hours, 0) / allJourneys.length,
         total_conversion_value: allJourneys.reduce((sum, j) => sum + j.conversion_value, 0),
         created_at: new Date().toISOString(),
-        build_completed_at: new Date().toISOString()
+        build_completed_at: new Date().toISOString(),
+        processing_method: 'stateless_complete_database_scan'
       };
       
       await redis(`setex/${analyticsKey}/2592000/${encodeURIComponent(JSON.stringify(analyticsData))}`);
@@ -838,7 +648,7 @@ async function updateJourneyAnalytics(redis, totalJourneysProcessed) {
   }
 }
 
-// Helper: Load all journey records for analytics
+// Load all journey records for analytics
 async function loadAllJourneyRecords(redis) {
   const journeys = [];
   let cursor = '0';
@@ -888,7 +698,7 @@ async function loadAllJourneyRecords(redis) {
   return journeys;
 }
 
-// IDENTICAL: Create enhanced attribution querier (same as original)
+// Create enhanced attribution querier (IDENTICAL to original)
 function createEnhancedAttributionQuerier() {
   return async function queryEnhancedAttribution(redis, params) {
     try {
@@ -925,7 +735,7 @@ function createEnhancedAttributionQuerier() {
   };
 }
 
-// IDENTICAL: Initialize Redis helper (same as original)
+// Initialize Redis helper (IDENTICAL to original)
 function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
