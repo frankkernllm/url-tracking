@@ -40,7 +40,7 @@ exports.handler = async (event, context) => {
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
     const {
-      date_range_days = 14,        // How many days of conversions to process
+      date_range_days = 7,        // How many days of conversions to process
       journey_window_hours = 168, // 7-day journey lookback window
       batch_size = 20,           // REDUCED: Safe batch size for timeout protection
       force_rebuild = false      // Whether to rebuild ALL journeys (ignore existing)
@@ -84,9 +84,29 @@ exports.handler = async (event, context) => {
       const existingJourneys = await findExistingJourneyOrderIds(redis);
       console.log(`🔍 Found ${existingJourneys.length} existing journey records`);
       
-      const existingOrderIds = new Set(existingJourneys);
-      conversionsToProcess = allConversions.filter(conv => !existingOrderIds.has(conv.order_id));
+      // DEBUG: Check data types and sample values
+      const sampleConversions = allConversions.slice(0, 3).map(c => ({ order_id: c.order_id, type: typeof c.order_id }));
+      const sampleExistingIds = existingJourneys.slice(0, 3).map(id => ({ order_id: id, type: typeof id }));
+      console.log(`🔍 DEBUG Sample conversions:`, sampleConversions);
+      console.log(`🔍 DEBUG Sample existing journey order IDs:`, sampleExistingIds);
+      
+      // Normalize data types for comparison (convert all to strings)
+      const existingOrderIds = new Set(existingJourneys.map(id => String(id)));
+      conversionsToProcess = allConversions.filter(conv => !existingOrderIds.has(String(conv.order_id)));
+      
       console.log(`📊 Resume Status: ${existingJourneys.length} existing, ${conversionsToProcess.length} new conversions to process`);
+      
+      // DEBUG: Show some conversions that would be processed
+      if (conversionsToProcess.length > 0) {
+        const sampleToProcess = conversionsToProcess.slice(0, 3).map(c => c.order_id);
+        console.log(`🔍 DEBUG Sample conversions to process:`, sampleToProcess);
+      } else {
+        console.log(`🔍 DEBUG: No conversions to process - checking if all order IDs match...`);
+        const firstFewConversions = allConversions.slice(0, 5).map(c => String(c.order_id));
+        const matchingExisting = firstFewConversions.filter(id => existingOrderIds.has(id));
+        console.log(`🔍 DEBUG First 5 conversion order IDs:`, firstFewConversions);
+        console.log(`🔍 DEBUG Matching existing journey order IDs:`, matchingExisting);
+      }
     }
     
     if (conversionsToProcess.length === 0) {
