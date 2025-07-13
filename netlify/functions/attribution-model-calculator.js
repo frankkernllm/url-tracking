@@ -236,9 +236,9 @@ function calculateAllAttributionModels(journey, timeDecayHalfLife = 168) {
   const conversionValue = journey.conversion_value || 0;
   
   // Filter out the conversion point itself for attribution (keep only pageview touchpoints)
-  const attributabletouchpoints = touchpoints.filter(tp => !tp.is_conversion);
+  const attributableTouchpoints = touchpoints.filter(tp => !tp.is_conversion);
   
-  if (attributabletouchpoints.length === 0) {
+  if (attributableTouchpoints.length === 0) {
     // Conversion-only journey - attribute to direct/unknown
     return {
       first_click: [{ source: 'direct', credit: conversionValue }],
@@ -251,13 +251,13 @@ function calculateAllAttributionModels(journey, timeDecayHalfLife = 168) {
   }
   
   return {
-    first_click: calculateFirstClickAttribution(attributableouchpoints, conversionValue),
-    last_click: calculateLastClickAttribution(attributableouchpoints, conversionValue),
-    linear: calculateLinearAttribution(attributableouchpoints, conversionValue),
-    time_decay: calculateTimeDecayAttribution(attributableouchpoints, conversionValue, timeDecayHalfLife),
-    position_based: calculatePositionBasedAttribution(attributableouchpoints, conversionValue),
+    first_click: calculateFirstClickAttribution(attributableTouchpoints, conversionValue),
+    last_click: calculateLastClickAttribution(attributableTouchpoints, conversionValue),
+    linear: calculateLinearAttribution(attributableTouchpoints, conversionValue),
+    time_decay: calculateTimeDecayAttribution(attributableTouchpoints, conversionValue, timeDecayHalfLife),
+    position_based: calculatePositionBasedAttribution(attributableTouchpoints, conversionValue),
     model_type: 'multi_touchpoint',
-    touchpoint_count: attributableouchpoints.length
+    touchpoint_count: attributableTouchpoints.length
   };
 }
 
