@@ -72,6 +72,14 @@ exports.handler = async (event, context) => {
     } else {
       buildProgress = await loadBuildProgress(redis, progressKey);
       console.log(`📋 Previous Progress: ${buildProgress.journeys_completed} journeys built, last batch: ${buildProgress.last_batch_completed}`);
+      
+      // DEBUG: Show what the progress tracking contains
+      console.log(`🔍 DEBUG Progress Details:`, {
+        journeys_completed: buildProgress.journeys_completed,
+        last_batch_completed: buildProgress.last_batch_completed,
+        started_at: buildProgress.started_at,
+        total_conversions_to_process: buildProgress.total_conversions_to_process
+      });
     }
     
     // Step 2: Load conversions for journey reconstruction
@@ -182,13 +190,18 @@ exports.handler = async (event, context) => {
       let startIndex, endIndex, thisBatchConversions;
       
       if (force_rebuild || reset_progress) {
-        // For force rebuild or reset, calculate from total progress
-        startIndex = batchesCompletedThisRun * batch_size;
+        if (reset_progress) {
+          // TRUE RESET: Start from the beginning regardless of previous progress
+          startIndex = batchesCompletedThisRun * batch_size;
+        } else {
+          // FORCE REBUILD: Continue from where we left off, but rebuild existing journeys
+          startIndex = (currentBuildProgress.last_batch_completed + batchesCompletedThisRun) * batch_size;
+        }
         endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
         thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
       } else {
         // Normal resume logic using current progress
-        startIndex = currentBuildProgress.last_batch_completed * batch_size;
+        startIndex = (currentBuildProgress.last_batch_completed + batchesCompletedThisRun) * batch_size;
         endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
         thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
       }
@@ -203,8 +216,23 @@ exports.handler = async (event, context) => {
         break;
       }
       
-      const currentBatchNumber = (force_rebuild || reset_progress) ? batchIndex + 1 : currentBuildProgress.last_batch_completed + 1;
+      const currentBatchNumber = (force_rebuild || reset_progress) ? 
+        (reset_progress ? batchIndex + 1 : currentBuildProgress.last_batch_completed + batchIndex + 1) :
+        currentBuildProgress.last_batch_completed + batchIndex + 1;
+        
       console.log(`🎯 Batch ${currentBatchNumber}: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length}`);
+      
+      // DEBUG: Show detailed batch calculation
+      console.log(`🔍 DEBUG Batch Calculation:`, {
+        force_rebuild: force_rebuild,
+        reset_progress: reset_progress,
+        batchIndex: batchIndex,
+        batchesCompletedThisRun: batchesCompletedThisRun,
+        currentBuildProgress_last_batch_completed: currentBuildProgress.last_batch_completed,
+        calculated_startIndex: startIndex,
+        calculated_endIndex: endIndex,
+        conversions_in_this_batch: thisBatchConversions.length
+      });
       
       // Build customer journeys for this batch
       const batchStartTime = Date.now();
