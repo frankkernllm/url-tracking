@@ -915,6 +915,3 @@ function initializeRedis() {
       throw error;
     }
   };
-}
-`
-}
