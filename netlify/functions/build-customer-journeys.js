@@ -44,10 +44,11 @@ exports.handler = async (event, context) => {
       journey_window_hours = 168, // 7-day journey lookback window
       batch_size = 20,           // REDUCED: Safe batch size for timeout protection
       force_rebuild = false,     // Whether to rebuild ALL journeys (ignore existing)
-      reset_progress = false     // Whether to reset progress tracking and start fresh
+      reset_progress = false,    // Whether to reset progress tracking and start fresh
+      max_batches = 10           // NEW: Maximum batches to process in single execution (auto-continue)
     } = body;
     
-    console.log(`📊 Resume Parameters: ${date_range_days} days, ${journey_window_hours}h window, batch size: ${batch_size}`);
+    console.log(`📊 Resume Parameters: ${date_range_days} days, ${journey_window_hours}h window, batch size: ${batch_size}, max batches: ${max_batches}`);
     if (force_rebuild) {
       console.log(`🔄 FORCE REBUILD: Will rebuild all journeys regardless of existing records`);
     }
@@ -151,132 +152,172 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // Step 4: Calculate batch range for this run (RESUME LOGIC)
-    let startIndex, endIndex, thisBatchConversions;
+    // Step 4-8: MULTI-BATCH PROCESSING LOOP
+    console.log(`🚀 Starting multi-batch processing: up to ${max_batches} batches in this execution`);
     
-    if (force_rebuild || reset_progress) {
-      // For force rebuild or reset, ignore previous progress and start from beginning
-      startIndex = 0;
-      endIndex = Math.min(batch_size, conversionsToProcess.length);
-      thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
-      console.log(`🎯 This Run (${force_rebuild ? 'FORCE REBUILD' : 'RESET'}): Processing conversions 1-${endIndex} of ${conversionsToProcess.length} (batch 1)`);
-    } else {
-      // Normal resume logic
-      startIndex = buildProgress.last_batch_completed * batch_size;
-      endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
-      thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
-      console.log(`🎯 This Run: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length} (batch ${buildProgress.last_batch_completed + 1})`);
-    }
+    let totalJourneysCreatedThisRun = 0;
+    let totalConversionsProcessedThisRun = 0;
+    let batchesCompletedThisRun = 0;
+    let allQualityMetrics = {
+      multi_touchpoint_journeys: 0,
+      session_linked_journeys: 0,
+      device_linked_journeys: 0,
+      cross_session_journeys: 0,
+      total_journey_span_hours: 0
+    };
     
-    if (thisBatchConversions.length === 0) {
-      // All conversions processed, update final analytics
-      await updateJourneyAnalytics(redis, conversionsToProcess.length);
+    let currentBuildProgress = { ...buildProgress };
+    let isCompletelyFinished = false;
+    
+    // Process multiple batches in this execution
+    for (let batchIndex = 0; batchIndex < max_batches; batchIndex++) {
+      // Check time remaining (leave 3 seconds for cleanup)
+      const timeRemaining = maxProcessingTime - (Date.now() - startTime);
+      if (timeRemaining < 8000) {  // Need at least 8 seconds for a batch
+        console.log(`⏰ Time limit approaching (${timeRemaining}ms remaining), stopping after ${batchIndex} batches`);
+        break;
+      }
       
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          success: true,
-          message: 'Customer journey building COMPLETE!',
-          completion_summary: {
-            total_conversions_found: allConversions.length,
-            total_conversions_processed: conversionsToProcess.length,
-            final_analytics_updated: true,
-            build_status: 'complete'
-          }
-        })
-      };
+      // Calculate batch range for this specific batch
+      let startIndex, endIndex, thisBatchConversions;
+      
+      if (force_rebuild || reset_progress) {
+        // For force rebuild or reset, calculate from total progress
+        startIndex = batchesCompletedThisRun * batch_size;
+        endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
+        thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
+      } else {
+        // Normal resume logic using current progress
+        startIndex = currentBuildProgress.last_batch_completed * batch_size;
+        endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
+        thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
+      }
+      
+      // Check if we've processed all conversions
+      if (thisBatchConversions.length === 0) {
+        console.log(`✅ All conversions processed! No more work to do.`);
+        isCompletelyFinished = true;
+        
+        // Update final analytics
+        await updateJourneyAnalytics(redis, conversionsToProcess.length);
+        break;
+      }
+      
+      const currentBatchNumber = (force_rebuild || reset_progress) ? batchIndex + 1 : currentBuildProgress.last_batch_completed + 1;
+      console.log(`🎯 Batch ${currentBatchNumber}: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length}`);
+      
+      // Build customer journeys for this batch
+      const batchStartTime = Date.now();
+      const journeyResults = await buildCustomerJourneysFromConversions(
+        redis, 
+        thisBatchConversions,
+        queryEnhancedAttribution, 
+        journey_window_hours,
+        maxProcessingTime - (Date.now() - startTime) - 3000  // Leave time for cleanup
+      );
+      
+      // Store journey records for this batch
+      const storageResults = await storeCustomerJourneys(redis, journeyResults.journeys);
+      
+      // Update cumulative metrics
+      totalJourneysCreatedThisRun += journeyResults.journeys.length;
+      totalConversionsProcessedThisRun += thisBatchConversions.length;
+      batchesCompletedThisRun++;
+      
+      // Accumulate quality metrics
+      allQualityMetrics.multi_touchpoint_journeys += journeyResults.quality_metrics.multi_touchpoint_journeys;
+      allQualityMetrics.session_linked_journeys += journeyResults.quality_metrics.session_linked_journeys;
+      allQualityMetrics.device_linked_journeys += journeyResults.quality_metrics.device_linked_journeys;
+      allQualityMetrics.cross_session_journeys += journeyResults.quality_metrics.cross_session_journeys;
+      allQualityMetrics.total_journey_span_hours += journeyResults.quality_metrics.total_journey_span_hours;
+      
+      // Update progress tracking after each batch
+      if (force_rebuild || reset_progress) {
+        currentBuildProgress = {
+          journeys_completed: totalJourneysCreatedThisRun,
+          last_batch_completed: batchIndex + 1,
+          started_at: currentBuildProgress.started_at || new Date().toISOString(),
+          last_updated: new Date().toISOString(),
+          conversions_processed_this_run: totalConversionsProcessedThisRun,
+          total_conversions_to_process: conversionsToProcess.length,
+          mode: force_rebuild ? 'force_rebuild' : 'reset_progress'
+        };
+      } else {
+        currentBuildProgress = {
+          ...currentBuildProgress,
+          journeys_completed: currentBuildProgress.journeys_completed + journeyResults.journeys.length,
+          last_batch_completed: currentBuildProgress.last_batch_completed + 1,
+          last_updated: new Date().toISOString(),
+          conversions_processed_this_run: thisBatchConversions.length,
+          total_conversions_to_process: conversionsToProcess.length
+        };
+      }
+      
+      await storeBuildProgress(redis, progressKey, currentBuildProgress);
+      
+      const batchTime = Date.now() - batchStartTime;
+      console.log(`✅ Batch ${currentBatchNumber} complete: ${journeyResults.journeys.length} journeys in ${batchTime}ms`);
+      
+      // Check if this was the final batch
+      if (endIndex >= conversionsToProcess.length) {
+        console.log(`🎉 Final batch completed! All ${conversionsToProcess.length} conversions processed.`);
+        isCompletelyFinished = true;
+        await updateJourneyAnalytics(redis, conversionsToProcess.length);
+        break;
+      }
     }
     
-    // Step 5: Build customer journeys for this batch using IDENTICAL logic
-    const journeyResults = await buildCustomerJourneysFromConversions(
-      redis, 
-      thisBatchConversions,
-      queryEnhancedAttribution, 
-      journey_window_hours,
-      maxProcessingTime - (Date.now() - startTime)
-    );
-    
-    // Step 6: Store journey records using IDENTICAL structure (SAFE: same keys as original)
-    const storageResults = await storeCustomerJourneys(redis, journeyResults.journeys);
-    
-    // Step 7: Update progress tracking for next run
-    let updatedProgress;
-    
-    if (force_rebuild || reset_progress) {
-      // For force rebuild or reset, start progress tracking fresh
-      updatedProgress = {
-        journeys_completed: journeyResults.journeys.length,
-        last_batch_completed: 1,
-        started_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
-        conversions_processed_this_run: thisBatchConversions.length,
-        total_conversions_to_process: conversionsToProcess.length,
-        mode: force_rebuild ? 'force_rebuild' : 'reset_progress'
-      };
-    } else {
-      // Normal progress update
-      updatedProgress = {
-        ...buildProgress,
-        journeys_completed: buildProgress.journeys_completed + journeyResults.journeys.length,
-        last_batch_completed: buildProgress.last_batch_completed + 1,
-        last_updated: new Date().toISOString(),
-        conversions_processed_this_run: thisBatchConversions.length,
-        total_conversions_to_process: conversionsToProcess.length
-      };
-    }
-    
-    await storeBuildProgress(redis, progressKey, updatedProgress);
+    // Calculate final metrics for this execution
+    allQualityMetrics.avg_journey_span_hours = allQualityMetrics.total_journey_span_hours / (totalJourneysCreatedThisRun || 1);
     
     const totalTime = Date.now() - startTime;
-    const isComplete = endIndex >= conversionsToProcess.length;
+    const conversionsRemaining = conversionsToProcess.length - (currentBuildProgress.last_batch_completed * batch_size);
+    const batchesRemaining = Math.max(0, Math.ceil(conversionsRemaining / batch_size));
     
-    console.log(`✅ Batch ${buildProgress.last_batch_completed + 1} complete in ${totalTime}ms`);
-    
-    // Step 8: Update journey analytics if this is the final batch
-    if (isComplete) {
-      console.log(`🎉 FINAL BATCH: Updating journey analytics`);
-      await updateJourneyAnalytics(redis, conversionsToProcess.length);
-    }
+    console.log(`🏁 Multi-batch execution complete: ${batchesCompletedThisRun} batches, ${totalJourneysCreatedThisRun} journeys, ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        batch_complete: true,
-        build_complete: isComplete,
-        batch_summary: {
-          batch_number: force_rebuild || reset_progress ? 1 : buildProgress.last_batch_completed + 1,
-          conversions_processed_this_batch: thisBatchConversions.length,
-          journeys_created_this_batch: journeyResults.journeys.length,
+        multi_batch_execution: true,
+        build_complete: isCompletelyFinished,
+        execution_summary: {
+          batches_completed_this_run: batchesCompletedThisRun,
+          conversions_processed_this_run: totalConversionsProcessedThisRun,
+          journeys_created_this_run: totalJourneysCreatedThisRun,
           processing_time_ms: totalTime,
-          journey_success_rate: ((journeyResults.journeys.length / thisBatchConversions.length) * 100).toFixed(2)
+          avg_time_per_batch: Math.round(totalTime / batchesCompletedThisRun),
+          execution_efficiency: `${totalConversionsProcessedThisRun} conversions in ${Math.round(totalTime/1000)} seconds`
         },
         progress_summary: {
           total_conversions_to_process: conversionsToProcess.length,
-          conversions_processed_so_far: endIndex,
-          journeys_completed_so_far: updatedProgress.journeys_completed,
-          progress_percentage: ((endIndex / conversionsToProcess.length) * 100).toFixed(1),
-          estimated_batches_remaining: Math.ceil((conversionsToProcess.length - endIndex) / batch_size)
+          conversions_completed_so_far: currentBuildProgress.last_batch_completed * batch_size,
+          journeys_completed_so_far: currentBuildProgress.journeys_completed,
+          progress_percentage: ((currentBuildProgress.last_batch_completed * batch_size / conversionsToProcess.length) * 100).toFixed(1),
+          estimated_batches_remaining: batchesRemaining,
+          estimated_executions_remaining: Math.ceil(batchesRemaining / max_batches)
         },
-        journey_quality_metrics: {
-          journeys_with_multiple_touchpoints: journeyResults.quality_metrics.multi_touchpoint_journeys,
-          journeys_with_session_linking: journeyResults.quality_metrics.session_linked_journeys,
-          average_journey_span_hours: journeyResults.quality_metrics.avg_journey_span_hours
+        cumulative_quality_metrics: {
+          journeys_with_multiple_touchpoints: allQualityMetrics.multi_touchpoint_journeys,
+          journeys_with_session_linking: allQualityMetrics.session_linked_journeys,
+          journeys_with_device_linking: allQualityMetrics.device_linked_journeys,
+          journeys_with_cross_session_activity: allQualityMetrics.cross_session_journeys,
+          average_journey_span_hours: allQualityMetrics.avg_journey_span_hours
         },
-        next_steps: isComplete ? [
+        next_steps: isCompletelyFinished ? [
           '🎉 Customer journey building COMPLETE!',
+          `Successfully processed all ${conversionsToProcess.length} conversions`,
           'All conversions now have journey records',
           'Use query-customer-journeys.js for business intelligence',
           'System ready for advanced attribution analysis'
         ] : [
-          `Continue building: ${Math.ceil((conversionsToProcess.length - endIndex) / batch_size)} batches remaining`,
-          'Run the same command again to process next batch',
-          `Next batch will process conversions ${endIndex + 1}-${Math.min(endIndex + batch_size, conversionsToProcess.length)}`,
-          `Progress saved automatically - safe to continue later`,
-          `Use "force_rebuild": true to rebuild all journeys`,
-          `Use "reset_progress": true to restart from batch 1`
+          `Continue automatically: ${batchesRemaining} batches remaining`,
+          `Estimated ${Math.ceil(batchesRemaining / max_batches)} more executions needed`,
+          'Run the same command again to continue automatically',
+          'Each execution will process up to 10 batches (200 conversions)',
+          `Progress: ${((currentBuildProgress.last_batch_completed * batch_size / conversionsToProcess.length) * 100).toFixed(1)}% complete`
         ]
       })
     };
