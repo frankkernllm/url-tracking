@@ -40,7 +40,7 @@ exports.handler = async (event, context) => {
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
     const {
-      date_range_days = 7,        // How many days of conversions to process
+      date_range_days = 14,        // How many days of conversions to process
       journey_window_hours = 168, // 7-day journey lookback window
       batch_size = 20,           // REDUCED: Safe batch size for timeout protection
       force_rebuild = false      // Whether to rebuild ALL journeys (ignore existing)
