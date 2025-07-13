@@ -1,4 +1,3 @@
-// attribution-recovery-engine.js
 // Attribution Recovery Engine - Re-process conversion-only journeys with enhanced attribution
 // Path: netlify/functions/attribution-recovery-engine.js
 // Purpose: Find missed pageview attributions using current dual IP extraction logic
@@ -42,11 +41,11 @@ exports.handler = async (event, context) => {
       force_reprocess = false        // Reprocess even if already attempted
     } = body;
     
-    console.log(\`🎯 Recovery Parameters: \${extended_window_hours}h window, batch size: \${batch_size}\`);
+    console.log(`🎯 Recovery Parameters: ${extended_window_hours}h window, batch size: ${batch_size}`);
     
     // Step 1: Find conversion-only journeys that need recovery
     const recoveryTargets = await findConversionOnlyJourneys(redis, force_reprocess, maxProcessingTime - (Date.now() - startTime));
-    console.log(\`🎯 Found \${recoveryTargets.length} conversion-only journeys for recovery processing\`);
+    console.log(`🎯 Found ${recoveryTargets.length} conversion-only journeys for recovery processing`);
     
     if (recoveryTargets.length === 0) {
       return {
@@ -66,7 +65,7 @@ exports.handler = async (event, context) => {
     
     // Step 2: Load original conversion data for enhanced IP extraction
     const conversionsWithOriginalData = await loadOriginalConversionData(redis, recoveryTargets, maxProcessingTime - (Date.now() - startTime));
-    console.log(\`💾 Loaded original conversion data for \${conversionsWithOriginalData.length} journeys\`);
+    console.log(`💾 Loaded original conversion data for ${conversionsWithOriginalData.length} journeys`);
     
     // Step 3: Apply enhanced attribution recovery
     const recoveryResults = await processEnhancedAttributionRecovery(
@@ -78,7 +77,7 @@ exports.handler = async (event, context) => {
     );
     
     const totalTime = Date.now() - startTime;
-    console.log(\`✅ Attribution recovery complete: \${recoveryResults.successful_recoveries} recoveries in \${totalTime}ms\`);
+    console.log(`✅ Attribution recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -103,11 +102,11 @@ exports.handler = async (event, context) => {
         attribution_improvements: {
           new_multi_touchpoint_journeys: recoveryResults.successful_recoveries,
           estimated_attribution_rate_improvement: recoveryResults.recovery_attempts > 0 ? 
-            \`+\${((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1)}%\` : '+0%'
+            `+${((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1)}%` : '+0%'
         },
         recovery_details: recoveryResults.recovery_details.slice(0, 10), // First 10 examples
         next_steps: recoveryResults.journeys_remaining > 0 ? [
-          \`Continue recovery: \${recoveryResults.journeys_remaining} conversion-only journeys remaining\`,
+          `Continue recovery: ${recoveryResults.journeys_remaining} conversion-only journeys remaining`,
           'Run same command again to continue processing',
           'Each run will find additional attributions using enhanced IP logic'
         ] : [
@@ -150,7 +149,7 @@ async function findConversionOnlyJourneys(redis, forceReprocess, maxTime) {
         break;
       }
       
-      const scanResult = await redis(\`scan/\${cursor}/match/customer_journey:*/count/500\`);
+      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/500`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -169,7 +168,7 @@ async function findConversionOnlyJourneys(redis, forceReprocess, maxTime) {
         
         const batchPromises = batch.map(async (key) => {
           try {
-            const journeyData = await redis(\`get/\${key}\`);
+            const journeyData = await redis(`get/${key}`);
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
               
@@ -205,26 +204,26 @@ async function findConversionOnlyJourneys(redis, forceReprocess, maxTime) {
         conversionOnlyJourneys.push(...validTargets);
         
         if (conversionOnlyJourneys.length % 100 === 0 && conversionOnlyJourneys.length > 0) {
-          console.log(\`🎯 Recovery scan progress: \${conversionOnlyJourneys.length} conversion-only journeys found\`);
+          console.log(`🎯 Recovery scan progress: ${conversionOnlyJourneys.length} conversion-only journeys found`);
         }
       }
       
     } while (cursor !== '0' && iterations < maxIterations);
     
   } catch (scanError) {
-    console.log(\`⚠️ Journey scan error: \${scanError.message}\`);
+    console.log(`⚠️ Journey scan error: ${scanError.message}`);
   }
   
   // Sort by conversion timestamp (most recent first)
   conversionOnlyJourneys.sort((a, b) => new Date(b.conversion_timestamp) - new Date(a.conversion_timestamp));
   
-  console.log(\`✅ Found \${conversionOnlyJourneys.length} conversion-only journeys for recovery\`);
+  console.log(`✅ Found ${conversionOnlyJourneys.length} conversion-only journeys for recovery`);
   return conversionOnlyJourneys;
 }
 
 // Load original conversion data for enhanced IP extraction
 async function loadOriginalConversionData(redis, recoveryTargets, maxTime) {
-  console.log(\`📥 Loading original conversion data for \${recoveryTargets.length} journeys...\`);
+  console.log(`📥 Loading original conversion data for ${recoveryTargets.length} journeys...`);
   
   const loadStartTime = Date.now();
   const conversionsWithData = [];
@@ -245,7 +244,7 @@ async function loadOriginalConversionData(redis, recoveryTargets, maxTime) {
         const conversionKey = await findConversionByOrderId(redis, target.conversion_order_id);
         
         if (conversionKey) {
-          const conversionData = await redis(\`get/\${conversionKey}\`);
+          const conversionData = await redis(`get/${conversionKey}`);
           if (conversionData?.result) {
             const originalConversion = JSON.parse(decodeURIComponent(conversionData.result));
             
@@ -268,7 +267,7 @@ async function loadOriginalConversionData(redis, recoveryTargets, maxTime) {
         
         return null;
       } catch (error) {
-        console.warn(\`⚠️ Error loading conversion data for order \${target.conversion_order_id}:\`, error.message);
+        console.warn(`⚠️ Error loading conversion data for order ${target.conversion_order_id}:`, error.message);
         return null;
       }
     });
@@ -277,10 +276,10 @@ async function loadOriginalConversionData(redis, recoveryTargets, maxTime) {
     const validResults = batchResults.filter(result => result !== null);
     conversionsWithData.push(...validResults);
     
-    console.log(\`📥 Data loading progress: \${conversionsWithData.length}/\${recoveryTargets.length} conversions loaded\`);
+    console.log(`📥 Data loading progress: ${conversionsWithData.length}/${recoveryTargets.length} conversions loaded`);
   }
   
-  console.log(\`✅ Loaded original data for \${conversionsWithData.length} conversions\`);
+  console.log(`✅ Loaded original data for ${conversionsWithData.length} conversions`);
   return conversionsWithData;
 }
 
@@ -293,7 +292,7 @@ async function findConversionByOrderId(redis, orderId) {
     const maxIterations = 5;
     
     do {
-      const scanResult = await redis(\`scan/\${cursor}/match/conversions:*/count/200\`);
+      const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/200`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -306,7 +305,7 @@ async function findConversionByOrderId(redis, orderId) {
       // Check keys in batch
       for (const key of keys) {
         try {
-          const conversionData = await redis(\`get/\${key}\`);
+          const conversionData = await redis(`get/${key}`);
           if (conversionData?.result) {
             const conversion = JSON.parse(decodeURIComponent(conversionData.result));
             if (conversion.order_id == orderId) {
@@ -375,7 +374,7 @@ function extractEnhancedIPData(originalConversion) {
     extractedIPs.all_ips = allIPs;
     extractedIPs.dual_ip_detected = allIPs.length > 1;
     
-    console.log(\`🔧 Enhanced IP extraction for order \${originalConversion.order_id}:\`, {
+    console.log(`🔧 Enhanced IP extraction for order ${originalConversion.order_id}:`, {
       primary_ip: extractedIPs.primary_ip,
       conversion_ip: extractedIPs.conversion_ip,
       dual_ip: extractedIPs.dual_ip_detected,
@@ -392,7 +391,7 @@ function extractEnhancedIPData(originalConversion) {
 
 // Process enhanced attribution recovery
 async function processEnhancedAttributionRecovery(redis, conversionsWithData, extendedWindowHours, batchSize, maxTime) {
-  console.log(\`🔄 Starting enhanced attribution recovery for \${conversionsWithData.length} conversions...\`);
+  console.log(`🔄 Starting enhanced attribution recovery for ${conversionsWithData.length} conversions...`);
   
   const processStartTime = Date.now();
   let recoveryAttempts = 0;
@@ -406,12 +405,12 @@ async function processEnhancedAttributionRecovery(redis, conversionsWithData, ex
     // Check timeout
     const timeRemaining = maxTime - (Date.now() - processStartTime);
     if (timeRemaining < 5000) {
-      console.log(\`⏰ Time limit reached after processing \${recoveryAttempts} recovery attempts\`);
+      console.log(`⏰ Time limit reached after processing ${recoveryAttempts} recovery attempts`);
       break;
     }
     
     const batch = conversionsWithData.slice(i, i + batchSize);
-    console.log(\`🔄 Processing recovery batch \${Math.floor(i/batchSize) + 1}: \${i + 1}-\${i + batch.length} of \${conversionsWithData.length}\`);
+    console.log(`🔄 Processing recovery batch ${Math.floor(i/batchSize) + 1}: ${i + 1}-${i + batch.length} of ${conversionsWithData.length}`);
     
     // Process this batch
     const batchResults = await processBatchRecovery(redis, batch, extendedWindowHours);
@@ -422,10 +421,10 @@ async function processEnhancedAttributionRecovery(redis, conversionsWithData, ex
     journeysRemaining = conversionsWithData.length - (i + batch.length);
     recoveryDetails.push(...batchResults.recovery_details);
     
-    console.log(\`✅ Batch recovery complete: \${batchResults.successful_recoveries}/\${batch.length} successful (\${recoveryAttempts}/\${conversionsWithData.length} total)\`);
+    console.log(`✅ Batch recovery complete: ${batchResults.successful_recoveries}/${batch.length} successful (${recoveryAttempts}/${conversionsWithData.length} total)`);
   }
   
-  console.log(\`🏁 Recovery processing summary: \${successfulRecoveries}/\${recoveryAttempts} conversions recovered\`);
+  console.log(`🏁 Recovery processing summary: ${successfulRecoveries}/${recoveryAttempts} conversions recovered`);
   
   return {
     recovery_attempts: recoveryAttempts,
@@ -476,13 +475,13 @@ async function processBatchRecovery(redis, batch, extendedWindowHours) {
           attribution_methods: recoveredPageviews.map(pv => pv.attribution_method)
         });
         
-        console.log(\`✅ Recovery success: Order \${conversionData.conversion_order_id} - found \${recoveredPageviews.length} pageviews\`);
+        console.log(`✅ Recovery success: Order ${conversionData.conversion_order_id} - found ${recoveredPageviews.length} pageviews`);
       }
       
       return { success: recoveredPageviews.length > 0, pageviews: recoveredPageviews.length };
       
     } catch (recoveryError) {
-      console.warn(\`⚠️ Recovery error for order \${conversionData.conversion_order_id}:\`, recoveryError.message);
+      console.warn(`⚠️ Recovery error for order ${conversionData.conversion_order_id}:`, recoveryError.message);
       return { success: false, pageviews: 0 };
     }
   });
@@ -496,6 +495,396 @@ async function processBatchRecovery(redis, batch, extendedWindowHours) {
   };
 }
 
+// Perform enhanced attribution recovery (embedded logic from build-customer-journeys.js with enhancements)
+async function performEnhancedAttributionRecovery(redis, params) {
+  const { conversion_timestamp, enhanced_ips, session_id, device_signature, screen_value, gpu_signature, geographic_data, window_hours } = params;
+  
+  const conversionTime = new Date(conversion_timestamp).getTime();
+  const windowStart = conversionTime - (window_hours * 60 * 60 * 1000);
+  
+  let allMatches = [];
+  
+  try {
+    console.log(`🔍 Enhanced recovery search: ${enhanced_ips.length} IPs, ${window_hours}h window`);
+    
+    // PRIORITY 1: Enhanced IP Index Multi-Signal Search with ALL extracted IPs
+    if (enhanced_ips && enhanced_ips.length > 0) {
+      const ipMatches = await searchByEnhancedIPIndexes(redis, enhanced_ips, session_id, device_signature, screen_value, gpu_signature, windowStart, conversionTime);
+      if (ipMatches.length > 0) {
+        allMatches = allMatches.concat(ipMatches);
+        console.log(`🎯 Enhanced IP search: found ${ipMatches.length} matches`);
+        
+        // Continue searching even with high-confidence matches to get complete picture
+      }
+    }
+    
+    // PRIORITY 2: Geographic Correlation (NEW - uses existing geographic keys)
+    if (geographic_data && geographic_data.city && geographic_data.isp && allMatches.length < 5) {
+      const geoMatches = await searchByGeographicCorrelation(redis, geographic_data, windowStart, conversionTime);
+      if (geoMatches.length > 0) {
+        geoMatches.forEach(match => {
+          match.attribution_method = 'geographic_correlation';
+          match.confidence = 150; // Lower confidence for geographic correlation
+        });
+        allMatches = allMatches.concat(geoMatches);
+        console.log(`🌍 Geographic correlation: found ${geoMatches.length} matches`);
+      }
+    }
+    
+    // FALLBACK METHODS: Only if minimal matches found
+    if (allMatches.length < 2) {
+      
+      // PRIORITY 3: Session ID Match (direct lookup)
+      if (session_id) {
+        const sessionMatches = await searchBySessionId(redis, session_id, windowStart, conversionTime);
+        if (sessionMatches.length > 0) {
+          sessionMatches.forEach(match => {
+            match.attribution_method = 'session_id_recovery';
+            match.confidence = 300;
+          });
+          allMatches = allMatches.concat(sessionMatches);
+        }
+      }
+      
+      // PRIORITY 4: Device Signature Match (direct lookup)
+      if (device_signature && allMatches.length < 3) {
+        const deviceMatches = await searchByDeviceSignature(redis, device_signature, windowStart, conversionTime);
+        if (deviceMatches.length > 0) {
+          deviceMatches.forEach(match => {
+            match.attribution_method = 'device_signature_recovery';
+            match.confidence = 260;
+          });
+          allMatches = allMatches.concat(deviceMatches);
+        }
+      }
+    }
+    
+    // Remove duplicates and sort by confidence
+    const uniqueMatches = removeDuplicateMatches(allMatches);
+    uniqueMatches.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    
+    console.log(`✅ Enhanced recovery complete: ${uniqueMatches.length} unique pageviews found`);
+    return uniqueMatches;
+    
+  } catch (error) {
+    console.warn('⚠️ Enhanced attribution recovery error:', error.message);
+    return [];
+  }
+}
+
+// NEW: Geographic correlation search using existing attribution_geo_* keys
+async function searchByGeographicCorrelation(redis, geoData, windowStart, conversionTime) {
+  const matches = [];
+  
+  try {
+    const cleanCity = cleanForRedisKey(geoData.city);
+    const cleanISP = cleanForRedisKey(geoData.isp?.substring(0, 20));
+    
+    if (cleanCity.length > 2 && cleanISP.length > 2) {
+      // Search for geographic correlation keys
+      let cursor = '0';
+      let iterations = 0;
+      const maxIterations = 3;
+      
+      do {
+        const scanResult = await redis(`scan/${cursor}/match/attribution_geo_${cleanCity}_${cleanISP}_*/count/100`);
+        
+        if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+          break;
+        }
+        
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        iterations++;
+        
+        // Check each geographic correlation key
+        for (const key of keys) {
+          try {
+            const geoResult = await redis(`get/${key}`);
+            if (geoResult?.result) {
+              const pageview = JSON.parse(decodeURIComponent(geoResult.result));
+              const pageviewTime = new Date(pageview.timestamp).getTime();
+              
+              if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+                matches.push({
+                  ...pageview,
+                  geographic_correlation: true,
+                  matched_city: geoData.city,
+                  matched_isp: geoData.isp
+                });
+              }
+            }
+          } catch (e) {
+            // Skip invalid data
+          }
+        }
+        
+      } while (cursor !== '0' && iterations < maxIterations);
+    }
+    
+  } catch (error) {
+    console.warn('⚠️ Geographic correlation search failed:', error.message);
+  }
+  
+  return matches;
+}
+
+// Update existing journey with recovered pageviews
+async function updateJourneyWithRecoveredPageviews(redis, conversionData, recoveredPageviews) {
+  try {
+    // Load existing journey
+    const existingJourneyData = await redis(`get/${conversionData.journey_key}`);
+    if (!existingJourneyData?.result) {
+      throw new Error('Existing journey not found');
+    }
+    
+    const existingJourney = JSON.parse(decodeURIComponent(existingJourneyData.result));
+    
+    // Build enhanced journey with recovered pageviews
+    const enhancedJourney = buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews);
+    
+    // Update the journey record
+    await redis(`setex/${conversionData.journey_key}/2592000/${encodeURIComponent(JSON.stringify(enhancedJourney))}`); // 30-day TTL
+    
+    console.log(`💾 Updated journey ${conversionData.journey_id} with ${recoveredPageviews.length} recovered pageviews`);
+    
+  } catch (updateError) {
+    console.error(`❌ Error updating journey ${conversionData.journey_id}:`, updateError.message);
+    throw updateError;
+  }
+}
+
+// Build enhanced journey from recovery
+function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
+  // Sort recovered pageviews by timestamp
+  const sortedPageviews = recoveredPageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  
+  // Create new touchpoints from recovered pageviews
+  const recoveredTouchpoints = sortedPageviews.map((pageview, index) => ({
+    touchpoint_id: `${existingJourney.conversion_order_id}_recovered_${index + 1}`,
+    timestamp: pageview.timestamp,
+    landing_page: pageview.landing_page,
+    source: pageview.source,
+    medium: pageview.medium,
+    campaign: pageview.campaign,
+    content: pageview.content,
+    term: pageview.term,
+    referrer_url: pageview.referrer_url,
+    
+    // Attribution metadata
+    attribution_method: pageview.attribution_method,
+    confidence: pageview.confidence,
+    matched_ip: pageview.matched_ip,
+    recovery_method: 'enhanced_dual_ip_extraction',
+    
+    // Session and device data
+    session_id: pageview.session_id,
+    canvas_fingerprint: pageview.canvas_fingerprint,
+    screen_resolution: pageview.screen_resolution,
+    user_agent: pageview.user_agent,
+    
+    // Position in journey
+    touchpoint_position: index + 1,
+    is_first_touchpoint: index === 0,
+    is_last_touchpoint: false
+  }));
+  
+  // Combine with existing conversion touchpoint
+  const existingConversionTouchpoint = existingJourney.touchpoints.find(tp => tp.is_conversion || tp.type === 'conversion');
+  if (existingConversionTouchpoint) {
+    existingConversionTouchpoint.touchpoint_position = recoveredTouchpoints.length + 1;
+    existingConversionTouchpoint.is_last_touchpoint = true;
+  }
+  
+  const allTouchpoints = [...recoveredTouchpoints, existingConversionTouchpoint].filter(Boolean);
+  
+  // Recalculate journey metrics
+  const journeyStart = new Date(allTouchpoints[0].timestamp);
+  const journeyEnd = new Date(existingJourney.conversion_timestamp);
+  const journeySpanHours = (journeyEnd - journeyStart) / (1000 * 60 * 60);
+  
+  const uniqueSessions = new Set(allTouchpoints.map(t => t.session_id).filter(Boolean)).size;
+  const uniqueDeviceFingerprints = new Set(allTouchpoints.map(t => t.canvas_fingerprint).filter(Boolean)).size;
+  const uniqueSources = new Set(allTouchpoints.map(t => t.source).filter(Boolean));
+  
+  return {
+    ...existingJourney,
+    
+    // Updated journey metrics
+    journey_start: allTouchpoints[0].timestamp,
+    journey_span_hours: journeySpanHours,
+    total_touchpoints: allTouchpoints.length,
+    
+    unique_sessions: uniqueSessions,
+    unique_device_fingerprints: uniqueDeviceFingerprints,
+    unique_sources: Array.from(uniqueSources),
+    cross_session_journey: uniqueSessions > 1,
+    cross_device_journey: uniqueDeviceFingerprints > 1,
+    
+    first_click_source: allTouchpoints[0].source,
+    last_click_source: allTouchpoints[allTouchpoints.length - 2]?.source || allTouchpoints[0].source,
+    attribution_confidence_avg: allTouchpoints.reduce((sum, t) => sum + (t.confidence || 0), 0) / allTouchpoints.length,
+    
+    // Updated touchpoints
+    touchpoints: allTouchpoints,
+    
+    // Recovery metadata
+    recovery_attempted: true,
+    recovery_timestamp: new Date().toISOString(),
+    recovery_method: 'enhanced_dual_ip_extraction',
+    recovered_pageviews: sortedPageviews.length,
+    reconstruction_method: 'enhanced_attribution_recovery'
+  };
+}
+
+// Helper functions (embedded from existing scripts)
+
+// Clean string for Redis key usage
+function cleanForRedisKey(str) {
+  if (!str || str === 'Unknown' || str === 'unknown') return '';
+  return str.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+}
+
+// Hash function for privacy-safe parameter values
+function hashString(str) {
+  if (!str) return '';
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
+
+// Enhanced IP index search (embedded from query-pageviews-enhanced.js)
+async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSignature, screenValue, gpuSignature, windowStart, windowEnd) {
+  const matches = [];
+  
+  for (const ip of ipsToCheck) {
+    const encodedIP = ip.replace(/:/g, '_');
+    const ipIndexKey = `pageview_index_ip:${encodedIP}`;
+    
+    try {
+      const indexData = await redis(`get/${ipIndexKey}`);
+      
+      if (indexData?.result) {
+        const parsed = JSON.parse(decodeURIComponent(indexData.result));
+        
+        if (!parsed.multi_signal_ready) continue;
+        
+        // Filter pageviews within time window
+        const windowPageviews = parsed.pageviews.filter(pv => {
+          const pvTime = new Date(pv.timestamp);
+          return pvTime >= windowStart && pvTime <= windowEnd;
+        });
+        
+        // Multi-signal matching within IP index
+        for (const pv of windowPageviews) {
+          let confidence = 240; // Base IP match confidence
+          let attributionMethod = 'ip_index_recovery';
+          
+          // PRIORITY 1: Session ID match (highest confidence)
+          if (sessionId && pv.session_id === sessionId) {
+            confidence = 295;
+            attributionMethod = 'session_id_match_ip_index_recovery';
+          }
+          // PRIORITY 2: Device signature match
+          else if (deviceSignature && pv.canvas_fingerprint === deviceSignature) {
+            confidence = 255;
+            attributionMethod = 'device_signature_match_ip_index_recovery';
+          }
+          // PRIORITY 3: Screen signature match
+          else if (screenValue && pv.screen_resolution && hashString(pv.screen_resolution) === screenValue) {
+            confidence = 195;
+            attributionMethod = 'screen_signature_match_ip_index_recovery';
+          }
+          // PRIORITY 4: GPU signature match
+          else if (gpuSignature && pv.webgl_fingerprint && hashString(pv.webgl_fingerprint) === gpuSignature) {
+            confidence = 175;
+            attributionMethod = 'webgl_signature_match_ip_index_recovery';
+          }
+          
+          matches.push({
+            ...pv,
+            matched_ip: ip,
+            match_method: 'enhanced_ip_index_recovery',
+            attribution_method: attributionMethod,
+            confidence: confidence,
+            index_source: 'enhanced_ip_index'
+          });
+        }
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️ Enhanced IP index search failed for ${ip}:`, error.message);
+    }
+  }
+  
+  return matches;
+}
+
+// Session ID search (embedded logic)
+async function searchBySessionId(redis, sessionId, windowStart, conversionTime) {
+  try {
+    const sessionKey = `attribution_session_${sessionId}`;
+    const sessionResult = await redis(`get/${sessionKey}`);
+    
+    if (sessionResult.result) {
+      const attributionResult = await redis(`get/${sessionResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// Device signature search (embedded logic)
+async function searchByDeviceSignature(redis, deviceSig, windowStart, conversionTime) {
+  try {
+    const deviceKey = `attribution_fp_${deviceSig}`;
+    const deviceResult = await redis(`get/${deviceKey}`);
+    
+    if (deviceResult.result) {
+      const attributionResult = await redis(`get/${deviceResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// Remove duplicate matches
+function removeDuplicateMatches(matches) {
+  const seen = new Set();
+  return matches.filter(match => {
+    const key = `${match.timestamp}_${match.session_id || match.ip_address}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 // Initialize Redis helper
 function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
@@ -506,9 +895,9 @@ function initializeRedis() {
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     
     try {
-      const response = await fetch(\`\${redisUrl}/\${command}\`, {
+      const response = await fetch(`${redisUrl}/${command}`, {
         headers: { 
-          Authorization: \`Bearer \${redisToken}\`,
+          Authorization: `Bearer ${redisToken}`,
           'Content-Type': 'application/json'
         },
         signal: controller.signal
@@ -517,7 +906,7 @@ function initializeRedis() {
       clearTimeout(timeoutId);
       
       if (!response.ok) {
-        throw new Error(\`Redis error: \${response.status}\`);
+        throw new Error(`Redis error: ${response.status}`);
       }
       
       return await response.json();
@@ -527,29 +916,5 @@ function initializeRedis() {
     }
   };
 }
-`;
-
-console.log('✅ Attribution Recovery Engine - Implementation Complete!');
-console.log('=========================================================');
-console.log('');
-console.log('📁 File: netlify/functions/attribution-recovery-engine.js');
-console.log('📏 Size:', sourceCode.length, 'characters');
-console.log('🎯 Target: 87.7% conversion-only journeys for attribution recovery');
-console.log('📈 Expected: 12.3% → 25-30% attribution rate improvement');
-console.log('');
-console.log('🏗️ IMPLEMENTATION FEATURES:');
-console.log('✅ Enhanced IP extraction with dual IP logic');
-console.log('✅ Geographic correlation using existing attribution_geo_* keys');
-console.log('✅ Multi-signal attribution (session, device, screen, GPU)');
-console.log('✅ Batch processing with timeout management');
-console.log('✅ Journey update with recovered pageviews');
-console.log('✅ Complete recovery metadata tracking');
-console.log('');
-console.log('⚡ PERFORMANCE OPTIMIZATIONS:');
-console.log('• Leverages pre-built Redis indexes');
-console.log('• Batch operations to minimize Redis round-trips');
-console.log('• Memory processing for efficient matching');
-console.log('• Conservative timeout handling');
-console.log('• Follows proven patterns from existing scripts');
-console.log('');
-console.log('🚀 READY FOR TESTING!');
+`
+}
