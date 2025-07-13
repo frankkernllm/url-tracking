@@ -43,18 +43,35 @@ exports.handler = async (event, context) => {
       date_range_days = 7,        // How many days of conversions to process
       journey_window_hours = 168, // 7-day journey lookback window
       batch_size = 20,           // REDUCED: Safe batch size for timeout protection
-      force_rebuild = false      // Whether to rebuild ALL journeys (ignore existing)
+      force_rebuild = false,     // Whether to rebuild ALL journeys (ignore existing)
+      reset_progress = false     // Whether to reset progress tracking and start fresh
     } = body;
     
     console.log(`📊 Resume Parameters: ${date_range_days} days, ${journey_window_hours}h window, batch size: ${batch_size}`);
     if (force_rebuild) {
       console.log(`🔄 FORCE REBUILD: Will rebuild all journeys regardless of existing records`);
     }
+    if (reset_progress) {
+      console.log(`🔄 RESET PROGRESS: Will clear progress tracking and start from batch 1`);
+    }
     
     // Step 1: Load progress tracking to resume from last position
     const progressKey = 'customer_journey_build_progress';
-    const buildProgress = await loadBuildProgress(redis, progressKey);
-    console.log(`📋 Previous Progress: ${buildProgress.journeys_completed} journeys built, last batch: ${buildProgress.last_batch_completed}`);
+    let buildProgress;
+    
+    if (reset_progress) {
+      // Clear progress and start fresh
+      buildProgress = {
+        journeys_completed: 0,
+        last_batch_completed: 0,
+        started_at: new Date().toISOString(),
+        total_conversions_to_process: 0
+      };
+      console.log(`📋 Progress Reset: Starting fresh from batch 1`);
+    } else {
+      buildProgress = await loadBuildProgress(redis, progressKey);
+      console.log(`📋 Previous Progress: ${buildProgress.journeys_completed} journeys built, last batch: ${buildProgress.last_batch_completed}`);
+    }
     
     // Step 2: Load conversions for journey reconstruction
     const allConversions = await loadConversionsForJourneyBuilding(redis, date_range_days);
@@ -79,16 +96,18 @@ exports.handler = async (event, context) => {
     let conversionsToProcess;
     if (force_rebuild) {
       conversionsToProcess = allConversions;
-      console.log(`🔄 FORCE REBUILD: Processing all ${allConversions.length} conversions`);
+      console.log(`🔄 FORCE REBUILD: Processing all ${allConversions.length} conversions (ignoring existing journeys)`);
     } else {
       const existingJourneys = await findExistingJourneyOrderIds(redis);
       console.log(`🔍 Found ${existingJourneys.length} existing journey records`);
       
       // DEBUG: Check data types and sample values
       const sampleConversions = allConversions.slice(0, 3).map(c => ({ order_id: c.order_id, type: typeof c.order_id }));
-      const sampleExistingIds = existingJourneys.slice(0, 3).map(id => ({ order_id: id, type: typeof id }));
+      const sampleExistingIds = existingJourneys.slice(0, 5).map(id => ({ order_id: id, type: typeof id }));
+      const sampleExistingIdsEnd = existingJourneys.slice(-5).map(id => ({ order_id: id, type: typeof id }));
       console.log(`🔍 DEBUG Sample conversions:`, sampleConversions);
-      console.log(`🔍 DEBUG Sample existing journey order IDs:`, sampleExistingIds);
+      console.log(`🔍 DEBUG Sample existing journey order IDs (first 5):`, sampleExistingIds);
+      console.log(`🔍 DEBUG Sample existing journey order IDs (last 5):`, sampleExistingIdsEnd);
       
       // Normalize data types for comparison (convert all to strings)
       const existingOrderIds = new Set(existingJourneys.map(id => String(id)));
@@ -98,14 +117,20 @@ exports.handler = async (event, context) => {
       
       // DEBUG: Show some conversions that would be processed
       if (conversionsToProcess.length > 0) {
-        const sampleToProcess = conversionsToProcess.slice(0, 3).map(c => c.order_id);
+        const sampleToProcess = conversionsToProcess.slice(0, 5).map(c => c.order_id);
         console.log(`🔍 DEBUG Sample conversions to process:`, sampleToProcess);
       } else {
-        console.log(`🔍 DEBUG: No conversions to process - checking if all order IDs match...`);
-        const firstFewConversions = allConversions.slice(0, 5).map(c => String(c.order_id));
-        const matchingExisting = firstFewConversions.filter(id => existingOrderIds.has(id));
-        console.log(`🔍 DEBUG First 5 conversion order IDs:`, firstFewConversions);
-        console.log(`🔍 DEBUG Matching existing journey order IDs:`, matchingExisting);
+        console.log(`🔍 DEBUG: No conversions to process`);
+        // Show range of existing order IDs to understand the coverage
+        const existingOrderIdsArray = Array.from(existingOrderIds).map(id => parseInt(id)).sort((a, b) => a - b);
+        const minExisting = existingOrderIdsArray[0];
+        const maxExisting = existingOrderIdsArray[existingOrderIdsArray.length - 1];
+        console.log(`🔍 DEBUG Existing journey order ID range: ${minExisting} to ${maxExisting} (${existingOrderIdsArray.length} total)`);
+        
+        const conversionOrderIds = allConversions.map(c => parseInt(c.order_id)).sort((a, b) => a - b);
+        const minConversion = conversionOrderIds[0];
+        const maxConversion = conversionOrderIds[conversionOrderIds.length - 1];
+        console.log(`🔍 DEBUG Conversion order ID range: ${minConversion} to ${maxConversion} (${conversionOrderIds.length} total)`);
       }
     }
     
@@ -127,11 +152,21 @@ exports.handler = async (event, context) => {
     }
     
     // Step 4: Calculate batch range for this run (RESUME LOGIC)
-    const startIndex = buildProgress.last_batch_completed * batch_size;
-    const endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
-    const thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
+    let startIndex, endIndex, thisBatchConversions;
     
-    console.log(`🎯 This Run: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length} (batch ${buildProgress.last_batch_completed + 1})`);
+    if (force_rebuild || reset_progress) {
+      // For force rebuild or reset, ignore previous progress and start from beginning
+      startIndex = 0;
+      endIndex = Math.min(batch_size, conversionsToProcess.length);
+      thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
+      console.log(`🎯 This Run (${force_rebuild ? 'FORCE REBUILD' : 'RESET'}): Processing conversions 1-${endIndex} of ${conversionsToProcess.length} (batch 1)`);
+    } else {
+      // Normal resume logic
+      startIndex = buildProgress.last_batch_completed * batch_size;
+      endIndex = Math.min(startIndex + batch_size, conversionsToProcess.length);
+      thisBatchConversions = conversionsToProcess.slice(startIndex, endIndex);
+      console.log(`🎯 This Run: Processing conversions ${startIndex + 1}-${endIndex} of ${conversionsToProcess.length} (batch ${buildProgress.last_batch_completed + 1})`);
+    }
     
     if (thisBatchConversions.length === 0) {
       // All conversions processed, update final analytics
@@ -166,14 +201,30 @@ exports.handler = async (event, context) => {
     const storageResults = await storeCustomerJourneys(redis, journeyResults.journeys);
     
     // Step 7: Update progress tracking for next run
-    const updatedProgress = {
-      ...buildProgress,
-      journeys_completed: buildProgress.journeys_completed + journeyResults.journeys.length,
-      last_batch_completed: buildProgress.last_batch_completed + 1,
-      last_updated: new Date().toISOString(),
-      conversions_processed_this_run: thisBatchConversions.length,
-      total_conversions_to_process: conversionsToProcess.length
-    };
+    let updatedProgress;
+    
+    if (force_rebuild || reset_progress) {
+      // For force rebuild or reset, start progress tracking fresh
+      updatedProgress = {
+        journeys_completed: journeyResults.journeys.length,
+        last_batch_completed: 1,
+        started_at: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
+        conversions_processed_this_run: thisBatchConversions.length,
+        total_conversions_to_process: conversionsToProcess.length,
+        mode: force_rebuild ? 'force_rebuild' : 'reset_progress'
+      };
+    } else {
+      // Normal progress update
+      updatedProgress = {
+        ...buildProgress,
+        journeys_completed: buildProgress.journeys_completed + journeyResults.journeys.length,
+        last_batch_completed: buildProgress.last_batch_completed + 1,
+        last_updated: new Date().toISOString(),
+        conversions_processed_this_run: thisBatchConversions.length,
+        total_conversions_to_process: conversionsToProcess.length
+      };
+    }
     
     await storeBuildProgress(redis, progressKey, updatedProgress);
     
@@ -196,7 +247,7 @@ exports.handler = async (event, context) => {
         batch_complete: true,
         build_complete: isComplete,
         batch_summary: {
-          batch_number: buildProgress.last_batch_completed + 1,
+          batch_number: force_rebuild || reset_progress ? 1 : buildProgress.last_batch_completed + 1,
           conversions_processed_this_batch: thisBatchConversions.length,
           journeys_created_this_batch: journeyResults.journeys.length,
           processing_time_ms: totalTime,
@@ -223,7 +274,9 @@ exports.handler = async (event, context) => {
           `Continue building: ${Math.ceil((conversionsToProcess.length - endIndex) / batch_size)} batches remaining`,
           'Run the same command again to process next batch',
           `Next batch will process conversions ${endIndex + 1}-${Math.min(endIndex + batch_size, conversionsToProcess.length)}`,
-          `Progress saved automatically - safe to continue later`
+          `Progress saved automatically - safe to continue later`,
+          `Use "force_rebuild": true to rebuild all journeys`,
+          `Use "reset_progress": true to restart from batch 1`
         ]
       })
     };
