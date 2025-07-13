@@ -21,6 +21,19 @@ exports.handler = async (event, context) => {
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max (5 second buffer)
     
+    // Validate required environment variables
+    if (!process.env.OJOY_API_KEY) {
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({
+          error: 'Configuration error',
+          message: 'OJOY_API_KEY environment variable not set',
+          required_env_vars: ['OJOY_API_KEY', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']
+        })
+      };
+    }
+    
     const redis = initializeRedis();
     const queryEnhancedAttribution = createEnhancedAttributionQuerier();
     
@@ -737,6 +750,13 @@ async function loadAllJourneyRecords(redis) {
 function createEnhancedAttributionQuerier() {
   return async function queryEnhancedAttribution(redis, params) {
     try {
+      // Validate API key is available
+      const apiKey = process.env.OJOY_API_KEY;
+      if (!apiKey) {
+        console.error('❌ OJOY_API_KEY environment variable not set');
+        return { matches_found: [] };
+      }
+      
       // Use the existing query-pageviews-enhanced.js logic
       const queryUrl = `${process.env.NETLIFY_URL || 'https://trackingojoy.netlify.app'}/.netlify/functions/query-pageviews-enhanced`;
       
@@ -744,7 +764,7 @@ function createEnhancedAttributionQuerier() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': process.env.OJOY_API_KEY || 'ojoy_track_2025_secure_key_v1'  // Use environment variable
+          'X-API-Key': apiKey
         },
         body: JSON.stringify(params)
       });
