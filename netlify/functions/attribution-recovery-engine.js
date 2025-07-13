@@ -1,7 +1,7 @@
 // attribution-recovery-engine.js
-// EFFICIENT Attribution Recovery Engine - Uses Existing Processed Data
+// SERVERLESS Attribution Recovery Engine - Uses Proven Conversion Loading Logic
 // Path: netlify/functions/attribution-recovery-engine.js
-// Purpose: Recover missed attributions using existing conversion and pageview indexes
+// Purpose: Recover missed attributions using proven serverless approach from build-customer-journeys.js
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -28,7 +28,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 EFFICIENT ATTRIBUTION RECOVERY: Using existing processed data...');
+    console.log('🚀 SERVERLESS ATTRIBUTION RECOVERY: Using proven conversion loading logic...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -38,15 +38,35 @@ exports.handler = async (event, context) => {
     const body = event.body ? JSON.parse(event.body) : {};
     const {
       extended_window_hours = 72,    // 72-hour extended window vs 7-day standard
-      batch_size = 20,               // Larger batches since we're more efficient
-      date_range_days = 40           // Look back 40 days for conversions
+      batch_size = 20,               // Batch size for processing
+      limit_conversions = 500        // Limit conversions to process (to avoid timeout)
     } = body;
     
-    console.log(`🎯 Efficient Recovery Parameters: ${extended_window_hours}h window, ${date_range_days} days lookback, batch size: ${batch_size}`);
+    console.log(`🎯 Serverless Recovery Parameters: ${extended_window_hours}h window, batch size: ${batch_size}, limit: ${limit_conversions}`);
     
-    // Step 1: Load conversions needing recovery from processed data
-    const conversionsNeedingRecovery = await loadConversionsNeedingRecovery(redis, date_range_days, maxProcessingTime - (Date.now() - startTime));
-    console.log(`📊 Found ${conversionsNeedingRecovery.length} conversions needing attribution recovery`);
+    // Step 1: Load conversions using proven serverless approach (from build-customer-journeys.js)
+    const allConversions = await loadAllConversionsServerless(redis, maxProcessingTime - (Date.now() - startTime));
+    console.log(`💰 Loaded ${allConversions.length} total conversions using proven serverless approach`);
+    
+    if (allConversions.length === 0) {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          recovery_complete: true,
+          message: 'No conversions found in database',
+          summary: {
+            conversions_found: 0,
+            recovery_approach: 'proven_serverless_loading'
+          }
+        })
+      };
+    }
+    
+    // Step 2: Filter for conversions needing attribution recovery
+    const conversionsNeedingRecovery = filterConversionsNeedingRecovery(allConversions, limit_conversions);
+    console.log(`🎯 Found ${conversionsNeedingRecovery.length} conversions needing attribution recovery`);
     
     if (conversionsNeedingRecovery.length === 0) {
       return {
@@ -57,15 +77,16 @@ exports.handler = async (event, context) => {
           recovery_complete: true,
           message: 'No conversions found that need attribution recovery',
           summary: {
+            total_conversions_found: allConversions.length,
             conversions_needing_recovery: 0,
-            recovery_approach: 'efficient_processed_data'
+            recovery_approach: 'proven_serverless_loading'
           }
         })
       };
     }
     
-    // Step 2: Process recovery using existing pageview indexes
-    const recoveryResults = await processEfficientAttributionRecovery(
+    // Step 3: Process recovery using existing pageview indexes
+    const recoveryResults = await processServerlessAttributionRecovery(
       redis, 
       conversionsNeedingRecovery, 
       extended_window_hours,
@@ -74,28 +95,29 @@ exports.handler = async (event, context) => {
     );
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ Efficient recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
+    console.log(`✅ Serverless recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        efficient_recovery: true,
+        serverless_recovery: true,
         recovery_summary: {
+          total_conversions_found: allConversions.length,
           conversions_needing_recovery: conversionsNeedingRecovery.length,
           recovery_attempts: recoveryResults.recovery_attempts,
           successful_recoveries: recoveryResults.successful_recoveries,
           additional_pageviews_found: recoveryResults.additional_pageviews_found,
           processing_time_ms: totalTime,
-          recovery_approach: 'efficient_processed_data'
+          recovery_approach: 'proven_serverless_loading'
         },
         recovery_performance: {
           recovery_success_rate: recoveryResults.recovery_attempts > 0 ? 
             ((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1) + '%' : '0%',
           average_pageviews_per_recovery: recoveryResults.successful_recoveries > 0 ? 
             (recoveryResults.additional_pageviews_found / recoveryResults.successful_recoveries).toFixed(1) : '0',
-          processing_efficiency: 'uses_existing_indexes',
+          processing_efficiency: 'proven_serverless_from_build_customer_journeys',
           conversions_per_second: Math.round(recoveryResults.recovery_attempts / (totalTime / 1000))
         },
         attribution_improvements: {
@@ -105,9 +127,9 @@ exports.handler = async (event, context) => {
         },
         recovery_details: recoveryResults.recovery_details.slice(0, 10), // First 10 examples
         data_sources_used: {
-          conversion_indexes: 'conversion_index_date:*',
-          pageview_indexes: 'pageview_index_ip:*',
-          ip_analytics: 'ip_analytics:*'
+          conversion_source: 'conversions:* keys (direct)',
+          pageview_indexes: 'pageview_index_ip:* keys',
+          loading_method: 'proven_serverless_from_build_customer_journeys'
         },
         next_steps: recoveryResults.successful_recoveries > 0 ? [
           `🎉 Successfully recovered ${recoveryResults.successful_recoveries} attribution matches!`,
@@ -115,7 +137,7 @@ exports.handler = async (event, context) => {
           'Run query-customer-journeys.js to see improved attribution rates',
           'Use attribution-model-calculator.js for multi-touch attribution analysis'
         ] : [
-          'No additional attributions found using existing processed data',
+          'No additional attributions found using serverless approach',
           'Current pageview indexes may not contain matches for these conversions',
           'Consider running extract-pageviews-chunked.js to refresh pageview data',
           'System has processed all available attribution opportunities'
@@ -124,131 +146,163 @@ exports.handler = async (event, context) => {
     };
     
   } catch (error) {
-    console.error('❌ Efficient attribution recovery failed:', error);
+    console.error('❌ Serverless attribution recovery failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Efficient attribution recovery failed', 
+        error: 'Serverless attribution recovery failed', 
         message: error.message 
       })
     };
   }
 };
 
-// EFFICIENT: Load conversions needing recovery from processed data
-async function loadConversionsNeedingRecovery(redis, dateRangeDays, maxTime) {
-  console.log(`📊 Loading conversions from processed indexes (${dateRangeDays} days)...`);
+// PROVEN: Load ALL conversions using serverless approach (from build-customer-journeys.js)
+async function loadAllConversionsServerless(redis, maxTime) {
+  console.log(`🔍 Loading ALL conversions using proven serverless approach (no date limits)...`);
   
   const loadStartTime = Date.now();
-  const conversionsNeedingRecovery = [];
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - dateRangeDays);
+  const conversions = [];
+  let cursor = '0';
+  let iterations = 0;
+  const maxIterations = 20;
   
   try {
-    // Generate date keys for the lookback period
-    const dateKeys = generateDateKeys(cutoffDate, new Date());
-    console.log(`📅 Checking ${dateKeys.length} date indexes for conversions needing recovery`);
-    
-    // Load from each date index
-    for (const dateKey of dateKeys) {
-      if (Date.now() - loadStartTime > maxTime - 3000) {
-        console.log('⏰ Time limit during conversion loading, stopping');
+    do {
+      // Check timeout
+      if (Date.now() - loadStartTime > maxTime - 5000) {
+        console.log('⏰ Time limit during conversion scan, stopping');
         break;
       }
       
-      const indexKey = `conversion_index_date:${dateKey}`;
+      const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
       
-      try {
-        const indexData = await redis(`get/${indexKey}`);
+      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        break;
+      }
+      
+      cursor = scanResult.result[0];
+      const keys = scanResult.result[1] || [];
+      iterations++;
+      
+      // Process conversion keys in batches
+      const batchSize = 50;
+      for (let i = 0; i < keys.length; i += batchSize) {
+        if (Date.now() - loadStartTime > maxTime - 3000) break;
         
-        if (indexData?.result) {
-          const parsed = JSON.parse(decodeURIComponent(indexData.result));
-          
-          if (parsed.conversions && Array.isArray(parsed.conversions)) {
-            console.log(`📊 ${dateKey}: ${parsed.conversions.length} conversions found`);
-            
-            // Filter for conversions needing recovery
-            for (const conversion of parsed.conversions) {
-              // Conversion needs recovery if:
-              // 1. No attribution found, OR
-              // 2. Attribution method is conversion_only/direct
-              const needsRecovery = !conversion.attribution_found || 
-                                  conversion.attribution_method === 'none' ||
-                                  conversion.source === 'direct' ||
-                                  !conversion.landing_page ||
-                                  conversion.landing_page === 'null';
+        const batch = keys.slice(i, i + batchSize);
+        
+        const batchPromises = batch.map(async (key) => {
+          try {
+            const conversionData = await redis(`get/${key}`);
+            if (conversionData?.result) {
+              const conversion = JSON.parse(decodeURIComponent(conversionData.result));
               
-              if (needsRecovery && conversion.timestamp && conversion.email) {
-                conversionsNeedingRecovery.push({
+              // Include ALL conversions that have required fields (same logic as build-customer-journeys.js)
+              if (conversion.timestamp && conversion.email && conversion.order_id) {
+                return {
                   email: conversion.email,
                   timestamp: conversion.timestamp,
                   order_id: conversion.order_id,
                   order_total: conversion.order_total || 0,
                   
-                  // Use existing processed IP data (this is the key improvement!)
-                  processed_ips: {
-                    primary_ip: conversion.primary_ip,
-                    conversion_ip: conversion.conversion_ip,
-                    pageview_ip: conversion.pageview_ip,
-                    all_ips: [conversion.primary_ip, conversion.conversion_ip, conversion.pageview_ip].filter(Boolean)
-                  },
-                  
-                  // Attribution signals
+                  // Attribution signals for embedded attribution logic (from build-customer-journeys.js)
                   session_id: conversion.session_id,
                   device_signature: conversion.device_signature || conversion.dsig,
                   screen_value: conversion.screen_value || conversion.SVV || conversion.SVVV,
                   gpu_signature: conversion.gpu_signature || conversion.gsig,
                   
-                  // Current attribution status
+                  // IP addresses for multi-IP attribution (from build-customer-journeys.js)
+                  primary_ip: conversion.primary_ip,
+                  conversion_ip: conversion.conversion_ip,
+                  pageview_ip: conversion.pageview_ip,
+                  ip_addresses: [conversion.primary_ip, conversion.conversion_ip, conversion.pageview_ip].filter(Boolean),
+                  
+                  // Current attribution (for comparison) (from build-customer-journeys.js)
                   current_attribution_found: conversion.attribution_found,
                   current_attribution_method: conversion.attribution_method,
                   current_source: conversion.source,
                   current_landing_page: conversion.landing_page,
                   
-                  // Metadata
-                  date_key: dateKey,
-                  dual_ip_scenario: conversion.dual_ip_scenario
-                });
+                  // Additional recovery-specific fields
+                  dual_ip_scenario: conversion.dual_ip_scenario,
+                  ip_addresses_detected: conversion.ip_addresses_detected,
+                  
+                  _redis_key: key
+                };
               }
             }
+          } catch (parseError) {
+            console.warn(`⚠️ Failed to parse conversion ${key}`);
           }
-        } else {
-          console.log(`📊 ${dateKey}: No conversion index found`);
-        }
+          return null;
+        });
         
-      } catch (parseError) {
-        console.warn(`⚠️ Error loading conversion index for ${dateKey}:`, parseError.message);
+        const batchResults = await Promise.all(batchPromises);
+        const validResults = batchResults.filter(result => result !== null);
+        conversions.push(...validResults);
       }
-    }
+      
+      if (conversions.length % 500 === 0 && conversions.length > 0) {
+        console.log(`📊 Conversion loading progress: ${conversions.length} conversions loaded`);
+      }
+      
+    } while (cursor !== '0' && iterations < maxIterations);
     
-  } catch (loadError) {
-    console.error('❌ Error loading conversions from indexes:', loadError);
+  } catch (scanError) {
+    console.log(`⚠️ Conversion scan error: ${scanError.message}`);
   }
   
   // Sort by timestamp (most recent first)
-  conversionsNeedingRecovery.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   
-  console.log(`✅ Loaded ${conversionsNeedingRecovery.length} conversions needing recovery from processed data`);
+  console.log(`✅ Loaded ${conversions.length} total conversions from database using proven approach`);
+  return conversions;
+}
+
+// Filter conversions that need attribution recovery
+function filterConversionsNeedingRecovery(allConversions, limit) {
+  console.log(`🔍 Filtering conversions needing recovery from ${allConversions.length} total conversions...`);
+  
+  const conversionsNeedingRecovery = [];
+  
+  for (const conversion of allConversions) {
+    // Conversion needs recovery if:
+    // 1. No attribution found, OR
+    // 2. Attribution method is none/direct, OR  
+    // 3. Source is direct/unknown, OR
+    // 4. No landing page data
+    const needsRecovery = !conversion.current_attribution_found || 
+                         conversion.current_attribution_method === 'none' ||
+                         conversion.current_attribution_method === 'direct' ||
+                         conversion.current_source === 'direct' ||
+                         conversion.current_source === 'unknown' ||
+                         !conversion.current_landing_page ||
+                         conversion.current_landing_page === 'null' ||
+                         conversion.current_landing_page === 'unknown';
+    
+    if (needsRecovery) {
+      // Only include if we have IP addresses to work with
+      if (conversion.ip_addresses && conversion.ip_addresses.length > 0) {
+        conversionsNeedingRecovery.push(conversion);
+        
+        if (conversionsNeedingRecovery.length >= limit) {
+          break; // Respect the limit to avoid timeout
+        }
+      }
+    }
+  }
+  
+  console.log(`✅ Found ${conversionsNeedingRecovery.length} conversions needing recovery (limited to ${limit})`);
+  console.log(`📊 Recovery criteria: no attribution, direct/unknown source, or missing landing page`);
+  console.log(`📊 Recovery requirement: must have IP addresses available for pageview matching`);
+  
   return conversionsNeedingRecovery;
 }
 
-// Generate date keys for the lookback period
-function generateDateKeys(startDate, endDate) {
-  const keys = [];
-  const current = new Date(startDate);
-  
-  while (current <= endDate) {
-    const dateKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`;
-    keys.push(dateKey);
-    current.setDate(current.getDate() + 1);
-  }
-  
-  return keys;
-}
-
-// EFFICIENT: Process attribution recovery using existing pageview indexes
-async function processEfficientAttributionRecovery(redis, conversions, extendedWindowHours, batchSize, maxTime) {
+// Process attribution recovery using existing pageview indexes
+async function processServerlessAttributionRecovery(redis, conversions, extendedWindowHours, batchSize, maxTime) {
   console.log(`🚀 Processing ${conversions.length} conversions using existing pageview indexes...`);
   
   const processStartTime = Date.now();
@@ -270,7 +324,7 @@ async function processEfficientAttributionRecovery(redis, conversions, extendedW
     console.log(`🔄 Processing batch ${Math.floor(i/batchSize) + 1}: ${i + 1}-${i + batch.length} of ${conversions.length}`);
     
     // Process this batch using existing indexes
-    const batchResults = await processBatchUsingIndexes(redis, batch, extendedWindowHours);
+    const batchResults = await processBatchUsingPageviewIndexes(redis, batch, extendedWindowHours);
     
     recoveryAttempts += batch.length;
     successfulRecoveries += batchResults.successful_recoveries;
@@ -280,7 +334,7 @@ async function processEfficientAttributionRecovery(redis, conversions, extendedW
     console.log(`✅ Batch complete: ${batchResults.successful_recoveries}/${batch.length} recovered (${recoveryAttempts}/${conversions.length} total)`);
   }
   
-  console.log(`🏁 Efficient recovery summary: ${successfulRecoveries}/${recoveryAttempts} conversions recovered`);
+  console.log(`🏁 Serverless recovery summary: ${successfulRecoveries}/${recoveryAttempts} conversions recovered`);
   
   return {
     recovery_attempts: recoveryAttempts,
@@ -292,7 +346,7 @@ async function processEfficientAttributionRecovery(redis, conversions, extendedW
 }
 
 // Process batch using existing pageview indexes
-async function processBatchUsingIndexes(redis, batch, extendedWindowHours) {
+async function processBatchUsingPageviewIndexes(redis, batch, extendedWindowHours) {
   let successfulRecoveries = 0;
   let additionalPageviewsFound = 0;
   const recoveryDetails = [];
@@ -301,10 +355,12 @@ async function processBatchUsingIndexes(redis, batch, extendedWindowHours) {
     try {
       const recoveryStartTime = Date.now();
       
-      // Use existing processed IP data and pageview indexes
-      const recoveredPageviews = await queryExistingPageviewIndexes(redis, {
+      console.log(`🔍 Recovery attempt for order ${conversion.order_id}: ${conversion.ip_addresses.length} IPs available`);
+      
+      // Query existing pageview indexes with the IP data from serverless loading
+      const recoveredPageviews = await queryPageviewIndexesForRecovery(redis, {
         conversion_timestamp: conversion.timestamp,
-        processed_ips: conversion.processed_ips.all_ips,
+        ip_addresses: conversion.ip_addresses,
         session_id: conversion.session_id,
         device_signature: conversion.device_signature,
         screen_value: conversion.screen_value,
@@ -313,7 +369,7 @@ async function processBatchUsingIndexes(redis, batch, extendedWindowHours) {
       });
       
       if (recoveredPageviews && recoveredPageviews.length > 0) {
-        // Create/update journey record with recovered attribution
+        // Create recovered journey record
         await createRecoveredJourneyRecord(redis, conversion, recoveredPageviews);
         
         successfulRecoveries++;
@@ -323,14 +379,18 @@ async function processBatchUsingIndexes(redis, batch, extendedWindowHours) {
           order_id: conversion.order_id,
           customer_email: conversion.email,
           pageviews_recovered: recoveredPageviews.length,
-          recovery_method: 'existing_pageview_indexes',
-          ips_used: conversion.processed_ips.all_ips,
+          recovery_method: 'serverless_pageview_index_query',
+          ips_used: conversion.ip_addresses,
+          current_attribution: conversion.current_attribution_method,
+          current_source: conversion.current_source,
           recovery_time_ms: Date.now() - recoveryStartTime,
           attribution_methods: recoveredPageviews.map(pv => pv.attribution_method),
           highest_confidence: Math.max(...recoveredPageviews.map(pv => pv.confidence || 0))
         });
         
-        console.log(`✅ Recovery success: Order ${conversion.order_id} - found ${recoveredPageviews.length} pageviews`);
+        console.log(`✅ Recovery success: Order ${conversion.order_id} - found ${recoveredPageviews.length} pageviews (was: ${conversion.current_source})`);
+      } else {
+        console.log(`❌ No recovery: Order ${conversion.order_id} - no pageviews found in ${extendedWindowHours}h window`);
       }
       
       return { success: recoveredPageviews.length > 0, pageviews: recoveredPageviews.length };
@@ -350,9 +410,9 @@ async function processBatchUsingIndexes(redis, batch, extendedWindowHours) {
   };
 }
 
-// EFFICIENT: Query existing pageview indexes directly
-async function queryExistingPageviewIndexes(redis, params) {
-  const { conversion_timestamp, processed_ips, session_id, device_signature, screen_value, gpu_signature, window_hours } = params;
+// Query pageview indexes for recovery
+async function queryPageviewIndexesForRecovery(redis, params) {
+  const { conversion_timestamp, ip_addresses, session_id, device_signature, screen_value, gpu_signature, window_hours } = params;
   
   const conversionTime = new Date(conversion_timestamp).getTime();
   const windowStart = conversionTime - (window_hours * 60 * 60 * 1000);
@@ -361,10 +421,10 @@ async function queryExistingPageviewIndexes(redis, params) {
   let allMatches = [];
   
   try {
-    console.log(`🔍 Querying pageview indexes: ${processed_ips.length} IPs, ${window_hours}h window`);
+    console.log(`🔍 Querying pageview indexes: ${ip_addresses.length} IPs, ${window_hours}h window`);
     
     // Query existing pageview indexes for each IP
-    for (const ip of processed_ips) {
+    for (const ip of ip_addresses) {
       if (!ip || ip === 'unknown') continue;
       
       const encodedIP = ip.replace(/:/g, '_');
@@ -461,7 +521,7 @@ async function createRecoveredJourneyRecord(redis, conversion, recoveredPageview
     attribution_method: pageview.attribution_method,
     confidence: pageview.confidence,
     matched_ip: pageview.matched_ip,
-    recovery_method: 'efficient_index_query',
+    recovery_method: 'serverless_pageview_index_query',
     
     // Session and device data
     session_id: pageview.session_id,
@@ -500,7 +560,7 @@ async function createRecoveredJourneyRecord(redis, conversion, recoveredPageview
   const uniqueSources = new Set(touchpoints.map(t => t.source).filter(Boolean));
   
   const recoveredJourney = {
-    journey_id: `journey_${conversion.order_id}_recovered_${Date.now()}`,
+    journey_id: `journey_${conversion.order_id}_serverless_recovery_${Date.now()}`,
     customer_email: conversion.email,
     conversion_timestamp: conversion.timestamp,
     conversion_order_id: conversion.order_id,
@@ -526,9 +586,11 @@ async function createRecoveredJourneyRecord(redis, conversion, recoveredPageview
     // Recovery metadata
     recovery_attempted: true,
     recovery_timestamp: new Date().toISOString(),
-    recovery_method: 'efficient_pageview_index_query',
+    recovery_method: 'serverless_pageview_index_query',
     recovered_pageviews: sortedPageviews.length,
-    reconstruction_method: 'efficient_attribution_recovery',
+    reconstruction_method: 'serverless_attribution_recovery',
+    original_attribution_method: conversion.current_attribution_method,
+    original_source: conversion.current_source,
     
     created_at: new Date().toISOString()
   };
@@ -537,7 +599,7 @@ async function createRecoveredJourneyRecord(redis, conversion, recoveredPageview
   const journeyKey = `customer_journey:${recoveredJourney.journey_id}`;
   await redis(`setex/${journeyKey}/2592000/${encodeURIComponent(JSON.stringify(recoveredJourney))}`); // 30-day TTL
   
-  console.log(`💾 Created recovered journey: ${recoveredJourney.journey_id} with ${sortedPageviews.length} pageviews`);
+  console.log(`💾 Created serverless recovered journey: ${recoveredJourney.journey_id} with ${sortedPageviews.length} pageviews`);
 }
 
 // Helper functions
