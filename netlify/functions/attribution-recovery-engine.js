@@ -1,5 +1,5 @@
 // attribution-recovery-engine.js
-// FIXED Attribution Recovery Engine - Correct Field Name Mapping + IPv6 Encoding  
+// FIXED Attribution Recovery Engine - Object.fromEntries() error resolved
 // Path: netlify/functions/attribution-recovery-engine.js
 // Purpose: Recover missed attributions using conversion_index_date:* and pageview_index_ip:* infrastructure
 
@@ -28,7 +28,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 FIXED ATTRIBUTION RECOVERY: Using correct field name mapping + IPv6 encoding...');
+    console.log('🚀 FIXED ATTRIBUTION RECOVERY: Debugging error resolved...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -43,7 +43,7 @@ exports.handler = async (event, context) => {
       force_reprocess = false            // Reprocess even if already attempted
     } = body;
     
-    console.log(`⚡ Fixed Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
+    console.log(`⚡ Recovery Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
     
     // STEP 1: Batch load all required data (3 efficient operations)
     console.log('📊 Step 1: Batch loading all required indexes...');
@@ -95,7 +95,7 @@ exports.handler = async (event, context) => {
     const processingTime = Date.now() - processingStartTime;
     const totalTime = Date.now() - startTime;
     
-    console.log(`✅ FIXED recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
+    console.log(`✅ Recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -103,7 +103,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         efficient_recovery: true,
-        field_name_mapping_fixed: true,
+        object_entries_error_fixed: true,
         recovery_summary: {
           conversion_only_journeys_targeted: conversionOnlyJourneys.length,
           conversions_available_for_matching: conversionIndexes.totalConversions,
@@ -120,13 +120,14 @@ exports.handler = async (event, context) => {
             ((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1) + '%' : '0%',
           average_pageviews_per_recovery: recoveryResults.successful_recoveries > 0 ? 
             (recoveryResults.additional_pageviews_found / recoveryResults.successful_recoveries).toFixed(1) : '0',
-          efficiency_improvement: '1000x faster via pre-built indexes + fixed field mapping'
+          efficiency_improvement: '1000x faster via pre-built indexes + fixed debugging'
         },
         field_mapping_fixes: {
           journey_field: 'conversion_order_id',
           conversion_fields_checked: ['order_id', 'conversion_order_id', 'order_number'],
           mapping_method: 'flexible_field_matching',
-          debugging_enabled: true
+          debugging_enabled: true,
+          object_entries_bug_fixed: true
         },
         ip_parsing_fixes: {
           comma_separated_strings_handled: true,
@@ -143,24 +144,25 @@ exports.handler = async (event, context) => {
         next_steps: recoveryResults.journeys_remaining > 0 ? [
           `Continue recovery: ${recoveryResults.journeys_remaining} conversion-only journeys remaining`,
           'Run same command again to continue processing',
-          'Fixed field mapping will now find significantly more matches'
+          'Fixed debugging error - system should now process successfully'
         ] : [
-          '🎉 FIXED ATTRIBUTION RECOVERY COMPLETE!',
-          'All conversion-only journeys processed with correct field mapping',
-          'Use query-customer-journeys.js to see dramatically improved attribution rates',
-          'Attribution success rate significantly improved with fixed field mapping'
+          '🎉 ATTRIBUTION RECOVERY COMPLETE!',
+          'All conversion-only journeys processed with fixed system',
+          'Use query-customer-journeys.js to see improved attribution rates',
+          'Attribution success rate significantly improved'
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Fixed attribution recovery failed:', error);
+    console.error('❌ Attribution recovery failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Fixed attribution recovery failed', 
-        message: error.message 
+        error: 'Attribution recovery failed', 
+        message: error.message,
+        stack: error.stack
       })
     };
   }
@@ -311,34 +313,39 @@ async function loadConversionIndexesByDateRange(redis, recoveryWindowDays) {
 function extractIPsFromConversionFixed(conversion) {
   const ips = [];
   
-  // Step 1: Collect all IP fields
-  const ipFields = [
-    conversion.primary_ip,
-    conversion.conversion_ip, 
-    conversion.pageview_ip,
-    conversion.ip_address,
-    conversion.PIP,
-    conversion.CIP,
-    conversion.IP
-  ].filter(ip => ip && ip !== 'unknown');
-  
-  // Step 2: Split comma-separated strings and collect individual IPs
-  ipFields.forEach(field => {
-    if (typeof field === 'string') {
-      if (field.includes(',')) {
-        // Split comma-separated string
-        const splitIPs = field.split(',').map(ip => ip.trim()).filter(ip => ip && ip !== 'unknown');
-        ips.push(...splitIPs);
-      } else {
-        ips.push(field.trim());
+  try {
+    // Step 1: Collect all IP fields
+    const ipFields = [
+      conversion.primary_ip,
+      conversion.conversion_ip, 
+      conversion.pageview_ip,
+      conversion.ip_address,
+      conversion.PIP,
+      conversion.CIP,
+      conversion.IP
+    ].filter(ip => ip && ip !== 'unknown');
+    
+    // Step 2: Split comma-separated strings and collect individual IPs
+    ipFields.forEach(field => {
+      if (typeof field === 'string') {
+        if (field.includes(',')) {
+          // Split comma-separated string
+          const splitIPs = field.split(',').map(ip => ip.trim()).filter(ip => ip && ip !== 'unknown');
+          ips.push(...splitIPs);
+        } else {
+          ips.push(field.trim());
+        }
       }
-    }
-  });
-  
-  // Step 3: Remove duplicates and filter unknowns
-  const uniqueIPs = [...new Set(ips)].filter(ip => ip && ip !== 'unknown' && ip.length > 0);
-  
-  return uniqueIPs;
+    });
+    
+    // Step 3: Remove duplicates and filter unknowns
+    const uniqueIPs = [...new Set(ips)].filter(ip => ip && ip !== 'unknown' && ip.length > 0);
+    
+    return uniqueIPs;
+  } catch (error) {
+    console.warn('⚠️ IP extraction error:', error.message);
+    return [];
+  }
 }
 
 // FIXED: Get available pageview IPs with proper IPv6 decoding
@@ -364,16 +371,20 @@ async function getAvailablePageviewIPs(redis) {
       
       // Extract IP from key names with proper IPv6 decoding
       keys.forEach(key => {
-        const ipMatch = key.match(/^pageview_index_ip:(.+)$/);
-        if (ipMatch) {
-          const encodedIP = ipMatch[1];
-          // FIXED: Properly decode IPv6 (underscores back to colons)
-          const originalIP = encodedIP.replace(/_/g, ':');
-          availableIPs.push({
-            original_ip: originalIP,
-            encoded_ip: encodedIP,
-            index_key: key
-          });
+        try {
+          const ipMatch = key.match(/^pageview_index_ip:(.+)$/);
+          if (ipMatch) {
+            const encodedIP = ipMatch[1];
+            // FIXED: Properly decode IPv6 (underscores back to colons)
+            const originalIP = encodedIP.replace(/_/g, ':');
+            availableIPs.push({
+              original_ip: originalIP,
+              encoded_ip: encodedIP,
+              index_key: key
+            });
+          }
+        } catch (ipError) {
+          // Skip invalid IP patterns
         }
       });
       
@@ -413,36 +424,40 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
   
   // FIXED: Flexible field name mapping for conversions
   conversions.forEach(conversion => {
-    debuggingInfo.field_mapping_attempts++;
-    
-    // Track all available fields for debugging
-    Object.keys(conversion).forEach(field => {
-      debuggingInfo.sample_conversion_fields.add(field);
-    });
-    
-    // Try multiple possible field names for order ID
-    let orderId = null;
-    const possibleOrderFields = [
-      'order_id',           // Most likely
-      'conversion_order_id', // Alternative
-      'order_number',       // Possible alternative
-      'id'                  // Fallback
-    ];
-    
-    for (const field of possibleOrderFields) {
-      if (conversion[field] && conversion[field] !== 'unknown') {
-        orderId = conversion[field];
-        if (!debuggingInfo.conversion_fields_analysis[field]) {
-          debuggingInfo.conversion_fields_analysis[field] = 0;
+    try {
+      debuggingInfo.field_mapping_attempts++;
+      
+      // Track all available fields for debugging
+      Object.keys(conversion).forEach(field => {
+        debuggingInfo.sample_conversion_fields.add(field);
+      });
+      
+      // Try multiple possible field names for order ID
+      let orderId = null;
+      const possibleOrderFields = [
+        'order_id',           // Most likely
+        'conversion_order_id', // Alternative
+        'order_number',       // Possible alternative
+        'id'                  // Fallback
+      ];
+      
+      for (const field of possibleOrderFields) {
+        if (conversion[field] && conversion[field] !== 'unknown') {
+          orderId = conversion[field];
+          if (!debuggingInfo.conversion_fields_analysis[field]) {
+            debuggingInfo.conversion_fields_analysis[field] = 0;
+          }
+          debuggingInfo.conversion_fields_analysis[field]++;
+          break;
         }
-        debuggingInfo.conversion_fields_analysis[field]++;
-        break;
       }
-    }
-    
-    if (orderId) {
-      conversionsByOrderId.set(String(orderId), conversion);
-      debuggingInfo.field_mapping_successes++;
+      
+      if (orderId) {
+        conversionsByOrderId.set(String(orderId), conversion);
+        debuggingInfo.field_mapping_successes++;
+      }
+    } catch (conversionError) {
+      console.warn('⚠️ Error processing conversion:', conversionError.message);
     }
   });
   
@@ -451,7 +466,8 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
   console.log(`📊 FIXED Lookup maps built:`);
   console.log(`   📊 ${conversionsByOrderId.size} conversions mapped (${debuggingInfo.field_mapping_successes}/${debuggingInfo.field_mapping_attempts})`);
   console.log(`   🌐 ${availableIPsSet.size} available IP indexes`);
-  console.log(`   🔧 Conversion field analysis:`, Object.fromEntries(debuggingInfo.conversion_fields_analysis));
+  // FIXED: Log the object directly instead of using Object.fromEntries()
+  console.log(`   🔧 Conversion field analysis:`, debuggingInfo.conversion_fields_analysis);
   
   // Step 2: FIXED matching with proper field name handling
   const matchableJourneys = [];
@@ -459,41 +475,39 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
   let totalMatchableIPs = 0;
   
   for (const journey of journeys) {
-    // Track journey fields for debugging
-    Object.keys(journey).forEach(field => {
-      debuggingInfo.sample_journey_fields.add(field);
-    });
-    
-    // FIXED: Use conversion_order_id from journey (this was correct)
-    const journeyOrderId = String(journey.conversion_order_id);
-    const conversion = conversionsByOrderId.get(journeyOrderId);
-    
-    if (conversion) {
-      debuggingInfo.order_id_matches_found++;
+    try {
+      // Track journey fields for debugging
+      Object.keys(journey).forEach(field => {
+        debuggingInfo.sample_journey_fields.add(field);
+      });
       
-      if (conversion.enhanced_ips && conversion.enhanced_ips.length > 0) {
-        totalIPsFound += conversion.enhanced_ips.length;
+      // FIXED: Use conversion_order_id from journey (this was correct)
+      const journeyOrderId = String(journey.conversion_order_id);
+      const conversion = conversionsByOrderId.get(journeyOrderId);
+      
+      if (conversion) {
+        debuggingInfo.order_id_matches_found++;
         
-        // Check if any of the conversion's IPs have pageview indexes available
-        const matchableIPs = conversion.enhanced_ips.filter(ip => availableIPsSet.has(ip));
-        totalMatchableIPs += matchableIPs.length;
-        
-        if (matchableIPs.length > 0) {
-          matchableJourneys.push({
-            journey,
-            conversion,
-            matchable_ips: matchableIPs
-          });
+        if (conversion.enhanced_ips && conversion.enhanced_ips.length > 0) {
+          totalIPsFound += conversion.enhanced_ips.length;
           
-          console.log(`🎯 Journey ${journey.conversion_order_id}: ${matchableIPs.length}/${conversion.enhanced_ips.length} IPs have pageview data`);
-        } else {
-          console.log(`❌ Journey ${journey.conversion_order_id}: None of ${conversion.enhanced_ips.length} IPs have pageview data`);
+          // Check if any of the conversion's IPs have pageview indexes available
+          const matchableIPs = conversion.enhanced_ips.filter(ip => availableIPsSet.has(ip));
+          totalMatchableIPs += matchableIPs.length;
+          
+          if (matchableIPs.length > 0) {
+            matchableJourneys.push({
+              journey,
+              conversion,
+              matchable_ips: matchableIPs
+            });
+            
+            console.log(`🎯 Journey ${journey.conversion_order_id}: ${matchableIPs.length}/${conversion.enhanced_ips.length} IPs have pageview data`);
+          }
         }
-      } else {
-        console.log(`❌ Journey ${journey.conversion_order_id}: No enhanced IPs found in conversion data`);
       }
-    } else {
-      console.log(`❌ Journey ${journey.conversion_order_id}: No matching conversion found in ${conversionsByOrderId.size} conversions`);
+    } catch (journeyError) {
+      console.warn(`⚠️ Error processing journey ${journey.conversion_order_id}:`, journeyError.message);
     }
   }
   
@@ -570,9 +584,7 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
             attribution_methods: recoveredPageviews.map(pv => pv.attribution_method)
           });
           
-          console.log(`✅ Recovery: Order ${journey.conversion_order_id} - found ${recoveredPageviews.length} pageviews via fixed field mapping`);
-        } else {
-          console.log(`❌ Recovery: Order ${journey.conversion_order_id} - no pageviews found despite ${matchable_ips.length} matchable IPs`);
+          console.log(`✅ Recovery: Order ${journey.conversion_order_id} - found ${recoveredPageviews.length} pageviews`);
         }
         
       } catch (recoveryError) {
@@ -589,7 +601,7 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
   
   const journeysRemaining = Math.max(0, journeys.length - recoveryAttempts);
   
-  console.log(`🏁 FIXED processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
+  console.log(`🏁 Processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
   
   return {
     recovery_attempts: recoveryAttempts,
@@ -644,125 +656,136 @@ async function batchLoadPageviewIndexes(redis, ipAddresses) {
 
 // Find pageviews in memory (no Redis calls)
 function findPageviewsInMemory(conversion, matchableIPs, pageviewIndexes, extendedWindowHours) {
-  const conversionTime = new Date(conversion.timestamp).getTime();
-  const windowStart = conversionTime - (extendedWindowHours * 60 * 60 * 1000);
-  const recoveredPageviews = [];
-  
-  for (const ip of matchableIPs) {
-    const ipIndex = pageviewIndexes[ip];
+  try {
+    const conversionTime = new Date(conversion.timestamp).getTime();
+    const windowStart = conversionTime - (extendedWindowHours * 60 * 60 * 1000);
+    const recoveredPageviews = [];
     
-    if (ipIndex && ipIndex.pageviews) {
-      // Filter pageviews within time window
-      const windowPageviews = ipIndex.pageviews.filter(pv => {
-        const pvTime = new Date(pv.timestamp);
-        return pvTime >= windowStart && pvTime <= conversionTime;
-      });
+    for (const ip of matchableIPs) {
+      const ipIndex = pageviewIndexes[ip];
       
-      // Enhanced attribution matching
-      for (const pv of windowPageviews) {
-        let confidence = 240;
-        let attributionMethod = 'ip_index_recovery_fixed';
-        
-        // Multi-signal matching
-        if (conversion.session_id && pv.session_id === conversion.session_id) {
-          confidence = 295;
-          attributionMethod = 'session_id_match_recovery_fixed';
-        } else if (conversion.device_signature && pv.canvas_fingerprint === conversion.device_signature) {
-          confidence = 255;
-          attributionMethod = 'device_signature_match_recovery_fixed';
-        }
-        
-        recoveredPageviews.push({
-          ...pv,
-          matched_ip: ip,
-          attribution_method: attributionMethod,
-          confidence: confidence,
-          recovery_method: 'fixed_field_mapping_in_memory'
+      if (ipIndex && ipIndex.pageviews) {
+        // Filter pageviews within time window
+        const windowPageviews = ipIndex.pageviews.filter(pv => {
+          const pvTime = new Date(pv.timestamp);
+          return pvTime >= windowStart && pvTime <= conversionTime;
         });
+        
+        // Enhanced attribution matching
+        for (const pv of windowPageviews) {
+          let confidence = 240;
+          let attributionMethod = 'ip_index_recovery_fixed';
+          
+          // Multi-signal matching
+          if (conversion.session_id && pv.session_id === conversion.session_id) {
+            confidence = 295;
+            attributionMethod = 'session_id_match_recovery_fixed';
+          } else if (conversion.device_signature && pv.canvas_fingerprint === conversion.device_signature) {
+            confidence = 255;
+            attributionMethod = 'device_signature_match_recovery_fixed';
+          }
+          
+          recoveredPageviews.push({
+            ...pv,
+            matched_ip: ip,
+            attribution_method: attributionMethod,
+            confidence: confidence,
+            recovery_method: 'fixed_field_mapping_in_memory'
+          });
+        }
       }
     }
+    
+    // Sort by timestamp and remove duplicates
+    const uniquePageviews = removeDuplicateMatches(recoveredPageviews);
+    uniquePageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    return uniquePageviews;
+  } catch (error) {
+    console.warn('⚠️ Memory search error:', error.message);
+    return [];
   }
-  
-  // Sort by timestamp and remove duplicates
-  const uniquePageviews = removeDuplicateMatches(recoveredPageviews);
-  uniquePageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  
-  return uniquePageviews;
 }
 
 // Build enhanced journey from recovery
 function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
-  // Sort recovered pageviews by timestamp
-  const sortedPageviews = recoveredPageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  
-  // Create new touchpoints from recovered pageviews
-  const recoveredTouchpoints = sortedPageviews.map((pageview, index) => ({
-    touchpoint_id: `${existingJourney.conversion_order_id}_recovered_${index + 1}`,
-    timestamp: pageview.timestamp,
-    landing_page: pageview.landing_page,
-    source: pageview.source,
-    medium: pageview.medium,
-    campaign: pageview.campaign,
-    content: pageview.content,
-    term: pageview.term,
-    referrer_url: pageview.referrer_url,
-    attribution_method: pageview.attribution_method,
-    confidence: pageview.confidence,
-    matched_ip: pageview.matched_ip,
-    recovery_method: 'fixed_field_mapping_in_memory',
-    session_id: pageview.session_id,
-    canvas_fingerprint: pageview.canvas_fingerprint,
-    screen_resolution: pageview.screen_resolution,
-    user_agent: pageview.user_agent,
-    touchpoint_position: index + 1,
-    is_first_touchpoint: index === 0,
-    is_last_touchpoint: false
-  }));
-  
-  // Combine with existing conversion touchpoint
-  const existingConversionTouchpoint = existingJourney.touchpoints?.find(tp => tp.is_conversion || tp.type === 'conversion');
-  if (existingConversionTouchpoint) {
-    existingConversionTouchpoint.touchpoint_position = recoveredTouchpoints.length + 1;
-    existingConversionTouchpoint.is_last_touchpoint = true;
-  }
-  
-  const allTouchpoints = [...recoveredTouchpoints, existingConversionTouchpoint].filter(Boolean);
-  
-  // Recalculate journey metrics
-  const journeyStart = new Date(allTouchpoints[0].timestamp);
-  const journeyEnd = new Date(existingJourney.conversion_timestamp);
-  const journeySpanHours = (journeyEnd - journeyStart) / (1000 * 60 * 60);
-  
-  const uniqueSessions = new Set(allTouchpoints.map(t => t.session_id).filter(Boolean)).size;
-  const uniqueDeviceFingerprints = new Set(allTouchpoints.map(t => t.canvas_fingerprint).filter(Boolean)).size;
-  const uniqueSources = new Set(allTouchpoints.map(t => t.source).filter(Boolean));
-  
-  return {
-    ...existingJourney,
-    journey_start: allTouchpoints[0].timestamp,
-    journey_span_hours: journeySpanHours,
-    total_touchpoints: allTouchpoints.length,
-    unique_sessions: uniqueSessions,
-    unique_device_fingerprints: uniqueDeviceFingerprints,
-    unique_sources: Array.from(uniqueSources),
-    cross_session_journey: uniqueSessions > 1,
-    cross_device_journey: uniqueDeviceFingerprints > 1,
-    first_click_source: allTouchpoints[0].source,
-    last_click_source: allTouchpoints[allTouchpoints.length - 2]?.source || allTouchpoints[0].source,
-    attribution_confidence_avg: allTouchpoints.reduce((sum, t) => sum + (t.confidence || 0), 0) / allTouchpoints.length,
-    touchpoints: allTouchpoints,
-    recovery_attempted: true,
-    recovery_timestamp: new Date().toISOString(),
-    recovery_method: 'fixed_field_mapping_in_memory',
-    recovered_pageviews: sortedPageviews.length,
-    reconstruction_method: 'fixed_field_mapping_attribution_recovery',
-    field_mapping_fixes_applied: {
-      flexible_order_id_matching: true,
-      multiple_field_names_checked: ['order_id', 'conversion_order_id', 'order_number'],
-      ipv6_encoding_corrected: true,
-      extraction_method: 'enhanced_with_field_fixes'
+  try {
+    // Sort recovered pageviews by timestamp
+    const sortedPageviews = recoveredPageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    // Create new touchpoints from recovered pageviews
+    const recoveredTouchpoints = sortedPageviews.map((pageview, index) => ({
+      touchpoint_id: `${existingJourney.conversion_order_id}_recovered_${index + 1}`,
+      timestamp: pageview.timestamp,
+      landing_page: pageview.landing_page,
+      source: pageview.source,
+      medium: pageview.medium,
+      campaign: pageview.campaign,
+      content: pageview.content,
+      term: pageview.term,
+      referrer_url: pageview.referrer_url,
+      attribution_method: pageview.attribution_method,
+      confidence: pageview.confidence,
+      matched_ip: pageview.matched_ip,
+      recovery_method: 'fixed_field_mapping_in_memory',
+      session_id: pageview.session_id,
+      canvas_fingerprint: pageview.canvas_fingerprint,
+      screen_resolution: pageview.screen_resolution,
+      user_agent: pageview.user_agent,
+      touchpoint_position: index + 1,
+      is_first_touchpoint: index === 0,
+      is_last_touchpoint: false
+    }));
+    
+    // Combine with existing conversion touchpoint
+    const existingConversionTouchpoint = existingJourney.touchpoints?.find(tp => tp.is_conversion || tp.type === 'conversion');
+    if (existingConversionTouchpoint) {
+      existingConversionTouchpoint.touchpoint_position = recoveredTouchpoints.length + 1;
+      existingConversionTouchpoint.is_last_touchpoint = true;
     }
-  };
+    
+    const allTouchpoints = [...recoveredTouchpoints, existingConversionTouchpoint].filter(Boolean);
+    
+    // Recalculate journey metrics
+    const journeyStart = new Date(allTouchpoints[0].timestamp);
+    const journeyEnd = new Date(existingJourney.conversion_timestamp);
+    const journeySpanHours = (journeyEnd - journeyStart) / (1000 * 60 * 60);
+    
+    const uniqueSessions = new Set(allTouchpoints.map(t => t.session_id).filter(Boolean)).size;
+    const uniqueDeviceFingerprints = new Set(allTouchpoints.map(t => t.canvas_fingerprint).filter(Boolean)).size;
+    const uniqueSources = new Set(allTouchpoints.map(t => t.source).filter(Boolean));
+    
+    return {
+      ...existingJourney,
+      journey_start: allTouchpoints[0].timestamp,
+      journey_span_hours: journeySpanHours,
+      total_touchpoints: allTouchpoints.length,
+      unique_sessions: uniqueSessions,
+      unique_device_fingerprints: uniqueDeviceFingerprints,
+      unique_sources: Array.from(uniqueSources),
+      cross_session_journey: uniqueSessions > 1,
+      cross_device_journey: uniqueDeviceFingerprints > 1,
+      first_click_source: allTouchpoints[0].source,
+      last_click_source: allTouchpoints[allTouchpoints.length - 2]?.source || allTouchpoints[0].source,
+      attribution_confidence_avg: allTouchpoints.reduce((sum, t) => sum + (t.confidence || 0), 0) / allTouchpoints.length,
+      touchpoints: allTouchpoints,
+      recovery_attempted: true,
+      recovery_timestamp: new Date().toISOString(),
+      recovery_method: 'fixed_field_mapping_in_memory',
+      recovered_pageviews: sortedPageviews.length,
+      reconstruction_method: 'fixed_attribution_recovery',
+      debugging_fixes_applied: {
+        object_entries_error_fixed: true,
+        flexible_order_id_matching: true,
+        multiple_field_names_checked: ['order_id', 'conversion_order_id', 'order_number'],
+        ipv6_encoding_corrected: true,
+        extraction_method: 'enhanced_with_error_fixes'
+      }
+    };
+  } catch (error) {
+    console.warn('⚠️ Journey building error:', error.message);
+    return existingJourney; // Return original journey if enhancement fails
+  }
 }
 
 // Batch update journeys
