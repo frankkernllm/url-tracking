@@ -80,9 +80,11 @@ async function getSampleConversion(redis) {
       total_conversions: parsed.conversion_count,
       sample_conversion: sample ? {
         order_id: sample?.order_id,
+        main_ip_address: sample?.main_ip_address,
+        winning_ip_value: sample?.winning_ip_value,
+        attempted_ip_addresses: sample?.attempted_ip_addresses,
         primary_ip: sample?.primary_ip,
         conversion_ip: sample?.conversion_ip,
-        ip_address: sample?.ip_address,
         all_ip_fields: Object.keys(sample || {}).filter(k => k.includes('ip'))
       } : null
     };
@@ -115,20 +117,35 @@ function testMatching(conversionSample, pageviewSamples) {
     return { error: 'No conversion sample found' };
   }
 
+  const sample = conversionSample.sample_conversion;
   const conversionIPs = [
-    conversionSample.primary_ip,
-    conversionSample.conversion_ip,
-    conversionSample.ip_address
+    sample?.main_ip_address,
+    sample?.winning_ip_value,
+    sample?.primary_ip,
+    sample?.conversion_ip
   ].filter(Boolean);
+  
+  // Also handle attempted_ip_addresses if it's an array
+  if (sample?.attempted_ip_addresses) {
+    if (Array.isArray(sample.attempted_ip_addresses)) {
+      conversionIPs.push(...sample.attempted_ip_addresses);
+    } else if (typeof sample.attempted_ip_addresses === 'string') {
+      conversionIPs.push(sample.attempted_ip_addresses);
+    }
+  }
 
   const pageviewIPs = pageviewSamples.map(p => p.decoded_ip);
-  
   const matches = conversionIPs.filter(ip => pageviewIPs.includes(ip));
   
   return {
     conversion_ips: conversionIPs,
     pageview_ips: pageviewIPs,
     matches_found: matches.length,
-    matching_ips: matches
+    matching_ips: matches,
+    ip_field_analysis: {
+      main_ip_address: sample?.main_ip_address,
+      winning_ip_value: sample?.winning_ip_value,
+      attempted_ip_addresses: sample?.attempted_ip_addresses
+    }
   };
 }
