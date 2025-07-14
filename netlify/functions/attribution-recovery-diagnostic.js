@@ -57,24 +57,43 @@ exports.handler = async (event, context) => {
 };
 
 async function getSampleConversion(redis) {
-  // Get a recent conversion index
-  const today = new Date().toISOString().split('T')[0];
-  const indexKey = `conversion_index_date:${today}`;
+  // First, scan for ANY conversion_index_date keys
+  const scanResult = await redis('scan/0/match/conversion_index_date:*/count/10');
+  const conversionKeys = scanResult?.result?.[1] || [];
   
-  const indexData = await redis(`get/${indexKey}`);
+  if (conversionKeys.length === 0) {
+    return { found: false, error: 'No conversion_index_date keys exist', available_keys: [] };
+  }
+  
+  // Try the first available key
+  const firstKey = conversionKeys[0];
+  const indexData = await redis(`get/${firstKey}`);
+  
   if (indexData?.result) {
     const parsed = JSON.parse(decodeURIComponent(indexData.result));
     const sample = parsed.conversions?.[0];
+    
     return {
       found: true,
-      order_id: sample?.order_id,
-      primary_ip: sample?.primary_ip,
-      conversion_ip: sample?.conversion_ip,
-      ip_address: sample?.ip_address,
-      all_ip_fields: Object.keys(sample || {}).filter(k => k.includes('ip'))
+      source_key: firstKey,
+      available_keys: conversionKeys,
+      total_conversions: parsed.conversion_count,
+      sample_conversion: sample ? {
+        order_id: sample?.order_id,
+        primary_ip: sample?.primary_ip,
+        conversion_ip: sample?.conversion_ip,
+        ip_address: sample?.ip_address,
+        all_ip_fields: Object.keys(sample || {}).filter(k => k.includes('ip'))
+      } : null
     };
   }
-  return { found: false };
+  
+  return { 
+    found: false, 
+    error: 'Key exists but no data', 
+    available_keys: conversionKeys,
+    source_key: firstKey 
+  };
 }
 
 async function getSamplePageviewKeys(redis) {
