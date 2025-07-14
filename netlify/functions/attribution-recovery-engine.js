@@ -520,6 +520,35 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
   console.log(`   ✅ ${totalMatchableIPs} IPs have corresponding pageview indexes`);
   console.log(`   📈 IP match rate: ${totalIPsFound > 0 ? ((totalMatchableIPs / totalIPsFound) * 100).toFixed(1) : 0}%`);
   
+  // 🔍 ENHANCED DEBUGGING: Show sample IPs for comparison
+  const sampleConversionIPs = [];
+  const samplePageviewIPs = [];
+  
+  // Get sample IPs from conversions
+  for (const journey of journeys.slice(0, 5)) {
+    const conversion = conversionsByOrderId.get(String(journey.conversion_order_id));
+    if (conversion && conversion.enhanced_ips) {
+      sampleConversionIPs.push(...conversion.enhanced_ips.slice(0, 2));
+    }
+  }
+  
+  // Get sample IPs from pageview indexes
+  samplePageviewIPs.push(...Array.from(availableIPsSet).slice(0, 10));
+  
+  console.log(`🔍 DEBUGGING IP Format Comparison:`);
+  console.log(`   📊 Sample conversion IPs: ${sampleConversionIPs.slice(0, 5).join(', ')}`);
+  console.log(`   📦 Sample pageview IPs: ${samplePageviewIPs.slice(0, 5).join(', ')}`);
+  console.log(`   🔍 IP format analysis needed - check if formats match`);
+  
+  // Add detailed IP analysis to debugging info
+  debuggingInfo.ip_analysis = {
+    sample_conversion_ips: sampleConversionIPs.slice(0, 5),
+    sample_pageview_ips: samplePageviewIPs.slice(0, 5),
+    total_conversion_ips: totalIPsFound,
+    total_pageview_ips: availableIPsSet.size,
+    ip_format_mismatch_suspected: totalIPsFound > 0 && totalMatchableIPs === 0
+  };
+  
   if (matchableJourneys.length === 0) {
     console.log('❌ No matchable journeys found even with fixed field mapping');
     return {
@@ -528,7 +557,10 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
       additional_pageviews_found: 0,
       journeys_remaining: journeys.length,
       recovery_details: [],
-      debugging_info: debuggingInfo,
+      debugging_info: {
+        ...debuggingInfo,
+        no_matchable_journeys_reason: 'IP format mismatch suspected - check debugging info for IP format comparison'
+      },
       processing_time_ms: Date.now() - processingStartTime
     };
   }
