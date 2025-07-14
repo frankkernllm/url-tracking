@@ -1,6 +1,6 @@
-// attribution-recovery-engine-efficient-fixed.js
-// EFFICIENT Attribution Recovery Engine - FIXED IP Parsing & IPv6 Encoding
-// Path: netlify/functions/attribution-recovery-engine-efficient.js
+// attribution-recovery-engine.js
+// EFFICIENT Attribution Recovery Engine - FIXED IP Parsing & IPv6 Encoding  
+// Path: netlify/functions/attribution-recovery-engine.js
 // Purpose: Recover missed attributions using conversion_index_date:* and pageview_index_ip:* infrastructure
 
 const headers = {
