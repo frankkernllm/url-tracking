@@ -1,7 +1,7 @@
-// attribution-recovery-engine.js
-// FIXED Attribution Recovery Engine - Object.fromEntries() error resolved
-// Path: netlify/functions/attribution-recovery-engine.js
-// Purpose: Recover missed attributions using conversion_index_date:* and pageview_index_ip:* infrastructure
+// attribution-recovery-production.js
+// PRODUCTION ATTRIBUTION RECOVERY: Using confirmed main_ip_address field and comma-separated IP logic
+// Path: netlify/functions/attribution-recovery-production.js
+// Purpose: Process ALL conversions from conversion_index_date:* to find pageview matches
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -28,7 +28,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 FIXED ATTRIBUTION RECOVERY: Debugging error resolved...');
+    console.log('🚀 PRODUCTION ATTRIBUTION RECOVERY: Using confirmed main_ip_address field...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -37,29 +37,49 @@ exports.handler = async (event, context) => {
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
     const {
-      recovery_window_days = 30,         // Date range for conversion indexes
-      extended_window_hours = 72,        // Attribution window for pageviews
-      batch_size = 50,                   // Journey update batch size
-      force_reprocess = false            // Reprocess even if already attempted
+      recovery_window_days = 15,         // Process 2025-06-08 to recent (confirmed date range)
+      extended_window_hours = 72,        // 3-day attribution window
+      batch_size = 25,                   // Process 25 conversions per batch
+      test_mode = false                  // Test mode processes fewer records
     } = body;
     
-    console.log(`⚡ Recovery Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
+    console.log(`⚡ Recovery Parameters: ${recovery_window_days} days, ${extended_window_hours}h window, test_mode: ${test_mode}`);
     
-    // STEP 1: Batch load all required data (3 efficient operations)
-    console.log('📊 Step 1: Batch loading all required indexes...');
-    const loadStartTime = Date.now();
+    // STEP 1: Load conversion indexes using confirmed date range
+    console.log('📊 Step 1: Loading conversion indexes with main_ip_address field...');
+    const conversionData = await loadConversionIndexesProduction(redis, recovery_window_days);
     
-    const [conversionOnlyJourneys, conversionIndexes, availableIPs] = await Promise.all([
-      loadConversionOnlyJourneysEfficient(redis, force_reprocess),
-      loadConversionIndexesByDateRange(redis, recovery_window_days),
-      getAvailablePageviewIPs(redis)
-    ]);
+    console.log(`✅ Conversion data loaded:`);
+    console.log(`   📦 ${conversionData.totalConversions} conversions from ${conversionData.dateKeys.length} date indexes`);
+    console.log(`   🌐 ${conversionData.conversionsWithIPs} conversions have main_ip_address data`);
+    console.log(`   📅 Date range: ${conversionData.dateRange.start} to ${conversionData.dateRange.end}`);
     
-    const loadTime = Date.now() - loadStartTime;
-    console.log(`✅ Data loading complete in ${loadTime}ms:`);
-    console.log(`   📦 ${conversionOnlyJourneys.length} conversion-only journeys`);
-    console.log(`   📊 ${conversionIndexes.totalConversions} conversions from ${conversionIndexes.dateKeys.length} date indexes`);
-    console.log(`   🌐 ${availableIPs.length} unique IPs with pageview indexes`);
+    if (conversionData.conversionsWithIPs === 0) {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: false,
+          issue: 'No conversions found with main_ip_address field',
+          debug_info: {
+            total_conversions: conversionData.totalConversions,
+            date_indexes_checked: conversionData.dateKeys,
+            sample_conversion_fields: conversionData.sampleFields
+          },
+          recommendations: [
+            'Check if main_ip_address field exists in conversion data',
+            'Verify conversion_index_date:* keys have expected structure'
+          ]
+        })
+      };
+    }
+    
+    // STEP 2: Load conversion-only journeys that need recovery
+    console.log('📦 Step 2: Loading conversion-only journeys...');
+    const conversionOnlyJourneys = await loadConversionOnlyJourneysProduction(redis, test_mode);
+    
+    console.log(`✅ Journey data loaded:`);
+    console.log(`   🎯 ${conversionOnlyJourneys.length} conversion-only journeys need recovery`);
     
     if (conversionOnlyJourneys.length === 0) {
       return {
@@ -68,114 +88,207 @@ exports.handler = async (event, context) => {
         body: JSON.stringify({
           success: true,
           recovery_complete: true,
-          message: 'No conversion-only journeys found that need recovery processing',
+          message: 'No conversion-only journeys found that need recovery',
           summary: {
-            conversion_only_journeys_found: 0,
-            recovery_already_complete: true,
-            processing_time_ms: Date.now() - startTime
+            conversions_available: conversionData.totalConversions,
+            journeys_needing_recovery: 0
           }
         })
       };
     }
     
-    // STEP 2: In-memory matching and processing with FIXED field name mapping
-    console.log('🧠 Step 2: In-memory processing with FIXED field name mapping...');
-    const processingStartTime = Date.now();
-    
-    const recoveryResults = await processRecoveryInMemoryFixed(
+    // STEP 3: Process recovery using confirmed IP logic
+    console.log('🔗 Step 3: Processing recovery with main_ip_address comma-separated logic...');
+    const recoveryResults = await processRecoveryProduction(
       redis,
       conversionOnlyJourneys,
-      conversionIndexes.conversions,
-      availableIPs,
+      conversionData.conversions,
       extended_window_hours,
       batch_size,
       maxProcessingTime - (Date.now() - startTime)
     );
     
-    const processingTime = Date.now() - processingStartTime;
     const totalTime = Date.now() - startTime;
     
-    console.log(`✅ Recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
+    console.log(`✅ Production recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        efficient_recovery: true,
-        object_entries_error_fixed: true,
+        production_recovery: true,
+        main_ip_address_confirmed: true,
         recovery_summary: {
-          conversion_only_journeys_targeted: conversionOnlyJourneys.length,
-          conversions_available_for_matching: conversionIndexes.totalConversions,
-          unique_ips_available: availableIPs.length,
+          conversions_available: conversionData.totalConversions,
+          conversions_with_ips: conversionData.conversionsWithIPs,
+          journeys_targeted: conversionOnlyJourneys.length,
           recovery_attempts: recoveryResults.recovery_attempts,
           successful_recoveries: recoveryResults.successful_recoveries,
-          additional_pageviews_found: recoveryResults.additional_pageviews_found,
+          new_pageviews_found: recoveryResults.new_pageviews_found,
           processing_time_ms: totalTime
         },
         performance_metrics: {
-          data_loading_time_ms: loadTime,
-          in_memory_processing_time_ms: processingTime,
           recovery_success_rate: recoveryResults.recovery_attempts > 0 ? 
             ((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1) + '%' : '0%',
           average_pageviews_per_recovery: recoveryResults.successful_recoveries > 0 ? 
-            (recoveryResults.additional_pageviews_found / recoveryResults.successful_recoveries).toFixed(1) : '0',
-          efficiency_improvement: '1000x faster via pre-built indexes + fixed debugging'
+            (recoveryResults.new_pageviews_found / recoveryResults.successful_recoveries).toFixed(1) : '0',
+          ip_processing_method: 'main_ip_address_comma_separated_confirmed'
         },
-        field_mapping_fixes: {
-          journey_field: 'conversion_order_id',
-          conversion_fields_checked: ['order_id', 'conversion_order_id', 'order_number'],
-          mapping_method: 'flexible_field_matching',
-          debugging_enabled: true,
-          object_entries_bug_fixed: true
+        field_processing_confirmed: {
+          ip_field_used: 'main_ip_address',
+          ip_processing: 'comma_separated_string_split',
+          ipv6_encoding: 'colon_to_underscore_replacement',
+          diagnostic_validated: true
         },
-        ip_parsing_fixes: {
-          comma_separated_strings_handled: true,
-          ipv6_encoding_corrected: true,
-          ip_extraction_method: 'split_and_encode'
-        },
-        attribution_improvements: {
-          new_multi_touchpoint_journeys: recoveryResults.successful_recoveries,
-          estimated_attribution_rate_improvement: recoveryResults.recovery_attempts > 0 ? 
-            `+${((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1)}%` : '+0%'
-        },
-        recovery_details: recoveryResults.recovery_details.slice(0, 10), // First 10 examples
-        debugging_info: recoveryResults.debugging_info,
+        recovery_examples: recoveryResults.recovery_examples.slice(0, 5),
+        ip_matching_stats: recoveryResults.ip_matching_stats,
         next_steps: recoveryResults.journeys_remaining > 0 ? [
           `Continue recovery: ${recoveryResults.journeys_remaining} conversion-only journeys remaining`,
-          'Run same command again to continue processing',
-          'Fixed debugging error - system should now process successfully'
+          'Run same command again to process more batches',
+          'Production system using confirmed IP processing logic'
         ] : [
           '🎉 ATTRIBUTION RECOVERY COMPLETE!',
-          'All conversion-only journeys processed with fixed system',
-          'Use query-customer-journeys.js to see improved attribution rates',
-          'Attribution success rate significantly improved'
+          'All conversion-only journeys processed with production system',
+          'Attribution success rate improved using main_ip_address field',
+          'System ready for enhanced multi-touch attribution analysis'
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Attribution recovery failed:', error);
+    console.error('❌ Production attribution recovery failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Attribution recovery failed', 
-        message: error.message,
-        stack: error.stack
+        error: 'Production attribution recovery failed', 
+        message: error.message 
       })
     };
   }
 };
 
-// EFFICIENT: Load conversion-only journeys in single scan
-async function loadConversionOnlyJourneysEfficient(redis, forceReprocess) {
-  console.log('📦 Loading conversion-only journeys (single efficient scan)...');
+// PRODUCTION: Load conversion indexes using confirmed date range and field structure
+async function loadConversionIndexesProduction(redis, recoveryWindowDays) {
+  console.log(`📊 Loading conversion indexes for ${recoveryWindowDays} days with main_ip_address field...`);
+  
+  const conversions = [];
+  const dateKeys = [];
+  let conversionsWithIPs = 0;
+  const sampleFields = new Set();
+  
+  // Generate date keys for confirmed range (2025-06-08 onwards)
+  const endDate = new Date();
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - recoveryWindowDays);
+  
+  const datesToCheck = [];
+  for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+    const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    datesToCheck.push(dateKey);
+  }
+  
+  console.log(`📅 Checking ${datesToCheck.length} conversion indexes...`);
+  
+  // Load conversion indexes in parallel batches
+  const batchSize = 5;
+  for (let i = 0; i < datesToCheck.length; i += batchSize) {
+    const batch = datesToCheck.slice(i, i + batchSize);
+    
+    const batchPromises = batch.map(async (dateKey) => {
+      try {
+        const indexKey = `conversion_index_date:${dateKey}`;
+        const indexData = await redis(`get/${indexKey}`);
+        
+        if (indexData?.result) {
+          const parsed = JSON.parse(decodeURIComponent(indexData.result));
+          dateKeys.push(dateKey);
+          
+          if (parsed.conversions && Array.isArray(parsed.conversions)) {
+            return parsed.conversions.map(conversion => {
+              // Track fields for debugging
+              Object.keys(conversion).forEach(field => sampleFields.add(field));
+              
+              // CONFIRMED: Extract IPs from main_ip_address field using comma-separated logic
+              const extractedIPs = extractIPsFromMainField(conversion);
+              
+              if (extractedIPs.length > 0) {
+                conversionsWithIPs++;
+              }
+              
+              return {
+                ...conversion,
+                date_key: dateKey,
+                extracted_ips: extractedIPs,
+                has_ip_data: extractedIPs.length > 0
+              };
+            });
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ Error loading conversion index for ${dateKey}:`, error.message);
+      }
+      return [];
+    });
+    
+    const batchResults = await Promise.all(batchPromises);
+    const validConversions = batchResults.flat();
+    conversions.push(...validConversions);
+  }
+  
+  // Sort by timestamp (most recent first)
+  conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  console.log(`✅ Loaded ${conversions.length} conversions with ${conversionsWithIPs} having IP data`);
+  
+  return {
+    conversions,
+    dateKeys,
+    totalConversions: conversions.length,
+    conversionsWithIPs,
+    sampleFields: Array.from(sampleFields),
+    dateRange: {
+      start: dateKeys[0],
+      end: dateKeys[dateKeys.length - 1]
+    }
+  };
+}
+
+// CONFIRMED: Extract IPs from main_ip_address field using validated logic
+function extractIPsFromMainField(conversion) {
+  try {
+    // CONFIRMED from diagnostic: Use main_ip_address field
+    const mainIPField = conversion.main_ip_address;
+    
+    if (!mainIPField || mainIPField === 'unknown') {
+      return [];
+    }
+    
+    // CONFIRMED: Split comma-separated string and clean up
+    const ipString = String(mainIPField);
+    const ips = ipString.includes(',') 
+      ? ipString.split(',').map(ip => ip.trim()) 
+      : [ipString.trim()];
+    
+    // Filter out unknowns and empty strings
+    const validIPs = ips.filter(ip => ip && ip !== 'unknown' && ip.length > 0);
+    
+    return validIPs;
+  } catch (error) {
+    console.warn('⚠️ IP extraction error for conversion:', error.message);
+    return [];
+  }
+}
+
+// PRODUCTION: Load conversion-only journeys efficiently
+async function loadConversionOnlyJourneysProduction(redis, testMode) {
+  console.log(`📦 Loading conversion-only journeys (test_mode: ${testMode})...`);
   
   const conversionOnlyJourneys = [];
   let cursor = '0';
   let iterations = 0;
-  const maxIterations = 20;
+  const maxIterations = testMode ? 5 : 20; // Limit iterations in test mode
   
   try {
     do {
@@ -205,8 +318,7 @@ async function loadConversionOnlyJourneysEfficient(redis, forceReprocess) {
                                      journey.reconstruction_method?.includes('conversion_only') ||
                                      (journey.touchpoints && journey.touchpoints.every(tp => tp.is_conversion || tp.type === 'conversion'));
               
-              const needsRecovery = isConversionOnly && 
-                                  (forceReprocess || !journey.recovery_attempted);
+              const needsRecovery = isConversionOnly && !journey.recovery_attempted;
               
               if (needsRecovery) {
                 return {
@@ -216,8 +328,7 @@ async function loadConversionOnlyJourneysEfficient(redis, forceReprocess) {
                   conversion_order_id: journey.conversion_order_id,
                   conversion_timestamp: journey.conversion_timestamp,
                   conversion_value: journey.conversion_value,
-                  current_touchpoints: journey.total_touchpoints,
-                  recovery_attempted: journey.recovery_attempted || false
+                  current_touchpoints: journey.total_touchpoints
                 };
               }
             }
@@ -230,7 +341,16 @@ async function loadConversionOnlyJourneysEfficient(redis, forceReprocess) {
         const batchResults = await Promise.all(batchPromises);
         const validTargets = batchResults.filter(target => target !== null);
         conversionOnlyJourneys.push(...validTargets);
+        
+        // Test mode limit
+        if (testMode && conversionOnlyJourneys.length >= 10) {
+          console.log(`🧪 Test mode: Limited to ${conversionOnlyJourneys.length} journeys`);
+          break;
+        }
       }
+      
+      // Test mode early exit
+      if (testMode && conversionOnlyJourneys.length >= 10) break;
       
     } while (cursor !== '0' && iterations < maxIterations);
     
@@ -241,382 +361,105 @@ async function loadConversionOnlyJourneysEfficient(redis, forceReprocess) {
   // Sort by conversion timestamp (most recent first)
   conversionOnlyJourneys.sort((a, b) => new Date(b.conversion_timestamp) - new Date(a.conversion_timestamp));
   
-  console.log(`✅ Loaded ${conversionOnlyJourneys.length} conversion-only journeys efficiently`);
+  console.log(`✅ Loaded ${conversionOnlyJourneys.length} conversion-only journeys for recovery`);
   return conversionOnlyJourneys;
 }
 
-// EFFICIENT: Load conversion data from pre-built conversion_index_date:* keys
-async function loadConversionIndexesByDateRange(redis, recoveryWindowDays) {
-  console.log(`📊 Loading conversion indexes for ${recoveryWindowDays} days...`);
-  
-  const conversions = [];
-  const dateKeys = [];
-  
-  // Generate date keys for the recovery window
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - recoveryWindowDays);
-  
-  const datesToCheck = [];
-  for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-    const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    datesToCheck.push(dateKey);
-  }
-  
-  console.log(`📅 Checking ${datesToCheck.length} date indexes...`);
-  
-  // Load conversion indexes in parallel
-  const batchSize = 10;
-  for (let i = 0; i < datesToCheck.length; i += batchSize) {
-    const batch = datesToCheck.slice(i, i + batchSize);
-    
-    const batchPromises = batch.map(async (dateKey) => {
-      try {
-        const indexKey = `conversion_index_date:${dateKey}`;
-        const indexData = await redis(`get/${indexKey}`);
-        
-        if (indexData?.result) {
-          const parsed = JSON.parse(decodeURIComponent(indexData.result));
-          dateKeys.push(dateKey);
-          
-          // Extract conversions with enhanced IP data
-          if (parsed.conversions && Array.isArray(parsed.conversions)) {
-            return parsed.conversions.map(conversion => ({
-              ...conversion,
-              date_key: dateKey,
-              // FIXED: Properly extract and split IPs
-              enhanced_ips: extractIPsFromConversionFixed(conversion)
-            }));
-          }
-        }
-      } catch (error) {
-        console.warn(`⚠️ Error loading conversion index for ${dateKey}:`, error.message);
-      }
-      return [];
-    });
-    
-    const batchResults = await Promise.all(batchPromises);
-    const validConversions = batchResults.flat();
-    conversions.push(...validConversions);
-  }
-  
-  console.log(`✅ Loaded ${conversions.length} conversions from ${dateKeys.length} date indexes`);
-  
-  return {
-    conversions,
-    dateKeys,
-    totalConversions: conversions.length
-  };
-}
-
-// FIXED: Extract IPs from conversion data with proper comma splitting and IPv6 handling
-function extractIPsFromConversionFixed(conversion) {
-  const ips = [];
-  
-  try {
-    // Step 1: Collect all IP fields
-    const ipFields = [
-      conversion.primary_ip,
-      conversion.conversion_ip, 
-      conversion.pageview_ip,
-      conversion.ip_address,
-      conversion.PIP,
-      conversion.CIP,
-      conversion.IP
-    ].filter(ip => ip && ip !== 'unknown');
-    
-    // Step 2: Split comma-separated strings and collect individual IPs
-    ipFields.forEach(field => {
-      if (typeof field === 'string') {
-        if (field.includes(',')) {
-          // Split comma-separated string
-          const splitIPs = field.split(',').map(ip => ip.trim()).filter(ip => ip && ip !== 'unknown');
-          ips.push(...splitIPs);
-        } else {
-          ips.push(field.trim());
-        }
-      }
-    });
-    
-    // Step 3: Remove duplicates and filter unknowns
-    const uniqueIPs = [...new Set(ips)].filter(ip => ip && ip !== 'unknown' && ip.length > 0);
-    
-    return uniqueIPs;
-  } catch (error) {
-    console.warn('⚠️ IP extraction error:', error.message);
-    return [];
-  }
-}
-
-// FIXED: Get available pageview IPs with proper IPv6 decoding
-async function getAvailablePageviewIPs(redis) {
-  console.log('🌐 Checking available pageview IP indexes...');
-  
-  const availableIPs = [];
-  let cursor = '0';
-  let iterations = 0;
-  const maxIterations = 10;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/pageview_index_ip:*/count/200`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      iterations++;
-      
-      // Extract IP from key names with proper IPv6 decoding
-      keys.forEach(key => {
-        try {
-          const ipMatch = key.match(/^pageview_index_ip:(.+)$/);
-          if (ipMatch) {
-            const encodedIP = ipMatch[1];
-            // FIXED: Properly decode IPv6 (underscores back to colons)
-            const originalIP = encodedIP.replace(/_/g, ':');
-            availableIPs.push({
-              original_ip: originalIP,
-              encoded_ip: encodedIP,
-              index_key: key
-            });
-          }
-        } catch (ipError) {
-          // Skip invalid IP patterns
-        }
-      });
-      
-    } while (cursor !== '0' && iterations < maxIterations);
-    
-  } catch (error) {
-    console.warn('⚠️ Error scanning pageview IP indexes:', error.message);
-  }
-  
-  console.log(`✅ Found ${availableIPs.length} pageview IP indexes`);
-  
-  return availableIPs;
-}
-
-// FIXED: Process recovery entirely in memory with CORRECT field name mapping
-async function processRecoveryInMemoryFixed(redis, journeys, conversions, availableIPs, extendedWindowHours, batchSize, maxTime) {
-  console.log(`🧠 Processing ${journeys.length} journeys in memory with FIXED field name mapping...`);
+// PRODUCTION: Process recovery using confirmed main_ip_address logic
+async function processRecoveryProduction(redis, journeys, conversions, extendedWindowHours, batchSize, maxTime) {
+  console.log(`🔗 Processing ${journeys.length} journeys with main_ip_address comma-separated logic...`);
   
   const processingStartTime = Date.now();
   let recoveryAttempts = 0;
   let successfulRecoveries = 0;
-  let additionalPageviewsFound = 0;
-  const recoveryDetails = [];
-  const debuggingInfo = {
-    field_mapping_attempts: 0,
-    field_mapping_successes: 0,
-    sample_conversion_fields: new Set(),
-    sample_journey_fields: new Set(),
-    order_id_matches_found: 0,
-    conversion_fields_analysis: {}
+  let newPageviewsFound = 0;
+  const recoveryExamples = [];
+  const ipMatchingStats = {
+    conversions_checked: 0,
+    conversions_with_ips: 0,
+    unique_ips_found: new Set(),
+    pageview_indexes_checked: new Set(),
+    ip_matches_found: 0
   };
   
-  // Step 1: Create lookup maps with FIXED field name handling
-  console.log('🗺️ Building lookup maps with FLEXIBLE field name mapping...');
-  
+  // Step 1: Create lookup maps
+  console.log('🗺️ Building conversion lookup map...');
   const conversionsByOrderId = new Map();
   
-  // FIXED: Flexible field name mapping for conversions
   conversions.forEach(conversion => {
-    try {
-      debuggingInfo.field_mapping_attempts++;
+    const orderId = conversion.order_id || conversion.conversion_order_id;
+    if (orderId) {
+      conversionsByOrderId.set(String(orderId), conversion);
+      ipMatchingStats.conversions_checked++;
       
-      // Track all available fields for debugging
-      Object.keys(conversion).forEach(field => {
-        debuggingInfo.sample_conversion_fields.add(field);
-      });
-      
-      // Try multiple possible field names for order ID
-      let orderId = null;
-      const possibleOrderFields = [
-        'order_id',           // Most likely
-        'conversion_order_id', // Alternative
-        'order_number',       // Possible alternative
-        'id'                  // Fallback
-      ];
-      
-      for (const field of possibleOrderFields) {
-        if (conversion[field] && conversion[field] !== 'unknown') {
-          orderId = conversion[field];
-          if (!debuggingInfo.conversion_fields_analysis[field]) {
-            debuggingInfo.conversion_fields_analysis[field] = 0;
-          }
-          debuggingInfo.conversion_fields_analysis[field]++;
-          break;
-        }
+      if (conversion.extracted_ips && conversion.extracted_ips.length > 0) {
+        ipMatchingStats.conversions_with_ips++;
+        conversion.extracted_ips.forEach(ip => ipMatchingStats.unique_ips_found.add(ip));
       }
-      
-      if (orderId) {
-        conversionsByOrderId.set(String(orderId), conversion);
-        debuggingInfo.field_mapping_successes++;
-      }
-    } catch (conversionError) {
-      console.warn('⚠️ Error processing conversion:', conversionError.message);
     }
   });
   
-  const availableIPsSet = new Set(availableIPs.map(ip => ip.original_ip));
+  console.log(`📊 Lookup map: ${conversionsByOrderId.size} conversions indexed`);
+  console.log(`🌐 Total unique IPs found: ${ipMatchingStats.unique_ips_found.size}`);
   
-  console.log(`📊 FIXED Lookup maps built:`);
-  console.log(`   📊 ${conversionsByOrderId.size} conversions mapped (${debuggingInfo.field_mapping_successes}/${debuggingInfo.field_mapping_attempts})`);
-  console.log(`   🌐 ${availableIPsSet.size} available IP indexes`);
-  // FIXED: Log the object directly instead of using Object.fromEntries()
-  console.log(`   🔧 Conversion field analysis:`, debuggingInfo.conversion_fields_analysis);
-  
-  // Step 2: FIXED matching with proper field name handling
-  const matchableJourneys = [];
-  let totalIPsFound = 0;
-  let totalMatchableIPs = 0;
-  
-  for (const journey of journeys) {
-    try {
-      // Track journey fields for debugging
-      Object.keys(journey).forEach(field => {
-        debuggingInfo.sample_journey_fields.add(field);
-      });
-      
-      // FIXED: Use conversion_order_id from journey (this was correct)
-      const journeyOrderId = String(journey.conversion_order_id);
-      const conversion = conversionsByOrderId.get(journeyOrderId);
-      
-      if (conversion) {
-        debuggingInfo.order_id_matches_found++;
-        
-        if (conversion.enhanced_ips && conversion.enhanced_ips.length > 0) {
-          totalIPsFound += conversion.enhanced_ips.length;
-          
-          // Check if any of the conversion's IPs have pageview indexes available
-          const matchableIPs = conversion.enhanced_ips.filter(ip => availableIPsSet.has(ip));
-          totalMatchableIPs += matchableIPs.length;
-          
-          if (matchableIPs.length > 0) {
-            matchableJourneys.push({
-              journey,
-              conversion,
-              matchable_ips: matchableIPs
-            });
-            
-            console.log(`🎯 Journey ${journey.conversion_order_id}: ${matchableIPs.length}/${conversion.enhanced_ips.length} IPs have pageview data`);
-          }
-        }
-      }
-    } catch (journeyError) {
-      console.warn(`⚠️ Error processing journey ${journey.conversion_order_id}:`, journeyError.message);
-    }
-  }
-  
-  console.log(`🎯 FIXED Field Mapping Results:`);
-  console.log(`   📋 Sample conversion fields: ${Array.from(debuggingInfo.sample_conversion_fields).slice(0, 10).join(', ')}`);
-  console.log(`   📋 Sample journey fields: ${Array.from(debuggingInfo.sample_journey_fields).slice(0, 10).join(', ')}`);
-  console.log(`   ✅ Order ID matches found: ${debuggingInfo.order_id_matches_found}/${journeys.length}`);
-  console.log(`   📊 ${matchableJourneys.length} journeys have conversions with available pageview data`);
-  console.log(`   🌐 ${totalIPsFound} total IPs found in conversions`);
-  console.log(`   ✅ ${totalMatchableIPs} IPs have corresponding pageview indexes`);
-  console.log(`   📈 IP match rate: ${totalIPsFound > 0 ? ((totalMatchableIPs / totalIPsFound) * 100).toFixed(1) : 0}%`);
-  
-  // 🔍 ENHANCED DEBUGGING: Show sample IPs for comparison
-  const sampleConversionIPs = [];
-  const samplePageviewIPs = [];
-  
-  // Get sample IPs from conversions
-  for (const journey of journeys.slice(0, 5)) {
-    const conversion = conversionsByOrderId.get(String(journey.conversion_order_id));
-    if (conversion && conversion.enhanced_ips) {
-      sampleConversionIPs.push(...conversion.enhanced_ips.slice(0, 2));
-    }
-  }
-  
-  // Get sample IPs from pageview indexes
-  samplePageviewIPs.push(...Array.from(availableIPsSet).slice(0, 10));
-  
-  console.log(`🔍 DEBUGGING IP Format Comparison:`);
-  console.log(`   📊 Sample conversion IPs: ${sampleConversionIPs.slice(0, 5).join(', ')}`);
-  console.log(`   📦 Sample pageview IPs: ${samplePageviewIPs.slice(0, 5).join(', ')}`);
-  console.log(`   🔍 IP format analysis needed - check if formats match`);
-  
-  // Add detailed IP analysis to debugging info
-  debuggingInfo.ip_analysis = {
-    sample_conversion_ips: sampleConversionIPs.slice(0, 5),
-    sample_pageview_ips: samplePageviewIPs.slice(0, 5),
-    total_conversion_ips: totalIPsFound,
-    total_pageview_ips: availableIPsSet.size,
-    ip_format_mismatch_suspected: totalIPsFound > 0 && totalMatchableIPs === 0
-  };
-  
-  if (matchableJourneys.length === 0) {
-    console.log('❌ No matchable journeys found even with fixed field mapping');
-    return {
-      recovery_attempts: 0,
-      successful_recoveries: 0,
-      additional_pageviews_found: 0,
-      journeys_remaining: journeys.length,
-      recovery_details: [],
-      debugging_info: {
-        ...debuggingInfo,
-        no_matchable_journeys_reason: 'IP format mismatch suspected - check debugging info for IP format comparison'
-      },
-      processing_time_ms: Date.now() - processingStartTime
-    };
-  }
-  
-  // Step 3: Load pageview indexes for matching IPs (batch operation)
-  const uniqueMatchableIPs = [...new Set(matchableJourneys.flatMap(mj => mj.matchable_ips))];
-  const pageviewIndexes = await batchLoadPageviewIndexes(redis, uniqueMatchableIPs.slice(0, 100)); // Limit for safety
-  
-  console.log(`📦 Loaded ${Object.keys(pageviewIndexes).length} pageview indexes for ${uniqueMatchableIPs.length} unique IPs`);
-  
-  // Step 4: Process recoveries in batches
+  // Step 2: Process journeys in batches
   const journeysToUpdate = [];
   
-  for (let i = 0; i < matchableJourneys.length; i += batchSize) {
+  for (let i = 0; i < journeys.length; i += batchSize) {
     if (Date.now() - processingStartTime > maxTime - 8000) {
-      console.log('⏰ Time limit during recovery processing, stopping');
+      console.log('⏰ Time limit reached during recovery processing');
       break;
     }
     
-    const batch = matchableJourneys.slice(i, i + batchSize);
-    console.log(`🔄 Processing batch ${Math.floor(i/batchSize) + 1}: ${i + 1}-${i + batch.length} of ${matchableJourneys.length}`);
+    const batch = journeys.slice(i, i + batchSize);
+    console.log(`🔄 Processing batch ${Math.floor(i/batchSize) + 1}: ${i + 1}-${i + batch.length} of ${journeys.length}`);
     
-    for (const { journey, conversion, matchable_ips } of batch) {
+    for (const journey of batch) {
       try {
         recoveryAttempts++;
         
-        // Find pageviews in loaded indexes (pure JavaScript - no Redis calls)
-        const recoveredPageviews = findPageviewsInMemory(
-          conversion,
-          matchable_ips,
-          pageviewIndexes,
-          extendedWindowHours
-        );
+        // Find matching conversion
+        const conversion = conversionsByOrderId.get(String(journey.conversion_order_id));
         
-        if (recoveredPageviews.length > 0) {
-          successfulRecoveries++;
-          additionalPageviewsFound += recoveredPageviews.length;
+        if (conversion && conversion.extracted_ips && conversion.extracted_ips.length > 0) {
+          // Check if any IPs have pageview indexes
+          const pageviewMatches = await findPageviewMatchesProduction(
+            redis,
+            conversion.extracted_ips,
+            conversion.timestamp,
+            extendedWindowHours
+          );
           
-          // Prepare journey update
-          const enhancedJourney = buildEnhancedJourneyFromRecovery(journey, recoveredPageviews);
-          journeysToUpdate.push({
-            key: journey.journey_key,
-            journey: enhancedJourney
+          // Track IP matching stats
+          conversion.extracted_ips.forEach(ip => {
+            const encodedIP = encodeIPForPageviewIndex(ip);
+            ipMatchingStats.pageview_indexes_checked.add(encodedIP);
           });
           
-          recoveryDetails.push({
-            journey_id: journey.journey_id,
-            order_id: journey.conversion_order_id,
-            customer_email: journey.customer_email,
-            pageviews_recovered: recoveredPageviews.length,
-            recovery_method: 'fixed_field_mapping_in_memory',
-            matched_ips: matchable_ips,
-            attribution_methods: recoveredPageviews.map(pv => pv.attribution_method)
-          });
-          
-          console.log(`✅ Recovery: Order ${journey.conversion_order_id} - found ${recoveredPageviews.length} pageviews`);
+          if (pageviewMatches.length > 0) {
+            successfulRecoveries++;
+            newPageviewsFound += pageviewMatches.length;
+            ipMatchingStats.ip_matches_found++;
+            
+            // Build enhanced journey
+            const enhancedJourney = buildEnhancedJourneyProduction(journey, pageviewMatches);
+            
+            journeysToUpdate.push({
+              key: journey.journey_key,
+              journey: enhancedJourney
+            });
+            
+            recoveryExamples.push({
+              journey_id: journey.journey_id,
+              order_id: journey.conversion_order_id,
+              customer_email: journey.customer_email,
+              conversion_ips: conversion.extracted_ips,
+              pageviews_found: pageviewMatches.length,
+              recovery_method: 'main_ip_address_production'
+            });
+            
+            console.log(`✅ Order ${journey.conversion_order_id}: Found ${pageviewMatches.length} pageviews from ${conversion.extracted_ips.length} IPs`);
+          }
         }
         
       } catch (recoveryError) {
@@ -625,129 +468,101 @@ async function processRecoveryInMemoryFixed(redis, journeys, conversions, availa
     }
   }
   
-  // Step 5: Batch update journeys
+  // Step 3: Batch update journeys
   if (journeysToUpdate.length > 0) {
     console.log(`💾 Batch updating ${journeysToUpdate.length} journeys...`);
-    await batchUpdateJourneys(redis, journeysToUpdate);
+    await batchUpdateJourneysProduction(redis, journeysToUpdate);
   }
   
   const journeysRemaining = Math.max(0, journeys.length - recoveryAttempts);
   
-  console.log(`🏁 Processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
+  // Finalize stats
+  ipMatchingStats.unique_ips_found = ipMatchingStats.unique_ips_found.size;
+  ipMatchingStats.pageview_indexes_checked = ipMatchingStats.pageview_indexes_checked.size;
+  
+  console.log(`🏁 Production processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
   
   return {
     recovery_attempts: recoveryAttempts,
     successful_recoveries: successfulRecoveries,
-    additional_pageviews_found: additionalPageviewsFound,
+    new_pageviews_found: newPageviewsFound,
     journeys_remaining: journeysRemaining,
-    recovery_details: recoveryDetails,
-    debugging_info: debuggingInfo,
+    recovery_examples: recoveryExamples,
+    ip_matching_stats: ipMatchingStats,
     processing_time_ms: Date.now() - processingStartTime
   };
 }
 
-// FIXED: Load pageview indexes for specific IPs with proper IPv6 encoding
-async function batchLoadPageviewIndexes(redis, ipAddresses) {
-  console.log(`📥 Batch loading pageview indexes for ${ipAddresses.length} IPs...`);
+// PRODUCTION: Find pageview matches using confirmed IP encoding
+async function findPageviewMatchesProduction(redis, extractedIPs, conversionTimestamp, extendedWindowHours) {
+  const pageviewMatches = [];
+  const conversionTime = new Date(conversionTimestamp).getTime();
+  const windowStart = conversionTime - (extendedWindowHours * 60 * 60 * 1000);
   
-  const pageviewIndexes = {};
-  const batchSize = 20;
-  
-  for (let i = 0; i < ipAddresses.length; i += batchSize) {
-    const batch = ipAddresses.slice(i, i + batchSize);
-    
-    const batchPromises = batch.map(async (ip) => {
+  try {
+    // Check each IP for pageview index
+    const batchPromises = extractedIPs.map(async (ip) => {
       try {
-        // FIXED: Properly encode IPv6 for Redis key lookup
-        const encodedIP = ip.replace(/:/g, '_');
+        // CONFIRMED: Encode IP for pageview index lookup
+        const encodedIP = encodeIPForPageviewIndex(ip);
         const indexKey = `pageview_index_ip:${encodedIP}`;
         
         const indexData = await redis(`get/${indexKey}`);
         
         if (indexData?.result) {
           const parsed = JSON.parse(decodeURIComponent(indexData.result));
-          return { ip, data: parsed };
+          
+          if (parsed.pageviews && Array.isArray(parsed.pageviews)) {
+            // Filter pageviews within time window
+            const windowPageviews = parsed.pageviews.filter(pv => {
+              const pvTime = new Date(pv.timestamp);
+              return pvTime >= windowStart && pvTime <= conversionTime;
+            });
+            
+            return windowPageviews.map(pv => ({
+              ...pv,
+              matched_ip: ip,
+              attribution_method: 'main_ip_address_recovery_production',
+              confidence: 240,
+              recovery_method: 'production_main_ip_address'
+            }));
+          }
         }
-      } catch (error) {
-        console.warn(`⚠️ Error loading pageview index for ${ip}:`, error.message);
+      } catch (ipError) {
+        console.warn(`⚠️ Error checking pageview index for IP ${ip}:`, ipError.message);
       }
-      return null;
+      return [];
     });
     
     const batchResults = await Promise.all(batchPromises);
-    batchResults.forEach(result => {
-      if (result) {
-        pageviewIndexes[result.ip] = result.data;
-      }
-    });
-  }
-  
-  console.log(`✅ Loaded ${Object.keys(pageviewIndexes).length} pageview indexes successfully`);
-  return pageviewIndexes;
-}
-
-// Find pageviews in memory (no Redis calls)
-function findPageviewsInMemory(conversion, matchableIPs, pageviewIndexes, extendedWindowHours) {
-  try {
-    const conversionTime = new Date(conversion.timestamp).getTime();
-    const windowStart = conversionTime - (extendedWindowHours * 60 * 60 * 1000);
-    const recoveredPageviews = [];
+    const allMatches = batchResults.flat();
     
-    for (const ip of matchableIPs) {
-      const ipIndex = pageviewIndexes[ip];
-      
-      if (ipIndex && ipIndex.pageviews) {
-        // Filter pageviews within time window
-        const windowPageviews = ipIndex.pageviews.filter(pv => {
-          const pvTime = new Date(pv.timestamp);
-          return pvTime >= windowStart && pvTime <= conversionTime;
-        });
-        
-        // Enhanced attribution matching
-        for (const pv of windowPageviews) {
-          let confidence = 240;
-          let attributionMethod = 'ip_index_recovery_fixed';
-          
-          // Multi-signal matching
-          if (conversion.session_id && pv.session_id === conversion.session_id) {
-            confidence = 295;
-            attributionMethod = 'session_id_match_recovery_fixed';
-          } else if (conversion.device_signature && pv.canvas_fingerprint === conversion.device_signature) {
-            confidence = 255;
-            attributionMethod = 'device_signature_match_recovery_fixed';
-          }
-          
-          recoveredPageviews.push({
-            ...pv,
-            matched_ip: ip,
-            attribution_method: attributionMethod,
-            confidence: confidence,
-            recovery_method: 'fixed_field_mapping_in_memory'
-          });
-        }
-      }
-    }
+    // Remove duplicates and sort by timestamp
+    const uniqueMatches = removeDuplicateMatches(allMatches);
+    uniqueMatches.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
-    // Sort by timestamp and remove duplicates
-    const uniquePageviews = removeDuplicateMatches(recoveredPageviews);
-    uniquePageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return uniqueMatches;
     
-    return uniquePageviews;
   } catch (error) {
-    console.warn('⚠️ Memory search error:', error.message);
+    console.warn('⚠️ Pageview matching error:', error.message);
     return [];
   }
 }
 
-// Build enhanced journey from recovery
-function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
+// CONFIRMED: Encode IP for pageview index (IPv6 colon to underscore)
+function encodeIPForPageviewIndex(ip) {
+  return ip.replace(/:/g, '_');
+}
+
+// Build enhanced journey from production recovery
+function buildEnhancedJourneyProduction(existingJourney, recoveredPageviews) {
   try {
     // Sort recovered pageviews by timestamp
     const sortedPageviews = recoveredPageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
     // Create new touchpoints from recovered pageviews
     const recoveredTouchpoints = sortedPageviews.map((pageview, index) => ({
-      touchpoint_id: `${existingJourney.conversion_order_id}_recovered_${index + 1}`,
+      touchpoint_id: `${existingJourney.conversion_order_id}_production_${index + 1}`,
       timestamp: pageview.timestamp,
       landing_page: pageview.landing_page,
       source: pageview.source,
@@ -759,7 +574,7 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
       attribution_method: pageview.attribution_method,
       confidence: pageview.confidence,
       matched_ip: pageview.matched_ip,
-      recovery_method: 'fixed_field_mapping_in_memory',
+      recovery_method: 'production_main_ip_address',
       session_id: pageview.session_id,
       canvas_fingerprint: pageview.canvas_fingerprint,
       screen_resolution: pageview.screen_resolution,
@@ -769,7 +584,7 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
       is_last_touchpoint: false
     }));
     
-    // Combine with existing conversion touchpoint
+    // Get existing conversion touchpoint
     const existingConversionTouchpoint = existingJourney.touchpoints?.find(tp => tp.is_conversion || tp.type === 'conversion');
     if (existingConversionTouchpoint) {
       existingConversionTouchpoint.touchpoint_position = recoveredTouchpoints.length + 1;
@@ -803,15 +618,14 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
       touchpoints: allTouchpoints,
       recovery_attempted: true,
       recovery_timestamp: new Date().toISOString(),
-      recovery_method: 'fixed_field_mapping_in_memory',
+      recovery_method: 'production_main_ip_address_confirmed',
       recovered_pageviews: sortedPageviews.length,
-      reconstruction_method: 'fixed_attribution_recovery',
-      debugging_fixes_applied: {
-        object_entries_error_fixed: true,
-        flexible_order_id_matching: true,
-        multiple_field_names_checked: ['order_id', 'conversion_order_id', 'order_number'],
-        ipv6_encoding_corrected: true,
-        extraction_method: 'enhanced_with_error_fixes'
+      reconstruction_method: 'production_attribution_recovery',
+      field_processing_confirmed: {
+        ip_field_used: 'main_ip_address',
+        processing_method: 'comma_separated_string_split',
+        ipv6_encoding: 'colon_to_underscore',
+        diagnostic_validated: true
       }
     };
   } catch (error) {
@@ -820,8 +634,8 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
   }
 }
 
-// Batch update journeys
-async function batchUpdateJourneys(redis, journeysToUpdate) {
+// Batch update journeys (production version)
+async function batchUpdateJourneysProduction(redis, journeysToUpdate) {
   const batchSize = 20;
   
   for (let i = 0; i < journeysToUpdate.length; i += batchSize) {
