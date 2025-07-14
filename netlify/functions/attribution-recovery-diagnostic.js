@@ -42,7 +42,7 @@ exports.handler = async (event, context) => {
           conversion_sample: conversionSample,
           pageview_samples: pageviewSamples,
           match_test: matchTest,
-          conclusion: matchTest.matches_found > 0 ? 'MATCHING WORKS' : 'FORMAT MISMATCH DETECTED'
+          conclusion: matchTest.total_matches > 0 ? 'MATCHING WORKS WITH FIXES' : 'NO MATCHES - DIFFERENT IP RANGES'
         }
       })
     };
@@ -118,34 +118,49 @@ function testMatching(conversionSample, pageviewSamples) {
   }
 
   const sample = conversionSample.sample_conversion;
-  const conversionIPs = [
+  
+  // Extract and split comma-separated IPs
+  const rawIPs = [
     sample?.main_ip_address,
     sample?.winning_ip_value,
     sample?.primary_ip,
     sample?.conversion_ip
   ].filter(Boolean);
   
-  // Also handle attempted_ip_addresses if it's an array
-  if (sample?.attempted_ip_addresses) {
-    if (Array.isArray(sample.attempted_ip_addresses)) {
-      conversionIPs.push(...sample.attempted_ip_addresses);
-    } else if (typeof sample.attempted_ip_addresses === 'string') {
-      conversionIPs.push(sample.attempted_ip_addresses);
+  // Split comma-separated strings and flatten
+  const allIPs = [];
+  rawIPs.forEach(ipField => {
+    if (typeof ipField === 'string' && ipField.includes(',')) {
+      // Split comma-separated string
+      const splitIPs = ipField.split(',').map(ip => ip.trim());
+      allIPs.push(...splitIPs);
+    } else {
+      allIPs.push(ipField);
     }
-  }
-
+  });
+  
+  // Remove duplicates
+  const uniqueIPs = [...new Set(allIPs)];
+  
+  // Test both original and encoded versions for pageview matching
   const pageviewIPs = pageviewSamples.map(p => p.decoded_ip);
-  const matches = conversionIPs.filter(ip => pageviewIPs.includes(ip));
+  const encodedConversionIPs = uniqueIPs.map(ip => ip.replace(/:/g, '_')); // IPv6 encoding
+  
+  const originalMatches = uniqueIPs.filter(ip => pageviewIPs.includes(ip));
+  const encodedMatches = encodedConversionIPs.filter(encodedIP => {
+    // Check if encoded IP exists in pageview samples
+    return pageviewSamples.some(p => p.encoded_ip === encodedIP);
+  });
   
   return {
-    conversion_ips: conversionIPs,
+    raw_ip_field: sample?.main_ip_address,
+    extracted_ips: uniqueIPs,
+    encoded_ips: encodedConversionIPs,
     pageview_ips: pageviewIPs,
-    matches_found: matches.length,
-    matching_ips: matches,
-    ip_field_analysis: {
-      main_ip_address: sample?.main_ip_address,
-      winning_ip_value: sample?.winning_ip_value,
-      attempted_ip_addresses: sample?.attempted_ip_addresses
-    }
+    original_matches: originalMatches.length,
+    encoded_matches: encodedMatches.length,
+    total_matches: originalMatches.length + encodedMatches.length,
+    matching_ips: [...originalMatches, ...encodedMatches],
+    fix_needed: 'Split comma-separated IPs and encode IPv6 with underscores'
   };
 }
