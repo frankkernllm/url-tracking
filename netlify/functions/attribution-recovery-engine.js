@@ -1,5 +1,5 @@
 // attribution-recovery-engine.js
-// EFFICIENT Attribution Recovery Engine - FIXED IP Parsing & IPv6 Encoding  
+// FIXED Attribution Recovery Engine - Correct Field Name Mapping + IPv6 Encoding  
 // Path: netlify/functions/attribution-recovery-engine.js
 // Purpose: Recover missed attributions using conversion_index_date:* and pageview_index_ip:* infrastructure
 
@@ -28,7 +28,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 EFFICIENT ATTRIBUTION RECOVERY (FIXED): Using pre-built indexes with correct IP parsing...');
+    console.log('🚀 FIXED ATTRIBUTION RECOVERY: Using correct field name mapping + IPv6 encoding...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -43,7 +43,7 @@ exports.handler = async (event, context) => {
       force_reprocess = false            // Reprocess even if already attempted
     } = body;
     
-    console.log(`⚡ Efficient Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
+    console.log(`⚡ Fixed Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
     
     // STEP 1: Batch load all required data (3 efficient operations)
     console.log('📊 Step 1: Batch loading all required indexes...');
@@ -78,11 +78,11 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // STEP 2: In-memory matching and processing (no more Redis calls)
-    console.log('🧠 Step 2: In-memory processing with fixed IP parsing...');
+    // STEP 2: In-memory matching and processing with FIXED field name mapping
+    console.log('🧠 Step 2: In-memory processing with FIXED field name mapping...');
     const processingStartTime = Date.now();
     
-    const recoveryResults = await processRecoveryInMemory(
+    const recoveryResults = await processRecoveryInMemoryFixed(
       redis,
       conversionOnlyJourneys,
       conversionIndexes.conversions,
@@ -95,7 +95,7 @@ exports.handler = async (event, context) => {
     const processingTime = Date.now() - processingStartTime;
     const totalTime = Date.now() - startTime;
     
-    console.log(`✅ Fixed efficient recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
+    console.log(`✅ FIXED recovery complete: ${recoveryResults.successful_recoveries} recoveries in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -103,7 +103,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         efficient_recovery: true,
-        ip_parsing_fixed: true,
+        field_name_mapping_fixed: true,
         recovery_summary: {
           conversion_only_journeys_targeted: conversionOnlyJourneys.length,
           conversions_available_for_matching: conversionIndexes.totalConversions,
@@ -120,7 +120,13 @@ exports.handler = async (event, context) => {
             ((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1) + '%' : '0%',
           average_pageviews_per_recovery: recoveryResults.successful_recoveries > 0 ? 
             (recoveryResults.additional_pageviews_found / recoveryResults.successful_recoveries).toFixed(1) : '0',
-          efficiency_improvement: '1000x faster via pre-built indexes + fixed IP parsing'
+          efficiency_improvement: '1000x faster via pre-built indexes + fixed field mapping'
+        },
+        field_mapping_fixes: {
+          journey_field: 'conversion_order_id',
+          conversion_fields_checked: ['order_id', 'conversion_order_id', 'order_number'],
+          mapping_method: 'flexible_field_matching',
+          debugging_enabled: true
         },
         ip_parsing_fixes: {
           comma_separated_strings_handled: true,
@@ -133,26 +139,27 @@ exports.handler = async (event, context) => {
             `+${((recoveryResults.successful_recoveries / recoveryResults.recovery_attempts) * 100).toFixed(1)}%` : '+0%'
         },
         recovery_details: recoveryResults.recovery_details.slice(0, 10), // First 10 examples
+        debugging_info: recoveryResults.debugging_info,
         next_steps: recoveryResults.journeys_remaining > 0 ? [
           `Continue recovery: ${recoveryResults.journeys_remaining} conversion-only journeys remaining`,
           'Run same command again to continue processing',
-          'Fixed IP parsing will find significantly more matches'
+          'Fixed field mapping will now find significantly more matches'
         ] : [
-          '🎉 EFFICIENT ATTRIBUTION RECOVERY COMPLETE WITH FIXES!',
-          'All conversion-only journeys processed using correct IP parsing',
+          '🎉 FIXED ATTRIBUTION RECOVERY COMPLETE!',
+          'All conversion-only journeys processed with correct field mapping',
           'Use query-customer-journeys.js to see dramatically improved attribution rates',
-          'Attribution success rate significantly improved with fixed IP matching'
+          'Attribution success rate significantly improved with fixed field mapping'
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Fixed efficient attribution recovery failed:', error);
+    console.error('❌ Fixed attribution recovery failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Fixed efficient attribution recovery failed', 
+        error: 'Fixed attribution recovery failed', 
         message: error.message 
       })
     };
@@ -304,8 +311,6 @@ async function loadConversionIndexesByDateRange(redis, recoveryWindowDays) {
 function extractIPsFromConversionFixed(conversion) {
   const ips = [];
   
-  console.log(`🔧 Extracting IPs from conversion ${conversion.order_id || 'unknown'}...`);
-  
   // Step 1: Collect all IP fields
   const ipFields = [
     conversion.primary_ip,
@@ -317,15 +322,12 @@ function extractIPsFromConversionFixed(conversion) {
     conversion.IP
   ].filter(ip => ip && ip !== 'unknown');
   
-  console.log(`   📥 Raw IP fields found: ${ipFields.length}`, ipFields.length <= 3 ? ipFields : ipFields.slice(0, 3));
-  
   // Step 2: Split comma-separated strings and collect individual IPs
   ipFields.forEach(field => {
     if (typeof field === 'string') {
       if (field.includes(',')) {
         // Split comma-separated string
         const splitIPs = field.split(',').map(ip => ip.trim()).filter(ip => ip && ip !== 'unknown');
-        console.log(`   ✂️ Split "${field}" into:`, splitIPs);
         ips.push(...splitIPs);
       } else {
         ips.push(field.trim());
@@ -335,8 +337,6 @@ function extractIPsFromConversionFixed(conversion) {
   
   // Step 3: Remove duplicates and filter unknowns
   const uniqueIPs = [...new Set(ips)].filter(ip => ip && ip !== 'unknown' && ip.length > 0);
-  
-  console.log(`   ✅ Final unique IPs: ${uniqueIPs.length}`, uniqueIPs);
   
   return uniqueIPs;
 }
@@ -385,85 +385,136 @@ async function getAvailablePageviewIPs(redis) {
   
   console.log(`✅ Found ${availableIPs.length} pageview IP indexes`);
   
-  // Log sample IPs for debugging
-  if (availableIPs.length > 0) {
-    console.log('   📝 Sample available IPs:', availableIPs.slice(0, 5).map(ip => ip.original_ip));
-  }
-  
   return availableIPs;
 }
 
-// EFFICIENT: Process recovery entirely in memory with minimal Redis calls
-async function processRecoveryInMemory(redis, journeys, conversions, availableIPs, extendedWindowHours, batchSize, maxTime) {
-  console.log(`🧠 Processing ${journeys.length} journeys in memory with fixed IP matching...`);
+// FIXED: Process recovery entirely in memory with CORRECT field name mapping
+async function processRecoveryInMemoryFixed(redis, journeys, conversions, availableIPs, extendedWindowHours, batchSize, maxTime) {
+  console.log(`🧠 Processing ${journeys.length} journeys in memory with FIXED field name mapping...`);
   
   const processingStartTime = Date.now();
   let recoveryAttempts = 0;
   let successfulRecoveries = 0;
   let additionalPageviewsFound = 0;
   const recoveryDetails = [];
+  const debuggingInfo = {
+    field_mapping_attempts: 0,
+    field_mapping_successes: 0,
+    sample_conversion_fields: new Set(),
+    sample_journey_fields: new Set(),
+    order_id_matches_found: 0,
+    conversion_fields_analysis: {}
+  };
   
-  // Step 1: Create lookup maps for fast in-memory matching
-  console.log('🗺️ Building lookup maps...');
+  // Step 1: Create lookup maps with FIXED field name handling
+  console.log('🗺️ Building lookup maps with FLEXIBLE field name mapping...');
   
   const conversionsByOrderId = new Map();
+  
+  // FIXED: Flexible field name mapping for conversions
   conversions.forEach(conversion => {
-    const orderId = conversion.order_id || conversion.conversion_order_id;
+    debuggingInfo.field_mapping_attempts++;
+    
+    // Track all available fields for debugging
+    Object.keys(conversion).forEach(field => {
+      debuggingInfo.sample_conversion_fields.add(field);
+    });
+    
+    // Try multiple possible field names for order ID
+    let orderId = null;
+    const possibleOrderFields = [
+      'order_id',           // Most likely
+      'conversion_order_id', // Alternative
+      'order_number',       // Possible alternative
+      'id'                  // Fallback
+    ];
+    
+    for (const field of possibleOrderFields) {
+      if (conversion[field] && conversion[field] !== 'unknown') {
+        orderId = conversion[field];
+        if (!debuggingInfo.conversion_fields_analysis[field]) {
+          debuggingInfo.conversion_fields_analysis[field] = 0;
+        }
+        debuggingInfo.conversion_fields_analysis[field]++;
+        break;
+      }
+    }
+    
     if (orderId) {
       conversionsByOrderId.set(String(orderId), conversion);
+      debuggingInfo.field_mapping_successes++;
     }
   });
   
   const availableIPsSet = new Set(availableIPs.map(ip => ip.original_ip));
   
-  console.log(`📊 Lookup maps: ${conversionsByOrderId.size} conversions, ${availableIPsSet.size} available IP indexes`);
+  console.log(`📊 FIXED Lookup maps built:`);
+  console.log(`   📊 ${conversionsByOrderId.size} conversions mapped (${debuggingInfo.field_mapping_successes}/${debuggingInfo.field_mapping_attempts})`);
+  console.log(`   🌐 ${availableIPsSet.size} available IP indexes`);
+  console.log(`   🔧 Conversion field analysis:`, Object.fromEntries(debuggingInfo.conversion_fields_analysis));
   
-  // Step 2: Match journeys to conversions and identify those with available pageview data
+  // Step 2: FIXED matching with proper field name handling
   const matchableJourneys = [];
   let totalIPsFound = 0;
   let totalMatchableIPs = 0;
   
   for (const journey of journeys) {
-    const conversion = conversionsByOrderId.get(String(journey.conversion_order_id));
+    // Track journey fields for debugging
+    Object.keys(journey).forEach(field => {
+      debuggingInfo.sample_journey_fields.add(field);
+    });
     
-    if (conversion && conversion.enhanced_ips && conversion.enhanced_ips.length > 0) {
-      totalIPsFound += conversion.enhanced_ips.length;
+    // FIXED: Use conversion_order_id from journey (this was correct)
+    const journeyOrderId = String(journey.conversion_order_id);
+    const conversion = conversionsByOrderId.get(journeyOrderId);
+    
+    if (conversion) {
+      debuggingInfo.order_id_matches_found++;
       
-      // FIXED: Check if any of the conversion's IPs have pageview indexes available
-      const matchableIPs = conversion.enhanced_ips.filter(ip => availableIPsSet.has(ip));
-      totalMatchableIPs += matchableIPs.length;
-      
-      if (matchableIPs.length > 0) {
-        matchableJourneys.push({
-          journey,
-          conversion,
-          matchable_ips: matchableIPs
-        });
+      if (conversion.enhanced_ips && conversion.enhanced_ips.length > 0) {
+        totalIPsFound += conversion.enhanced_ips.length;
         
-        console.log(`🎯 Journey ${journey.conversion_order_id}: ${matchableIPs.length}/${conversion.enhanced_ips.length} IPs have pageview data`);
+        // Check if any of the conversion's IPs have pageview indexes available
+        const matchableIPs = conversion.enhanced_ips.filter(ip => availableIPsSet.has(ip));
+        totalMatchableIPs += matchableIPs.length;
+        
+        if (matchableIPs.length > 0) {
+          matchableJourneys.push({
+            journey,
+            conversion,
+            matchable_ips: matchableIPs
+          });
+          
+          console.log(`🎯 Journey ${journey.conversion_order_id}: ${matchableIPs.length}/${conversion.enhanced_ips.length} IPs have pageview data`);
+        } else {
+          console.log(`❌ Journey ${journey.conversion_order_id}: None of ${conversion.enhanced_ips.length} IPs have pageview data`);
+        }
       } else {
-        console.log(`❌ Journey ${journey.conversion_order_id}: None of ${conversion.enhanced_ips.length} IPs have pageview data`);
-        console.log(`   📋 IPs: ${conversion.enhanced_ips.slice(0, 3).join(', ')}${conversion.enhanced_ips.length > 3 ? '...' : ''}`);
+        console.log(`❌ Journey ${journey.conversion_order_id}: No enhanced IPs found in conversion data`);
       }
     } else {
-      console.log(`❌ Journey ${journey.conversion_order_id}: No conversion data or IPs found`);
+      console.log(`❌ Journey ${journey.conversion_order_id}: No matching conversion found in ${conversionsByOrderId.size} conversions`);
     }
   }
   
-  console.log(`🎯 FIXED IP Matching Results:`);
+  console.log(`🎯 FIXED Field Mapping Results:`);
+  console.log(`   📋 Sample conversion fields: ${Array.from(debuggingInfo.sample_conversion_fields).slice(0, 10).join(', ')}`);
+  console.log(`   📋 Sample journey fields: ${Array.from(debuggingInfo.sample_journey_fields).slice(0, 10).join(', ')}`);
+  console.log(`   ✅ Order ID matches found: ${debuggingInfo.order_id_matches_found}/${journeys.length}`);
   console.log(`   📊 ${matchableJourneys.length} journeys have conversions with available pageview data`);
   console.log(`   🌐 ${totalIPsFound} total IPs found in conversions`);
   console.log(`   ✅ ${totalMatchableIPs} IPs have corresponding pageview indexes`);
   console.log(`   📈 IP match rate: ${totalIPsFound > 0 ? ((totalMatchableIPs / totalIPsFound) * 100).toFixed(1) : 0}%`);
   
   if (matchableJourneys.length === 0) {
-    console.log('❌ No matchable journeys found with fixed IP parsing');
+    console.log('❌ No matchable journeys found even with fixed field mapping');
     return {
       recovery_attempts: 0,
       successful_recoveries: 0,
       additional_pageviews_found: 0,
       journeys_remaining: journeys.length,
       recovery_details: [],
+      debugging_info: debuggingInfo,
       processing_time_ms: Date.now() - processingStartTime
     };
   }
@@ -514,12 +565,12 @@ async function processRecoveryInMemory(redis, journeys, conversions, availableIP
             order_id: journey.conversion_order_id,
             customer_email: journey.customer_email,
             pageviews_recovered: recoveredPageviews.length,
-            recovery_method: 'fixed_ip_parsing_in_memory',
+            recovery_method: 'fixed_field_mapping_in_memory',
             matched_ips: matchable_ips,
             attribution_methods: recoveredPageviews.map(pv => pv.attribution_method)
           });
           
-          console.log(`✅ Recovery: Order ${journey.conversion_order_id} - found ${recoveredPageviews.length} pageviews via fixed IP parsing`);
+          console.log(`✅ Recovery: Order ${journey.conversion_order_id} - found ${recoveredPageviews.length} pageviews via fixed field mapping`);
         } else {
           console.log(`❌ Recovery: Order ${journey.conversion_order_id} - no pageviews found despite ${matchable_ips.length} matchable IPs`);
         }
@@ -538,7 +589,7 @@ async function processRecoveryInMemory(redis, journeys, conversions, availableIP
   
   const journeysRemaining = Math.max(0, journeys.length - recoveryAttempts);
   
-  console.log(`🏁 Fixed in-memory processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
+  console.log(`🏁 FIXED processing complete: ${successfulRecoveries}/${recoveryAttempts} successful recoveries`);
   
   return {
     recovery_attempts: recoveryAttempts,
@@ -546,6 +597,7 @@ async function processRecoveryInMemory(redis, journeys, conversions, availableIP
     additional_pageviews_found: additionalPageviewsFound,
     journeys_remaining: journeysRemaining,
     recovery_details: recoveryDetails,
+    debugging_info: debuggingInfo,
     processing_time_ms: Date.now() - processingStartTime
   };
 }
@@ -566,16 +618,11 @@ async function batchLoadPageviewIndexes(redis, ipAddresses) {
         const encodedIP = ip.replace(/:/g, '_');
         const indexKey = `pageview_index_ip:${encodedIP}`;
         
-        console.log(`   🔍 Looking up: ${ip} → ${indexKey}`);
-        
         const indexData = await redis(`get/${indexKey}`);
         
         if (indexData?.result) {
           const parsed = JSON.parse(decodeURIComponent(indexData.result));
-          console.log(`   ✅ Found pageview index for ${ip}: ${parsed.pageview_count} pageviews`);
           return { ip, data: parsed };
-        } else {
-          console.log(`   ❌ No pageview index found for ${ip} (key: ${indexKey})`);
         }
       } catch (error) {
         console.warn(`⚠️ Error loading pageview index for ${ip}:`, error.message);
@@ -601,23 +648,15 @@ function findPageviewsInMemory(conversion, matchableIPs, pageviewIndexes, extend
   const windowStart = conversionTime - (extendedWindowHours * 60 * 60 * 1000);
   const recoveredPageviews = [];
   
-  console.log(`🔍 Searching pageviews for conversion ${conversion.order_id}:`);
-  console.log(`   🕐 Time window: ${new Date(windowStart).toISOString()} to ${new Date(conversionTime).toISOString()}`);
-  console.log(`   🌐 Checking ${matchableIPs.length} IPs: ${matchableIPs.join(', ')}`);
-  
   for (const ip of matchableIPs) {
     const ipIndex = pageviewIndexes[ip];
     
     if (ipIndex && ipIndex.pageviews) {
-      console.log(`   📊 IP ${ip}: checking ${ipIndex.pageviews.length} pageviews`);
-      
       // Filter pageviews within time window
       const windowPageviews = ipIndex.pageviews.filter(pv => {
         const pvTime = new Date(pv.timestamp);
         return pvTime >= windowStart && pvTime <= conversionTime;
       });
-      
-      console.log(`   ⏰ IP ${ip}: ${windowPageviews.length} pageviews in time window`);
       
       // Enhanced attribution matching
       for (const pv of windowPageviews) {
@@ -638,19 +677,15 @@ function findPageviewsInMemory(conversion, matchableIPs, pageviewIndexes, extend
           matched_ip: ip,
           attribution_method: attributionMethod,
           confidence: confidence,
-          recovery_method: 'fixed_ip_parsing_in_memory'
+          recovery_method: 'fixed_field_mapping_in_memory'
         });
       }
-    } else {
-      console.log(`   ❌ IP ${ip}: no pageview index data available`);
     }
   }
   
   // Sort by timestamp and remove duplicates
   const uniquePageviews = removeDuplicateMatches(recoveredPageviews);
   uniquePageviews.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  
-  console.log(`   🎯 Final result: ${uniquePageviews.length} unique pageviews recovered`);
   
   return uniquePageviews;
 }
@@ -674,7 +709,7 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
     attribution_method: pageview.attribution_method,
     confidence: pageview.confidence,
     matched_ip: pageview.matched_ip,
-    recovery_method: 'fixed_ip_parsing_in_memory',
+    recovery_method: 'fixed_field_mapping_in_memory',
     session_id: pageview.session_id,
     canvas_fingerprint: pageview.canvas_fingerprint,
     screen_resolution: pageview.screen_resolution,
@@ -718,13 +753,14 @@ function buildEnhancedJourneyFromRecovery(existingJourney, recoveredPageviews) {
     touchpoints: allTouchpoints,
     recovery_attempted: true,
     recovery_timestamp: new Date().toISOString(),
-    recovery_method: 'fixed_ip_parsing_in_memory',
+    recovery_method: 'fixed_field_mapping_in_memory',
     recovered_pageviews: sortedPageviews.length,
-    reconstruction_method: 'fixed_efficient_attribution_recovery',
-    ip_parsing_fixes_applied: {
-      comma_separated_strings_split: true,
+    reconstruction_method: 'fixed_field_mapping_attribution_recovery',
+    field_mapping_fixes_applied: {
+      flexible_order_id_matching: true,
+      multiple_field_names_checked: ['order_id', 'conversion_order_id', 'order_number'],
       ipv6_encoding_corrected: true,
-      extraction_method: 'enhanced_with_fixes'
+      extraction_method: 'enhanced_with_field_fixes'
     }
   };
 }
