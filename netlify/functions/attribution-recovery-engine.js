@@ -40,7 +40,8 @@ exports.handler = async (event, context) => {
       recovery_window_days = 30,         // Date range for conversion indexes
       extended_window_hours = 72,        // Attribution window for pageviews
       batch_size = 50,                   // Journey update batch size
-      force_reprocess = false            // Reprocess even if already attempted
+      force_reprocess = false,           // Reprocess even if already attempted
+      debug_mode = false                 // Enable detailed debugging
     } = body;
     
     console.log(`⚡ Efficient Parameters: ${recovery_window_days} day range, ${extended_window_hours}h attribution window`);
