@@ -1,3 +1,4 @@
+// attribution-recovery-engine.js
 // Attribution Recovery Engine - Re-process conversion-only journeys with enhanced attribution
 // Path: netlify/functions/attribution-recovery-engine.js
 // Purpose: Find missed pageview attributions using current dual IP extraction logic
@@ -915,3 +916,4 @@ function initializeRedis() {
       throw error;
     }
   };
+}
