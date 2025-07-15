@@ -201,15 +201,14 @@ async function getConversionsFromIndexes(redis, startDate, endDate, limit) {
             for (const conversion of dateIndex.conversions) {
               if (conversions.length >= limit) break;
               
-              // 🚫 FILTER OUT: Skip conversions with null/undefined/empty conversion IP
-              if (!conversion.ip_address || 
-                  conversion.ip_address === null || 
-                  conversion.ip_address === 'null' || 
-                  conversion.ip_address === '' ||
-                  conversion.ip_address === 'undefined') {
+              // 🚫 FILTER OUT: Only filter obviously bogus conversions, not legitimate unattributed ones
+              // Keep conversions that track.js legitimately stored, even with null IPs
+              if ((!conversion.order_id || conversion.order_id === 'unknown') && 
+                  (!conversion.email || conversion.email === 'unknown') &&
+                  (!conversion.ip_address || conversion.ip_address === null || conversion.ip_address === 'null' || conversion.ip_address === '')) {
                 
                 filteredOutCount++;
-                console.log(`🚫 Filtered out conversion with null IP: ${conversion.order_id || conversion.email || 'unknown'}`);
+                console.log(`🚫 Filtered out bogus conversion: order_id=${conversion.order_id}, email=${conversion.email}, ip=${conversion.ip_address}`);
                 continue; // Skip this conversion
               }
               
