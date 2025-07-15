@@ -83,7 +83,8 @@ exports.handler = async (event, context) => {
           data_source: 'pre_built_indexes',
           pageview_index_hits: analytics.pageview_index_hits,
           conversion_index_hits: analytics.conversion_index_hits,
-          cross_reference_time_ms: attributionAnalysis.processing_time_ms
+          cross_reference_time_ms: attributionAnalysis.processing_time_ms,
+          filtered_null_ips: analytics.filtered_null_ips // NEW: Track filtered conversions
         }
       })
     };
@@ -172,12 +173,13 @@ async function getPageviewsFromIndexes(redis, startDate, endDate, limit) {
   }
 }
 
-// Get conversions from pre-built indexes (FAST!)
+// Get conversions from pre-built indexes (FAST!) - WITH NULL IP FILTERING
 async function getConversionsFromIndexes(redis, startDate, endDate, limit) {
   console.log('💰 Loading conversions from date indexes...');
   
   const conversions = [];
   let indexHits = 0;
+  let filteredOutCount = 0; // Track how many we filter out
   
   try {
     // Generate date keys for the range
@@ -194,10 +196,22 @@ async function getConversionsFromIndexes(redis, startDate, endDate, limit) {
           const dateIndex = JSON.parse(decodeURIComponent(indexData.result));
           indexHits++;
           
-          // Add conversions from this date
+          // Add conversions from this date WITH NULL IP FILTERING
           if (dateIndex.conversions && Array.isArray(dateIndex.conversions)) {
             for (const conversion of dateIndex.conversions) {
               if (conversions.length >= limit) break;
+              
+              // 🚫 FILTER OUT: Skip conversions with null/undefined/empty conversion IP
+              if (!conversion.ip_address || 
+                  conversion.ip_address === null || 
+                  conversion.ip_address === 'null' || 
+                  conversion.ip_address === '' ||
+                  conversion.ip_address === 'undefined') {
+                
+                filteredOutCount++;
+                console.log(`🚫 Filtered out conversion with null IP: ${conversion.order_id || conversion.email || 'unknown'}`);
+                continue; // Skip this conversion
+              }
               
               conversions.push({
                 timestamp: conversion.timestamp,
@@ -210,7 +224,7 @@ async function getConversionsFromIndexes(redis, startDate, endDate, limit) {
                 campaign: conversion.campaign,
                 medium: conversion.medium,
                 landing_page: conversion.landing_page,
-                ip_address: conversion.ip_address,
+                ip_address: conversion.ip_address, // This is guaranteed to be valid now
                 session_id: conversion.session_id,
                 event_type: conversion.event_type
               });
@@ -225,7 +239,12 @@ async function getConversionsFromIndexes(redis, startDate, endDate, limit) {
     // Sort by timestamp
     conversions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
     
-    console.log(`✅ Loaded ${conversions.length} conversions from ${indexHits} date indexes`);
+    console.log(`✅ Loaded ${conversions.length} valid conversions from ${indexHits} date indexes`);
+    console.log(`🚫 Filtered out ${filteredOutCount} conversions with null/invalid IP addresses`);
+    
+    // Store filtered count for reporting
+    conversions._filteredCount = filteredOutCount;
+    
     return conversions;
     
   } catch (error) {
@@ -322,7 +341,8 @@ function generateAnalyticsSummary(pageviews, conversions, attributionAnalysis) {
     total_revenue: totalRevenue,
     conversion_rate: conversionRate,
     pageview_index_hits: pageviews.length, // Approximate
-    conversion_index_hits: conversions.length // Approximate
+    conversion_index_hits: conversions.length, // Approximate
+    filtered_null_ips: conversions._filteredCount || 0 // NEW: Include filtered count
   };
 }
 
