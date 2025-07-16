@@ -1,5 +1,5 @@
 // netlify/functions/query-customer-journeys.js
-// OPTIMIZED Customer Journey Query Engine - Efficient Redis Scanning
+// OPTIMIZED Customer Journey Query Engine - Now with Accurate Date Filtering
 // Uses same proven pattern as build-customer-journeys.js (no bulk loading)
 
 const headers = {
@@ -33,10 +33,14 @@ exports.handler = async (event, context) => {
     
     const redis = initializeRedis();
     
-    // Get parameters
+    // Get parameters - ENHANCED to support both old and new date filtering
     const body = event.body ? JSON.parse(event.body) : {};
     const {
-      date_range_days = 7,
+      // NEW: Actual date range support
+      start_date = null,
+      end_date = null,
+      // OLD: Backward compatibility
+      date_range_days = null,
       limit = 100,
       offset = 0,
       sample_only = false,
@@ -47,7 +51,43 @@ exports.handler = async (event, context) => {
       order_id = null
     } = body;
     
-    console.log(`📊 Query Parameters: ${date_range_days} days, limit: ${limit}, sample: ${sample_only}, cleanup: ${cleanup_duplicates}`);
+    // FIXED: Calculate date filtering parameters properly
+    let cutoffTimestamp;
+    let endTimestamp;
+    let dateFilterDescription;
+    
+    if (start_date && end_date) {
+      // NEW: Use actual date range from dashboard
+      const startDateObj = new Date(start_date);
+      const endDateObj = new Date(end_date);
+      endDateObj.setHours(23, 59, 59, 999); // Include full end date
+      
+      cutoffTimestamp = startDateObj.getTime();
+      endTimestamp = endDateObj.getTime();
+      dateFilterDescription = `${start_date} to ${end_date}`;
+      
+      console.log(`📅 Date Range (NEW): ${start_date} to ${end_date}`);
+    } else if (date_range_days) {
+      // OLD: Backward compatibility - relative to current date
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - date_range_days);
+      cutoffTimestamp = cutoffDate.getTime();
+      endTimestamp = Date.now();
+      dateFilterDescription = `${date_range_days} days from today`;
+      
+      console.log(`📅 Relative Range (OLD): ${date_range_days} days from today`);
+    } else {
+      // Default: Last 7 days
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - 7);
+      cutoffTimestamp = cutoffDate.getTime();
+      endTimestamp = Date.now();
+      dateFilterDescription = `Last 7 days (default)`;
+      
+      console.log(`📅 Default Range: Last 7 days`);
+    }
+    
+    console.log(`📊 Query Parameters: ${dateFilterDescription}, limit: ${limit}, sample: ${sample_only}, cleanup: ${cleanup_duplicates}`);
     
     // Handle different query modes
     if (cleanup_duplicates) {
@@ -59,12 +99,13 @@ exports.handler = async (event, context) => {
     }
     
     if (analytics_mode) {
-      return await handleAnalyticsQuery(redis, date_range_days, maxProcessingTime - (Date.now() - startTime));
+      return await handleAnalyticsQuery(redis, cutoffTimestamp, endTimestamp, maxProcessingTime - (Date.now() - startTime));
     }
     
-    // Default: Efficient journey search
+    // Default: Efficient journey search with FIXED date filtering
     const searchResults = await performEfficientJourneySearch(redis, {
-      date_range_days,
+      cutoffTimestamp,
+      endTimestamp,
       limit,
       offset,
       journey_id,
@@ -82,6 +123,13 @@ exports.handler = async (event, context) => {
         success: true,
         query_optimized: true,
         query_results: searchResults.journeys,
+        date_filter: {
+          description: dateFilterDescription,
+          start_timestamp: cutoffTimestamp,
+          end_timestamp: endTimestamp,
+          start_date: start_date,
+          end_date: end_date
+        },
         query_summary: {
           journeys_found: searchResults.journeys_found,
           journeys_returned: searchResults.journeys.length,
@@ -119,17 +167,12 @@ exports.handler = async (event, context) => {
   }
 };
 
-// OPTIMIZED: Efficient journey search using Redis scanning (no bulk loading)
+// FIXED: Efficient journey search with proper date range filtering
 async function performEfficientJourneySearch(redis, searchParams, maxTime) {
   const searchStartTime = Date.now();
-  const { date_range_days, limit, offset, journey_id, customer_email, order_id } = searchParams;
+  const { cutoffTimestamp, endTimestamp, limit, offset, journey_id, customer_email, order_id } = searchParams;
   
-  console.log(`🔍 Efficient journey search: ${date_range_days} days, limit: ${limit}, offset: ${offset}`);
-  
-  // Calculate date filter
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - date_range_days);
-  const cutoffTimestamp = cutoffDate.getTime();
+  console.log(`🔍 Efficient journey search: ${new Date(cutoffTimestamp).toISOString().split('T')[0]} to ${new Date(endTimestamp).toISOString().split('T')[0]}, limit: ${limit}, offset: ${offset}`);
   
   const journeys = [];
   let keysScanned = 0;
@@ -171,63 +214,41 @@ async function performEfficientJourneySearch(redis, searchParams, maxTime) {
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
               
-              // Apply filters during scanning (not after loading)
-              if (!passesFilters(journey, cutoffTimestamp, journey_id, customer_email, order_id)) {
-                return null;
+              // FIXED: Filter by actual timestamp range instead of just cutoff
+              if (passesDateAndFilters(journey, cutoffTimestamp, endTimestamp, journey_id, customer_email, order_id)) {
+                return journey;
               }
-              
-              journeysFound++;
-              
-              // Handle offset (skip journeys before our starting point)
-              if (journeysSkipped < offset) {
-                journeysSkipped++;
-                return null;
-              }
-              
-              // Stop if we have enough results
-              if (journeys.length >= limit) {
-                return null;
-              }
-              
-              return {
-                journey_id: journey.journey_id,
-                customer_email: journey.customer_email,
-                conversion_timestamp: journey.conversion_timestamp,
-                conversion_order_id: journey.conversion_order_id,
-                conversion_value: journey.conversion_value,
-                journey_span_hours: journey.journey_span_hours,
-                total_touchpoints: journey.total_touchpoints,
-                unique_sources: journey.unique_sources,
-                first_click_source: journey.first_click_source,
-                last_click_source: journey.last_click_source,
-                cross_session_journey: journey.cross_session_journey,
-                cross_device_journey: journey.cross_device_journey,
-                attribution_confidence_avg: journey.attribution_confidence_avg,
-                touchpoints: journey.touchpoints || [],
-                created_at: journey.created_at,
-                _redis_key: key
-              };
             }
           } catch (parseError) {
-            // Skip invalid journey data
+            // Skip invalid data
           }
           return null;
         });
         
         const batchResults = await Promise.all(batchPromises);
-        const validResults = batchResults.filter(result => result !== null);
-        journeys.push(...validResults);
+        const validJourneys = batchResults.filter(j => j !== null);
         
-        // Stop if we have enough results
-        if (journeys.length >= limit) {
-          break;
+        for (const journey of validJourneys) {
+          journeysFound++;
+          
+          // Handle offset (skip journeys until we reach the offset)
+          if (journeysSkipped < offset) {
+            journeysSkipped++;
+            continue;
+          }
+          
+          // Stop if we've collected enough journeys
+          if (journeys.length >= limit) {
+            break;
+          }
+          
+          journeys.push(journey);
         }
+        
+        if (journeys.length >= limit) break;
       }
       
-      // Stop if we have enough results
-      if (journeys.length >= limit) {
-        break;
-      }
+      if (journeys.length >= limit) break;
       
       if (iterations % 5 === 0) {
         console.log(`🔍 Search progress: ${keysScanned} keys scanned, ${journeysFound} journeys found, ${journeys.length} returned`);
@@ -259,12 +280,12 @@ async function performEfficientJourneySearch(redis, searchParams, maxTime) {
   }
 }
 
-// Filter function (applied during scanning for efficiency)
-function passesFilters(journey, cutoffTimestamp, journey_id, customer_email, order_id) {
-  // Date filter
+// FIXED: Filter function with proper date range filtering
+function passesDateAndFilters(journey, cutoffTimestamp, endTimestamp, journey_id, customer_email, order_id) {
+  // FIXED: Date filter - check if conversion is within the specified range
   if (journey.conversion_timestamp) {
     const journeyTime = new Date(journey.conversion_timestamp).getTime();
-    if (journeyTime < cutoffTimestamp) {
+    if (journeyTime < cutoffTimestamp || journeyTime > endTimestamp) {
       return false;
     }
   }
@@ -357,36 +378,46 @@ async function handleSampleQuery(redis, limit, maxTime) {
   }
 }
 
-// OPTIMIZED: Analytics query (efficient aggregation)
-async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
-  console.log(`📈 Analytics query: aggregating journey data for ${dateRangeDays} days...`);
+// UPDATED: Analytics query with proper date filtering
+async function handleAnalyticsQuery(redis, cutoffTimestamp, endTimestamp, maxTime) {
+  console.log(`📈 Analytics query: aggregating journey data from ${new Date(cutoffTimestamp).toISOString().split('T')[0]} to ${new Date(endTimestamp).toISOString().split('T')[0]}...`);
   
   const analyticsStartTime = Date.now();
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - dateRangeDays);
-  const cutoffTimestamp = cutoffDate.getTime();
   
   const analytics = {
     total_journeys: 0,
     multi_touchpoint_journeys: 0,
+    single_touchpoint_journeys: 0,
+    conversion_only_journeys: 0,
     cross_session_journeys: 0,
     cross_device_journeys: 0,
     total_conversion_value: 0,
     unique_customers: new Set(),
     sources: {},
-    attribution_methods: {},
-    journey_span_distribution: { under_1h: 0, '1-24h': 0, '1-7d': 0, over_7d: 0 },
-    touchpoint_distribution: { single: 0, '2-3': 0, '4-10': 0, over_10: 0 }
+    journey_span_distribution: {
+      under_1h: 0,
+      '1-24h': 0,
+      '1-7d': 0,
+      over_7d: 0
+    },
+    touchpoint_distribution: {
+      single: 0,
+      '2-3': 0,
+      '4-10': 0,
+      over_10: 0
+    }
   };
   
   let cursor = '0';
-  let keysScanned = 0;
   let iterations = 0;
-  const maxIterations = 15;
+  const maxIterations = 25;
   
   try {
     do {
-      if (Date.now() - analyticsStartTime > maxTime - 3000) break;
+      if (Date.now() - analyticsStartTime > maxTime - 3000) {
+        console.log('⏰ Time limit during analytics, stopping');
+        break;
+      }
       
       const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/100`);
       
@@ -396,26 +427,24 @@ async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
       
       cursor = scanResult.result[0];
       const keys = scanResult.result[1] || [];
-      keysScanned += keys.length;
       iterations++;
       
-      // Process keys in batches for analytics
-      const batchSize = 25;
+      // Process journeys in batches
+      const batchSize = 20;
       for (let i = 0; i < keys.length; i += batchSize) {
         if (Date.now() - analyticsStartTime > maxTime - 2000) break;
         
         const batch = keys.slice(i, i + batchSize);
-        
         const batchPromises = batch.map(async (key) => {
           try {
             const journeyData = await redis(`get/${key}`, 800);
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
               
-              // Date filter
+              // FIXED: Apply date filtering to analytics
               if (journey.conversion_timestamp) {
                 const journeyTime = new Date(journey.conversion_timestamp).getTime();
-                if (journeyTime >= cutoffTimestamp) {
+                if (journeyTime >= cutoffTimestamp && journeyTime <= endTimestamp) {
                   return journey;
                 }
               }
@@ -427,13 +456,16 @@ async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
         });
         
         const batchResults = await Promise.all(batchPromises);
-        const validJourneys = batchResults.filter(journey => journey !== null);
+        const validJourneys = batchResults.filter(j => j !== null);
         
-        // Aggregate analytics data
+        // Aggregate analytics for valid journeys
         for (const journey of validJourneys) {
           analytics.total_journeys++;
           
           if (journey.total_touchpoints > 1) analytics.multi_touchpoint_journeys++;
+          else if (journey.total_touchpoints === 1) analytics.single_touchpoint_journeys++;
+          else analytics.conversion_only_journeys++;
+          
           if (journey.cross_session_journey) analytics.cross_session_journeys++;
           if (journey.cross_device_journey) analytics.cross_device_journeys++;
           
@@ -479,7 +511,12 @@ async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
       body: JSON.stringify({
         success: true,
         analytics_query: true,
-        date_range_days: dateRangeDays,
+        date_filter: {
+          start_timestamp: cutoffTimestamp,
+          end_timestamp: endTimestamp,
+          start_date: new Date(cutoffTimestamp).toISOString().split('T')[0],
+          end_date: new Date(endTimestamp).toISOString().split('T')[0]
+        },
         analytics: {
           ...analytics,
           unique_customers: uniqueCustomerCount,
@@ -488,12 +525,14 @@ async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
           multi_touchpoint_rate: analytics.total_journeys > 0 ? 
             ((analytics.multi_touchpoint_journeys / analytics.total_journeys) * 100).toFixed(1) : 0,
           cross_session_rate: analytics.total_journeys > 0 ? 
-            ((analytics.cross_session_journeys / analytics.total_journeys) * 100).toFixed(1) : 0
+            ((analytics.cross_session_journeys / analytics.total_journeys) * 100).toFixed(1) : 0,
+          cross_device_rate: analytics.total_journeys > 0 ? 
+            ((analytics.cross_device_journeys / analytics.total_journeys) * 100).toFixed(1) : 0
         },
-        analytics_summary: {
-          journeys_analyzed: analytics.total_journeys,
-          keys_scanned: keysScanned,
-          processing_time_ms: processingTime
+        processing_summary: {
+          iterations_completed: iterations,
+          processing_time_ms: processingTime,
+          journeys_per_second: Math.round(analytics.total_journeys / (processingTime / 1000))
         }
       })
     };
@@ -507,23 +546,24 @@ async function handleAnalyticsQuery(redis, dateRangeDays, maxTime) {
   }
 }
 
-// CLEANUP: Duplicate detection and removal
+// OPTIMIZED: Duplicate cleanup
 async function handleDuplicateCleanup(redis, maxTime) {
-  console.log('🧹 Duplicate cleanup: detecting and removing duplicate journey records...');
+  console.log('🧹 Starting duplicate cleanup process...');
   
   const cleanupStartTime = Date.now();
-  const journeyMap = new Map(); // order_id -> [journey_keys]
   let cursor = '0';
   let keysScanned = 0;
   let duplicatesFound = 0;
   let duplicatesRemoved = 0;
+  const journeyMap = new Map(); // order_id -> journey_key
+  const duplicateOrderIds = [];
   
   try {
-    // Step 1: Scan all journeys and group by order_id
+    // Scan all journey keys
     do {
-      if (Date.now() - cleanupStartTime > maxTime - 10000) break;
+      if (Date.now() - cleanupStartTime > maxTime - 5000) break;
       
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/200`);
+      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/100`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -533,79 +573,45 @@ async function handleDuplicateCleanup(redis, maxTime) {
       const keys = scanResult.result[1] || [];
       keysScanned += keys.length;
       
-      // Group keys by order_id
-      const batchSize = 50;
+      // Check each key for duplicates
+      const batchSize = 20;
       for (let i = 0; i < keys.length; i += batchSize) {
-        if (Date.now() - cleanupStartTime > maxTime - 8000) break;
+        if (Date.now() - cleanupStartTime > maxTime - 3000) break;
         
         const batch = keys.slice(i, i + batchSize);
-        
         const batchPromises = batch.map(async (key) => {
           try {
-            const journeyData = await redis(`get/${key}`, 500);
+            const journeyData = await redis(`get/${key}`, 800);
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
-              if (journey.conversion_order_id) {
-                const orderId = journey.conversion_order_id;
-                if (!journeyMap.has(orderId)) {
-                  journeyMap.set(orderId, []);
-                }
-                journeyMap.get(orderId).push({
-                  key: key,
-                  created_at: journey.created_at,
-                  journey_id: journey.journey_id
-                });
+              const orderId = journey.conversion_order_id;
+              
+              if (journeyMap.has(orderId)) {
+                // Duplicate found
+                duplicatesFound++;
+                duplicateOrderIds.push(orderId);
+                
+                // Delete the duplicate
+                await redis(`del/${key}`, 1000);
+                duplicatesRemoved++;
+                
+                return { type: 'duplicate', orderId, key };
+              } else {
+                // First occurrence, keep it
+                journeyMap.set(orderId, key);
+                return { type: 'unique', orderId, key };
               }
             }
           } catch (parseError) {
             // Skip invalid data
           }
+          return null;
         });
         
         await Promise.all(batchPromises);
       }
       
     } while (cursor !== '0');
-    
-    // Step 2: Find and remove duplicates
-    console.log(`🔍 Analyzing ${journeyMap.size} unique order IDs for duplicates...`);
-    
-    const duplicateOrderIds = [];
-    for (const [orderId, journeys] of journeyMap.entries()) {
-      if (journeys.length > 1) {
-        duplicatesFound += journeys.length - 1;
-        duplicateOrderIds.push({
-          order_id: orderId,
-          journey_count: journeys.length,
-          journeys: journeys
-        });
-      }
-    }
-    
-    console.log(`🚨 Found ${duplicatesFound} duplicate journeys across ${duplicateOrderIds.length} order IDs`);
-    
-    // Step 3: Remove duplicates (keep the most recent)
-    for (const duplicate of duplicateOrderIds) {
-      if (Date.now() - cleanupStartTime > maxTime - 2000) break;
-      
-      // Sort by created_at (keep most recent)
-      const sortedJourneys = duplicate.journeys.sort((a, b) => 
-        new Date(b.created_at) - new Date(a.created_at)
-      );
-      
-      // Remove all but the most recent
-      const journeysToRemove = sortedJourneys.slice(1);
-      
-      for (const journeyToRemove of journeysToRemove) {
-        try {
-          await redis(`del/${journeyToRemove.key}`);
-          duplicatesRemoved++;
-          console.log(`🗑️  Removed duplicate: ${journeyToRemove.key}`);
-        } catch (deleteError) {
-          console.warn(`⚠️ Failed to delete ${journeyToRemove.key}: ${deleteError.message}`);
-        }
-      }
-    }
     
     const processingTime = Date.now() - cleanupStartTime;
     console.log(`✅ Cleanup complete: ${duplicatesRemoved} duplicates removed in ${processingTime}ms`);
