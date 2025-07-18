@@ -520,20 +520,94 @@ function buildCustomerJourneyEmbedded(pageviews, conversion) {
   };
 }
 
-// Simplified search functions (basic Redis scans)
+// FIXED: Proper pageview search functions using correct Redis patterns
 async function searchBySessionId(redis, sessionId, windowStart, conversionTime) {
-  // Implementation would scan pageview indexes for session matches
-  return []; // Simplified for now
+  try {
+    // Try direct session index lookup first
+    const sessionKey = `attribution_session_${sessionId}`;
+    const sessionResult = await redis(`get/${sessionKey}`);
+    
+    if (sessionResult.result) {
+      const attributionResult = await redis(`get/${sessionResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          pageview._redis_key = sessionResult.result;
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.warn('⚠️ Session search failed:', error);
+    return [];
+  }
 }
 
 async function searchByDeviceSignature(redis, deviceSignature, windowStart, conversionTime) {
-  // Implementation would scan pageview indexes for device matches  
-  return []; // Simplified for now
+  try {
+    const deviceKey = `attribution_fp_${deviceSignature}`;
+    const deviceResult = await redis(`get/${deviceKey}`);
+    
+    if (deviceResult.result) {
+      const attributionResult = await redis(`get/${deviceResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          pageview._redis_key = deviceResult.result;
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.warn('⚠️ Device signature search failed:', error);
+    return [];
+  }
 }
 
 async function searchByIpAddress(redis, ipAddress, windowStart, conversionTime) {
-  // Implementation would scan pageview indexes for IP matches
-  return []; // Simplified for now
+  try {
+    // Encode IP for Redis key (replace : with _ for IPv6)
+    const encodedIp = ipAddress.replace(/:/g, '_');
+    const ipKey = `attribution_ip_${encodedIp}`;
+    const ipResult = await redis(`get/${ipKey}`);
+    
+    if (ipResult.result) {
+      const attributionKeys = Array.isArray(ipResult.result) ? ipResult.result : [ipResult.result];
+      const matches = [];
+      
+      for (const key of attributionKeys.slice(0, 3)) { // Limit to 3 results for performance
+        try {
+          const attributionResult = await redis(`get/${key}`);
+          if (attributionResult.result) {
+            const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+            const pageviewTime = new Date(pageview.timestamp).getTime();
+            
+            if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+              pageview._redis_key = key;
+              matches.push(pageview);
+            }
+          }
+        } catch (parseError) {
+          console.warn(`⚠️ Failed to parse pageview for key ${key}`);
+        }
+      }
+      
+      return matches;
+    }
+    
+    return [];
+  } catch (error) {
+    console.warn('⚠️ IP address search failed:', error);
+    return [];
+  }
 }
 
 // Helper function for Redis initialization
