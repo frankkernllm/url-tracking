@@ -1,7 +1,6 @@
 // attribution-model-calculator.js
 // Multi-Touch Attribution Calculator - 5 Attribution Models
-// Path: netlify/functions/attribution-model-calculator.js
-// Purpose: Calculate attribution across multiple models for customer journeys
+// FIXED VERSION: Includes zero-value conversions (free trials)
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -123,7 +122,7 @@ async function analyzeSingleJourney(redis, journeyId, timeDecayHalfLife) {
     }
     
     const journey = JSON.parse(decodeURIComponent(journeyData.result));
-    console.log(`📊 Journey loaded: ${journey.total_touchpoints} touchpoints, $${journey.conversion_value} value`);
+    console.log(`📊 Journey loaded: ${journey.total_touchpoints} touchpoints, $${journey.conversion_value || 0} value`);
     
     // Calculate all attribution models
     const attributionResults = calculateAllAttributionModels(journey, timeDecayHalfLife);
@@ -131,10 +130,10 @@ async function analyzeSingleJourney(redis, journeyId, timeDecayHalfLife) {
     return {
       journey_id: journeyId,
       customer_email: journey.customer_email,
-      conversion_value: journey.conversion_value,
+      conversion_value: journey.conversion_value || 0,
       total_touchpoints: journey.total_touchpoints,
       journey_span_hours: journey.journey_span_hours,
-      touchpoint_details: journey.touchpoints.map(tp => ({
+      touchpoint_details: (journey.touchpoints || []).map(tp => ({
         timestamp: tp.timestamp,
         source: tp.source,
         campaign: tp.campaign,
@@ -159,7 +158,7 @@ async function analyzeBulkAttribution(redis, options) {
   
   console.log(`🔍 Loading journeys for bulk analysis...`);
   
-  // Load journeys from Redis
+  // Load journeys from Redis (now includes zero-value conversions)
   const journeys = await loadJourneysForAttribution(redis, date_range_days, limit);
   console.log(`📊 Loaded ${journeys.length} journeys for attribution analysis`);
   
@@ -189,16 +188,16 @@ async function analyzeBulkAttribution(redis, options) {
       allAttributionResults.push({
         journey_id: journey.journey_id,
         customer_email: journey.customer_email,
-        conversion_value: journey.conversion_value,
+        conversion_value: journey.conversion_value || 0,
         total_touchpoints: journey.total_touchpoints,
         attribution_models: attributionResult
       });
       
-      totalConversionValue += journey.conversion_value;
+      totalConversionValue += (journey.conversion_value || 0);
       
       // Aggregate attribution by source if requested
       if (source_comparison) {
-        aggregateSourceAttribution(sourceAttribution, attributionResult, journey.conversion_value);
+        aggregateSourceAttribution(sourceAttribution, attributionResult, journey.conversion_value || 0);
       }
       
     } catch (journeyError) {
@@ -212,9 +211,14 @@ async function analyzeBulkAttribution(redis, options) {
   const results = {
     total_journeys: filteredJourneys.length,
     total_conversion_value: totalConversionValue,
-    average_conversion_value: totalConversionValue / filteredJourneys.length,
+    average_conversion_value: filteredJourneys.length > 0 ? totalConversionValue / filteredJourneys.length : 0,
     attribution_summary: aggregatedResults,
     model_comparison: generateModelComparison(aggregatedResults),
+    journey_value_breakdown: {
+      free_trials: filteredJourneys.filter(j => (j.conversion_value || 0) === 0).length,
+      paid_conversions: filteredJourneys.filter(j => (j.conversion_value || 0) > 0).length,
+      total_journeys: filteredJourneys.length
+    }
   };
   
   // Add source comparison if requested
@@ -230,10 +234,89 @@ async function analyzeBulkAttribution(redis, options) {
   return results;
 }
 
+// FIXED: Load journeys for attribution analysis - Include zero-value conversions
+async function loadJourneysForAttribution(redis, dateRangeDays, limit) {
+  console.log(`🔍 Scanning for customer journeys (${dateRangeDays} days, limit ${limit})...`);
+  
+  const journeys = [];
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - dateRangeDays);
+  
+  let cursor = '0';
+  let iterations = 0;
+  const maxIterations = 20;
+  
+  do {
+    try {
+      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/500`);
+      
+      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        break;
+      }
+      
+      cursor = scanResult.result[0];
+      const keys = scanResult.result[1] || [];
+      iterations++;
+      
+      // Load journey data in batches
+      const batchSize = 50;
+      for (let i = 0; i < keys.length && journeys.length < limit; i += batchSize) {
+        const batch = keys.slice(i, i + batchSize);
+        
+        const batchPromises = batch.map(async (key) => {
+          try {
+            const journeyData = await redis(`get/${key}`);
+            if (journeyData?.result) {
+              const journey = JSON.parse(decodeURIComponent(journeyData.result));
+              
+              // FIXED: Remove conversion_value > 0 filter to include free trials
+              const conversionDate = new Date(journey.conversion_timestamp);
+              if (conversionDate >= cutoffDate) {
+                // Ensure conversion_value exists (default to 0 for free trials)
+                if (typeof journey.conversion_value === 'undefined' || journey.conversion_value === null) {
+                  journey.conversion_value = 0;
+                }
+                return journey;
+              }
+            }
+          } catch (parseError) {
+            console.warn(`⚠️ Failed to parse journey data for key: ${key}`);
+          }
+          return null;
+        });
+        
+        const batchResults = await Promise.all(batchPromises);
+        const validJourneys = batchResults.filter(j => j !== null);
+        journeys.push(...validJourneys);
+        
+        if (journeys.length >= limit) break;
+      }
+      
+    } catch (scanError) {
+      console.log(`⚠️ Journey scan error: ${scanError.message}`);
+      break;
+    }
+    
+  } while (cursor !== '0' && iterations < maxIterations && journeys.length < limit);
+  
+  console.log(`✅ Loaded ${journeys.length} journeys for attribution analysis`);
+  console.log(`📊 Date range: ${cutoffDate.toISOString().split('T')[0]} to ${new Date().toISOString().split('T')[0]}`);
+  
+  // Log breakdown of conversion values for debugging
+  const valueBreakdown = {
+    zero_value: journeys.filter(j => (j.conversion_value || 0) === 0).length,
+    paid_value: journeys.filter(j => (j.conversion_value || 0) > 0).length,
+    total_value: journeys.reduce((sum, j) => sum + (j.conversion_value || 0), 0)
+  };
+  console.log(`💰 Value breakdown: ${valueBreakdown.zero_value} free trials, ${valueBreakdown.paid_value} paid conversions, $${valueBreakdown.total_value} total`);
+  
+  return journeys;
+}
+
 // Core attribution calculation function
 function calculateAllAttributionModels(journey, timeDecayHalfLife = 168) {
   const touchpoints = journey.touchpoints || [];
-  const conversionValue = journey.conversion_value || 0;
+  const conversionValue = journey.conversion_value || 0; // Handle undefined/null values
   
   // Filter out the conversion point itself for attribution (keep only pageview touchpoints)
   const attributableTouchpoints = touchpoints.filter(tp => !tp.is_conversion);
@@ -246,7 +329,8 @@ function calculateAllAttributionModels(journey, timeDecayHalfLife = 168) {
       linear: [{ source: 'direct', credit: conversionValue }],
       time_decay: [{ source: 'direct', credit: conversionValue }],
       position_based: [{ source: 'direct', credit: conversionValue }],
-      model_type: 'conversion_only'
+      model_type: 'conversion_only',
+      touchpoint_count: 0
     };
   }
   
@@ -312,13 +396,12 @@ function calculateLinearAttribution(touchpoints, conversionValue) {
 }
 
 // Time-Decay Attribution: More credit to recent touchpoints
-function calculateTimeDecayAttribution(touchpoints, conversionValue, halfLifeHours) {
+function calculateTimeDecayAttribution(touchpoints, conversionValue, halfLifeHours = 168) {
   if (touchpoints.length === 0) return [];
   
-  // Get conversion time (from the journey end or use current time)
-  const conversionTime = new Date(touchpoints[touchpoints.length - 1].timestamp).getTime();
+  const conversionTime = new Date().getTime(); // Use current time as conversion reference
   
-  // Calculate decay weights for each touchpoint
+  // Calculate weights based on time decay
   const weights = touchpoints.map(tp => {
     const touchpointTime = new Date(tp.timestamp).getTime();
     const hoursBeforeConversion = (conversionTime - touchpointTime) / (1000 * 60 * 60);
@@ -434,82 +517,53 @@ function calculatePositionBasedAttribution(touchpoints, conversionValue) {
   return results;
 }
 
-// Load journeys for attribution analysis
-async function loadJourneysForAttribution(redis, dateRangeDays, limit) {
-  console.log(`🔍 Scanning for customer journeys (${dateRangeDays} days, limit ${limit})...`);
+// Calculate aggregated attribution across all journeys
+function calculateAggregatedAttribution(allAttributionResults) {
+  const aggregated = {
+    first_click: 0,
+    last_click: 0,
+    linear: 0,
+    time_decay: 0,
+    position_based: 0
+  };
   
-  const journeys = [];
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - dateRangeDays);
+  allAttributionResults.forEach(result => {
+    aggregated.first_click += sumModelCredit(result.attribution_models.first_click);
+    aggregated.last_click += sumModelCredit(result.attribution_models.last_click);
+    aggregated.linear += sumModelCredit(result.attribution_models.linear);
+    aggregated.time_decay += sumModelCredit(result.attribution_models.time_decay);
+    aggregated.position_based += sumModelCredit(result.attribution_models.position_based);
+  });
   
-  let cursor = '0';
-  let iterations = 0;
-  const maxIterations = 20;
-  
-  do {
-    try {
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/500`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      iterations++;
-      
-      // Load journey data in batches
-      const batchSize = 50;
-      for (let i = 0; i < keys.length && journeys.length < limit; i += batchSize) {
-        const batch = keys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const journeyData = await redis(`get/${key}`);
-            if (journeyData?.result) {
-              const journey = JSON.parse(decodeURIComponent(journeyData.result));
-              
-              // Filter by date range
-              const conversionDate = new Date(journey.conversion_timestamp);
-              if (conversionDate >= cutoffDate && journey.conversion_value > 0) {
-                return journey;
-              }
-            }
-          } catch (parseError) {
-            // Skip invalid journey data
-          }
-          return null;
-        });
-        
-        const batchResults = await Promise.all(batchPromises);
-        const validJourneys = batchResults.filter(j => j !== null);
-        journeys.push(...validJourneys);
-        
-        if (journeys.length >= limit) break;
-      }
-      
-    } catch (scanError) {
-      console.log(`⚠️ Journey scan error: ${scanError.message}`);
-      break;
-    }
-    
-  } while (cursor !== '0' && iterations < maxIterations && journeys.length < limit);
-  
-  // Sort by conversion timestamp (most recent first)
-  journeys.sort((a, b) => new Date(b.conversion_timestamp) - new Date(a.conversion_timestamp));
-  
-  return journeys.slice(0, limit);
+  return aggregated;
 }
 
-// Aggregate source attribution across all models
+// Helper function to sum credit across touchpoints in a model
+function sumModelCredit(modelResults) {
+  if (!Array.isArray(modelResults)) return 0;
+  return modelResults.reduce((sum, touchpoint) => sum + (touchpoint.credit || 0), 0);
+}
+
+// Generate model comparison
+function generateModelComparison(aggregatedResults) {
+  const models = Object.keys(aggregatedResults);
+  const maxValue = Math.max(...Object.values(aggregatedResults));
+  
+  return models.map(model => ({
+    model_name: model,
+    total_attributed_value: aggregatedResults[model],
+    percentage_of_max: maxValue > 0 ? ((aggregatedResults[model] / maxValue) * 100).toFixed(2) : "0.00"
+  }));
+}
+
+// Aggregate attribution by source across all models
 function aggregateSourceAttribution(sourceAttribution, attributionResult, conversionValue) {
   const models = ['first_click', 'last_click', 'linear', 'time_decay', 'position_based'];
   
   models.forEach(model => {
     const modelResults = attributionResult[model] || [];
-    
-    modelResults.forEach(result => {
-      const source = result.source || 'unknown';
+    modelResults.forEach(touchpoint => {
+      const source = touchpoint.source || 'unknown';
       
       if (!sourceAttribution[source]) {
         sourceAttribution[source] = {
@@ -521,78 +575,39 @@ function aggregateSourceAttribution(sourceAttribution, attributionResult, conver
         };
       }
       
-      sourceAttribution[source][model] += result.credit || 0;
+      sourceAttribution[source][model] += touchpoint.credit || 0;
     });
   });
 }
 
-// Calculate aggregated attribution across all journeys
-function calculateAggregatedAttribution(allResults) {
-  const aggregated = {
-    first_click: 0,
-    last_click: 0,
-    linear: 0,
-    time_decay: 0,
-    position_based: 0
-  };
-  
-  allResults.forEach(result => {
-    const models = result.attribution_models;
-    
-    // Sum up total credit for each model
-    aggregated.first_click += sumModelCredit(models.first_click);
-    aggregated.last_click += sumModelCredit(models.last_click);
-    aggregated.linear += sumModelCredit(models.linear);
-    aggregated.time_decay += sumModelCredit(models.time_decay);
-    aggregated.position_based += sumModelCredit(models.position_based);
-  });
-  
-  return aggregated;
-}
-
-// Helper function to sum credit from a model result
-function sumModelCredit(modelResults) {
-  if (!Array.isArray(modelResults)) return 0;
-  return modelResults.reduce((sum, result) => sum + (result.credit || 0), 0);
-}
-
-// Generate model comparison insights
-function generateModelComparison(aggregatedResults) {
-  const models = Object.keys(aggregatedResults);
-  const totalValue = Math.max(...Object.values(aggregatedResults));
-  
-  return models.map(model => ({
-    model_name: model,
-    total_attributed_value: aggregatedResults[model],
-    percentage_of_max: ((aggregatedResults[model] / totalValue) * 100).toFixed(2)
-  })).sort((a, b) => b.total_attributed_value - a.total_attributed_value);
-}
-
 // Generate source comparison across models
 function generateSourceComparison(sourceAttribution, totalConversionValue) {
-  const sources = Object.keys(sourceAttribution);
-  
-  return sources.map(source => {
+  return Object.keys(sourceAttribution).map(source => {
     const sourceData = sourceAttribution[source];
     const models = Object.keys(sourceData);
     
     const comparison = {
       source: source,
-      attribution_by_model: {}
+      attribution_by_model: {},
+      attribution_variance: 0,
+      most_favorable_model: '',
+      least_favorable_model: ''
     };
     
+    // Calculate attribution by model with percentages
     models.forEach(model => {
+      const creditedValue = sourceData[model];
       comparison.attribution_by_model[model] = {
-        credited_value: sourceData[model],
-        percentage_of_total: ((sourceData[model] / totalConversionValue) * 100).toFixed(2)
+        credited_value: creditedValue,
+        percentage_of_total: totalConversionValue > 0 ? ((creditedValue / totalConversionValue) * 100).toFixed(2) : "0.00"
       };
     });
     
-    // Calculate variance across models for this source
+    // Calculate variance (difference between max and min attribution)
     const values = models.map(model => sourceData[model]);
-    const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
-    const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
-    comparison.attribution_variance = Math.sqrt(variance);
+    comparison.attribution_variance = Math.max(...values) - Math.min(...values);
+    
+    // Find most and least favorable models
     comparison.most_favorable_model = models.reduce((max, model) => 
       sourceData[model] > sourceData[max] ? model : max
     );
