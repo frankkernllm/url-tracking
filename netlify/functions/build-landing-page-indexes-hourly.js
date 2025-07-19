@@ -1,6 +1,5 @@
-// netlify/functions/scheduled-landing-page-indexing.js
+// netlify/functions/build-landing-page-indexes-hourly.js
 
-const { schedule } = require('@netlify/functions');
 const { createClient } = require('@upstash/redis');
 
 const redis = createClient({
@@ -132,19 +131,29 @@ const buildHourlyLandingPageIndexes = async () => {
   }
 };
 
-// Export the scheduled handler - this is the key fix!
-exports.handler = schedule('0 * * * *', async (event) => {
-  console.log(`🚀 Scheduled landing page indexing triggered at ${new Date().toISOString()}`);
+exports.handler = async (event, context) => {
+  // API Key authentication
+  const apiKey = event.headers['x-api-key'];
+  if (apiKey !== process.env.OJOY_API_KEY) {
+    return {
+      statusCode: 401,
+      body: JSON.stringify({ error: 'Unauthorized' })
+    };
+  }
+
+  console.log(`🚀 Manual landing page indexing triggered at ${new Date().toISOString()}`);
   
   try {
     const result = await buildHourlyLandingPageIndexes();
-    console.log(`✅ Scheduled indexing completed:`, result.summary || result.status);
+    console.log(`✅ Manual indexing completed:`, result.summary || result.status);
+    
     return {
       statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(result)
     };
   } catch (error) {
-    console.error(`❌ Scheduled indexing failed:`, error);
+    console.error(`❌ Manual indexing failed:`, error);
     return {
       statusCode: 500,
       body: JSON.stringify({
@@ -154,4 +163,4 @@ exports.handler = schedule('0 * * * *', async (event) => {
       })
     };
   }
-});
+};
