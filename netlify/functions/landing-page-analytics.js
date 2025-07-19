@@ -3,30 +3,46 @@
 const debugRedisKeys = async (redis, date) => {
   console.log(`Debug: Checking Redis keys for date ${date}`);
   
-  // Check what landing page hourly keys actually exist
+  // Check pageview indexes that should contain the source data
+  const allPageviewKeys = await redis.keys('pageview_index_ip:*');
+  console.log(`Found ${allPageviewKeys.length} total pageview_index_ip keys`);
+  
+  // Check landing page hourly keys
   const allLandingPageKeys = await redis.keys('landing_page_hourly:*');
   console.log(`Found ${allLandingPageKeys.length} total landing_page_hourly keys`);
   
-  // Check a few specific hours for the requested date
-  const testHours = ['00', '06', '12', '18'];
-  const debugResults = [];
+  // Sample a few pageview indexes to see their structure and timestamps
+  const samplePageviewKeys = allPageviewKeys.slice(0, 5);
+  const samplePageviewData = [];
   
-  for (const hour of testHours) {
-    const hourKey = `landing_page_hourly:${date}-${hour}`;
-    console.log(`Checking key: ${hourKey}`);
-    
-    const data = await redis.get(hourKey);
-    debugResults.push({
-      hour_key: hourKey,
-      exists: !!data,
-      data_sample: data ? JSON.parse(data) : null
-    });
+  for (const key of samplePageviewKeys) {
+    const data = await redis.get(key);
+    if (data) {
+      const parsed = JSON.parse(data);
+      samplePageviewData.push({
+        key: key,
+        timestamp: parsed.timestamp,
+        landing_page: parsed.landing_page,
+        ip_address: parsed.ip_address,
+        source: parsed.source
+      });
+    }
   }
   
+  // Check a specific hour that should have data
+  const hourKey = `landing_page_hourly:${date}-11`; // 11 AM
+  const hourData = await redis.get(hourKey);
+  
   return {
-    total_keys_found: allLandingPageKeys.length,
-    sample_keys: allLandingPageKeys.slice(0, 10), // Show first 10 keys
-    test_results: debugResults
+    total_pageview_index_keys: allPageviewKeys.length,
+    total_landing_page_keys: allLandingPageKeys.length,
+    sample_pageview_data: samplePageviewData,
+    test_hour_key: hourKey,
+    test_hour_exists: !!hourData,
+    test_hour_data: hourData ? JSON.parse(hourData) : null,
+    issue_diagnosis: allPageviewKeys.length === 0 ? 
+      "NO PAGEVIEW INDEXES FOUND - Run build-indexes-complete first" : 
+      "Pageview indexes exist - check timestamp format mismatch"
   };
 };
 
@@ -60,41 +76,48 @@ const getHourlyAnalytics = async (redis, startDate, endDate, landingPageFilter, 
   }
   
   console.log(`Querying ${hourlyKeys.length} hourly indexes from ${startDate} to ${endDate}`);
-  console.log(`Sample keys: ${hourlyKeys.slice(0, 3).join(', ')}`);
   
   const hourlyData = await redis.mget(hourlyKeys);
   const results = [];
+  let keysWithData = 0;
+  let keysWithLandingPages = 0;
   
   hourlyData.forEach((data, index) => {
     if (data) {
+      keysWithData++;
       try {
         const parsed = JSON.parse(data);
         
-        if (landingPageFilter) {
-          // Filter for specific landing page
-          const pageData = parsed.landing_pages[landingPageFilter];
-          if (pageData) {
-            results.push({
-              hour: parsed.hour,
-              landing_page: landingPageFilter,
-              unique_pageviews: pageData.count,
-              percentage: parseFloat(pageData.percentage),
-              sources: pageData.sources,
-              total_unique_ips_in_hour: parsed.total_unique_ips
+        // Count keys that have actual landing page data
+        if (parsed.landing_pages && Object.keys(parsed.landing_pages).length > 0) {
+          keysWithLandingPages++;
+          
+          if (landingPageFilter) {
+            // Filter for specific landing page
+            const pageData = parsed.landing_pages[landingPageFilter];
+            if (pageData) {
+              results.push({
+                hour: parsed.hour,
+                landing_page: landingPageFilter,
+                unique_pageviews: pageData.count,
+                percentage: parseFloat(pageData.percentage),
+                sources: pageData.sources,
+                total_unique_ips_in_hour: parsed.total_unique_ips
+              });
+            }
+          } else {
+            // Return all landing pages for this hour
+            Object.entries(parsed.landing_pages).forEach(([page, pageData]) => {
+              results.push({
+                hour: parsed.hour,
+                landing_page: page,
+                unique_pageviews: pageData.count,
+                percentage: parseFloat(pageData.percentage),
+                sources: pageData.sources,
+                total_unique_ips_in_hour: parsed.total_unique_ips
+              });
             });
           }
-        } else {
-          // Return all landing pages for this hour
-          Object.entries(parsed.landing_pages).forEach(([page, pageData]) => {
-            results.push({
-              hour: parsed.hour,
-              landing_page: page,
-              unique_pageviews: pageData.count,
-              percentage: parseFloat(pageData.percentage),
-              sources: pageData.sources,
-              total_unique_ips_in_hour: parsed.total_unique_ips
-            });
-          });
         }
       } catch (parseError) {
         console.error(`Error parsing hourly data for key ${hourlyKeys[index]}:`, parseError);
@@ -120,7 +143,8 @@ const getHourlyAnalytics = async (redis, startDate, endDate, landingPageFilter, 
     landing_page_filter: landingPageFilter,
     total_records: results.length,
     keys_queried: hourlyKeys.length,
-    keys_with_data: hourlyData.filter(d => d).length,
+    keys_with_data: keysWithData,
+    keys_with_landing_pages: keysWithLandingPages,
     data: results.slice(0, limit)
   };
 };
@@ -129,11 +153,27 @@ const getDailyAnalytics = async (redis, startDate, endDate, landingPageFilter, l
   // Get hourly data first
   const hourlyResults = await getHourlyAnalytics(redis, startDate, endDate, landingPageFilter, 99999, 'hour', 'asc');
   
+  if (hourlyResults.total_records === 0) {
+    return {
+      granularity: 'daily',
+      date_range: { start: startDate, end: endDate },
+      landing_page_filter: landingPageFilter,
+      total_records: 0,
+      keys_queried: hourlyResults.keys_queried,
+      keys_with_data: hourlyResults.keys_with_data,
+      keys_with_landing_pages: hourlyResults.keys_with_landing_pages,
+      diagnosis: hourlyResults.keys_with_data > 0 && hourlyResults.keys_with_landing_pages === 0 ? 
+        "Hours processed but no landing page data found - check pageview_index_ip data" : 
+        "No hourly data found",
+      data: []
+    };
+  }
+  
   // Aggregate by day and landing page
   const dailyAggregations = {};
   
   hourlyResults.data.forEach(hourData => {
-    const date = hourData.hour.substring(0, 10); // Extract YYYY-MM-DD
+    const date = hourData.hour.substring(0, 10);
     const page = hourData.landing_page;
     
     if (!dailyAggregations[date]) {
@@ -149,15 +189,13 @@ const getDailyAnalytics = async (redis, startDate, endDate, landingPageFilter, l
       };
     }
     
-    // Aggregate the data
     dailyAggregations[date][page].unique_pageviews += hourData.unique_pageviews;
     dailyAggregations[date][page].total_hours_with_data += 1;
     dailyAggregations[date][page].hourly_breakdown.push({
-      hour: hourData.hour.substring(11), // Just the hour part
+      hour: hourData.hour.substring(11),
       unique_pageviews: hourData.unique_pageviews
     });
     
-    // Merge sources
     Object.entries(hourData.sources || {}).forEach(([source, count]) => {
       dailyAggregations[date][page].sources[source] = 
         (dailyAggregations[date][page].sources[source] || 0) + count;
@@ -180,7 +218,6 @@ const getDailyAnalytics = async (redis, startDate, endDate, landingPageFilter, l
     });
   });
   
-  // Sort results
   results.sort((a, b) => {
     const aVal = sortBy === 'landing_page' || sortBy === 'date' ? a[sortBy] : parseFloat(a[sortBy]) || 0;
     const bVal = sortBy === 'landing_page' || sortBy === 'date' ? b[sortBy] : parseFloat(b[sortBy]) || 0;
@@ -199,53 +236,8 @@ const getDailyAnalytics = async (redis, startDate, endDate, landingPageFilter, l
     total_records: results.length,
     keys_queried: hourlyResults.keys_queried,
     keys_with_data: hourlyResults.keys_with_data,
+    keys_with_landing_pages: hourlyResults.keys_with_landing_pages,
     data: results.slice(0, limit)
-  };
-};
-
-const getTopLandingPages = async (redis, startDate, endDate, limit = 10) => {
-  const dailyResults = await getDailyAnalytics(redis, startDate, endDate, null, 99999, 'unique_pageviews', 'desc');
-  
-  // Aggregate by landing page across all days
-  const pageAggregations = {};
-  
-  dailyResults.data.forEach(dayData => {
-    const page = dayData.landing_page;
-    
-    if (!pageAggregations[page]) {
-      pageAggregations[page] = {
-        landing_page: page,
-        total_unique_pageviews: 0,
-        days_with_data: 0,
-        total_sources: {},
-        avg_daily_pageviews: 0
-      };
-    }
-    
-    pageAggregations[page].total_unique_pageviews += dayData.unique_pageviews;
-    pageAggregations[page].days_with_data += 1;
-    
-    // Merge sources
-    Object.entries(dayData.sources || {}).forEach(([source, count]) => {
-      pageAggregations[page].total_sources[source] = 
-        (pageAggregations[page].total_sources[source] || 0) + count;
-    });
-  });
-  
-  // Calculate averages and convert to array
-  const topPages = Object.values(pageAggregations).map(page => ({
-    ...page,
-    avg_daily_pageviews: (page.total_unique_pageviews / page.days_with_data).toFixed(1),
-    top_source: Object.entries(page.total_sources).sort(([,a], [,b]) => b - a)[0]?.[0] || 'unknown'
-  }));
-  
-  // Sort by total unique pageviews
-  topPages.sort((a, b) => b.total_unique_pageviews - a.total_unique_pageviews);
-  
-  return {
-    date_range: { start: startDate, end: endDate },
-    total_pages: topPages.length,
-    data: topPages.slice(0, limit)
   };
 };
 
@@ -325,21 +317,15 @@ exports.handler = async (event, context) => {
   try {
     console.log(`Landing page analytics query: ${action} from ${start_date} to ${end_date}`);
     
-    let analytics;
-    
-    if (action === 'top_pages') {
-      analytics = await getTopLandingPages(redis, start_date, end_date, parseInt(limit));
-    } else {
-      analytics = await getLandingPageAnalytics(redis, {
-        startDate: start_date,
-        endDate: end_date,
-        granularity,
-        landingPage: landing_page,
-        limit: parseInt(limit),
-        sortBy: sort_by,
-        sortOrder: sort_order
-      });
-    }
+    const analytics = await getLandingPageAnalytics(redis, {
+      startDate: start_date,
+      endDate: end_date,
+      granularity,
+      landingPage: landing_page,
+      limit: parseInt(limit),
+      sortBy: sort_by,
+      sortOrder: sort_order
+    });
 
     return {
       statusCode: 200,
