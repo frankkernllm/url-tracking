@@ -1,14 +1,44 @@
 // netlify/functions/landing-page-analytics.js
 
+const debugRedisKeys = async (redis, date) => {
+  console.log(`Debug: Checking Redis keys for date ${date}`);
+  
+  // Check what landing page hourly keys actually exist
+  const allLandingPageKeys = await redis.keys('landing_page_hourly:*');
+  console.log(`Found ${allLandingPageKeys.length} total landing_page_hourly keys`);
+  
+  // Check a few specific hours for the requested date
+  const testHours = ['00', '06', '12', '18'];
+  const debugResults = [];
+  
+  for (const hour of testHours) {
+    const hourKey = `landing_page_hourly:${date}-${hour}`;
+    console.log(`Checking key: ${hourKey}`);
+    
+    const data = await redis.get(hourKey);
+    debugResults.push({
+      hour_key: hourKey,
+      exists: !!data,
+      data_sample: data ? JSON.parse(data) : null
+    });
+  }
+  
+  return {
+    total_keys_found: allLandingPageKeys.length,
+    sample_keys: allLandingPageKeys.slice(0, 10), // Show first 10 keys
+    test_results: debugResults
+  };
+};
+
 const getLandingPageAnalytics = async (redis, options) => {
   const {
     startDate,
     endDate,
-    granularity = 'daily', // 'hourly' or 'daily'
-    landingPage = null,    // Filter specific landing page
+    granularity = 'daily',
+    landingPage = null,
     limit = 100,
-    sortBy = 'unique_pageviews', // 'unique_pageviews', 'percentage', 'landing_page'
-    sortOrder = 'desc'     // 'asc' or 'desc'
+    sortBy = 'unique_pageviews',
+    sortOrder = 'desc'
   } = options;
 
   if (granularity === 'hourly') {
@@ -30,6 +60,7 @@ const getHourlyAnalytics = async (redis, startDate, endDate, landingPageFilter, 
   }
   
   console.log(`Querying ${hourlyKeys.length} hourly indexes from ${startDate} to ${endDate}`);
+  console.log(`Sample keys: ${hourlyKeys.slice(0, 3).join(', ')}`);
   
   const hourlyData = await redis.mget(hourlyKeys);
   const results = [];
@@ -66,7 +97,7 @@ const getHourlyAnalytics = async (redis, startDate, endDate, landingPageFilter, 
           });
         }
       } catch (parseError) {
-        console.error(`Error parsing hourly data:`, parseError);
+        console.error(`Error parsing hourly data for key ${hourlyKeys[index]}:`, parseError);
       }
     }
   });
@@ -88,6 +119,8 @@ const getHourlyAnalytics = async (redis, startDate, endDate, landingPageFilter, 
     date_range: { start: startDate, end: endDate },
     landing_page_filter: landingPageFilter,
     total_records: results.length,
+    keys_queried: hourlyKeys.length,
+    keys_with_data: hourlyData.filter(d => d).length,
     data: results.slice(0, limit)
   };
 };
@@ -164,6 +197,8 @@ const getDailyAnalytics = async (redis, startDate, endDate, landingPageFilter, l
     date_range: { start: startDate, end: endDate },
     landing_page_filter: landingPageFilter,
     total_records: results.length,
+    keys_queried: hourlyResults.keys_queried,
+    keys_with_data: hourlyResults.keys_with_data,
     data: results.slice(0, limit)
   };
 };
@@ -241,6 +276,14 @@ exports.handler = async (event, context) => {
       });
       const data = await response.json();
       return data.result || [];
+    },
+    
+    async keys(pattern) {
+      const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/keys/${encodeURIComponent(pattern)}`, {
+        headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await response.json();
+      return data.result || [];
     }
   };
 
@@ -252,8 +295,32 @@ exports.handler = async (event, context) => {
     limit = 100,
     sort_by = 'unique_pageviews',
     sort_order = 'desc',
-    action = 'analytics' // 'analytics' or 'top_pages'
+    action = 'analytics'
   } = event.queryStringParameters || {};
+
+  // Debug mode
+  if (event.queryStringParameters?.debug === 'true') {
+    try {
+      const debugData = await debugRedisKeys(redis, start_date);
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          debug: true,
+          date_requested: start_date,
+          debug_results: debugData
+        })
+      };
+    } catch (debugError) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          debug: true,
+          error: debugError.message
+        })
+      };
+    }
+  }
 
   try {
     console.log(`Landing page analytics query: ${action} from ${start_date} to ${end_date}`);
