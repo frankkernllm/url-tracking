@@ -1,15 +1,12 @@
-Let me rewrite this using the same Redis approach as your existing functions, without any external dependencies:
-
-```javascript
 // netlify/functions/build-landing-page-indexes-hourly.js
 
 const buildHourlyLandingPageIndexes = async () => {
-  const currentHour = new Date().toISOString().substring(0, 13); // 2025-07-19T14
+  const currentHour = new Date().toISOString().substring(0, 13);
   const hourKey = `landing_page_hourly:${currentHour.replace('T', '-')}`;
   
-  console.log(`🕐 Starting hourly landing page indexing for ${currentHour}`);
+  console.log(`Starting hourly landing page indexing for ${currentHour}`);
   
-  // Redis client setup using fetch (same as your other functions)
+  // Redis client setup using fetch
   const redis = {
     async get(key) {
       const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
@@ -28,6 +25,7 @@ const buildHourlyLandingPageIndexes = async () => {
     },
     
     async mget(keys) {
+      if (keys.length === 0) return [];
       const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/mget/${keys.map(k => encodeURIComponent(k)).join('/')}`, {
         headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
       });
@@ -48,7 +46,7 @@ const buildHourlyLandingPageIndexes = async () => {
   // Check if already processed
   const existing = await redis.get(hourKey);
   if (existing) {
-    console.log(`✅ Hour ${currentHour} already processed`);
+    console.log(`Hour ${currentHour} already processed`);
     return { status: 'already_processed', hour: currentHour };
   }
   
@@ -58,14 +56,14 @@ const buildHourlyLandingPageIndexes = async () => {
   
   // Calculate hour boundaries
   const hourStart = new Date(currentHour + ':00:00.000Z').getTime();
-  const hourEnd = hourStart + (60 * 60 * 1000); // +1 hour
+  const hourEnd = hourStart + (60 * 60 * 1000);
   
-  console.log(`📅 Processing pageviews from ${new Date(hourStart).toISOString()} to ${new Date(hourEnd).toISOString()}`);
+  console.log(`Processing pageviews from ${new Date(hourStart).toISOString()} to ${new Date(hourEnd).toISOString()}`);
   
   try {
     // Get all IP indexes
     const ipIndexKeys = await redis.keys('pageview_index_ip:*');
-    console.log(`🔍 Found ${ipIndexKeys.length} unique IP indexes to scan`);
+    console.log(`Found ${ipIndexKeys.length} unique IP indexes to scan`);
     
     let processedCount = 0;
     let matchedPageviews = 0;
@@ -74,7 +72,7 @@ const buildHourlyLandingPageIndexes = async () => {
     for (let i = 0; i < ipIndexKeys.length; i += 100) {
       // Timeout protection
       if (Date.now() - startTime > 20000) {
-        console.log(`⏰ Timeout protection triggered after ${Date.now() - startTime}ms`);
+        console.log(`Timeout protection triggered after ${Date.now() - startTime}ms`);
         break;
       }
       
@@ -116,7 +114,7 @@ const buildHourlyLandingPageIndexes = async () => {
             }
           }
         } catch (parseError) {
-          console.error(`❌ Error parsing pageview data:`, parseError);
+          console.error(`Error parsing pageview data:`, parseError);
         }
       });
     }
@@ -127,7 +125,7 @@ const buildHourlyLandingPageIndexes = async () => {
       pageData.percentage = totalUniqueIPs > 0 ? 
         ((pageData.count / totalUniqueIPs) * 100).toFixed(1) : '0.0';
       
-      // Remove the IP arrays to save space (keep only counts)
+      // Remove the IP arrays to save space
       delete pageData.unique_ips;
     });
     
@@ -145,11 +143,11 @@ const buildHourlyLandingPageIndexes = async () => {
       created_at: new Date().toISOString()
     };
     
-    // Store with 90-day TTL (hourly retention)
-    const ttl = 90 * 24 * 60 * 60; // 90 days in seconds
+    // Store with 90-day TTL
+    const ttl = 90 * 24 * 60 * 60;
     await redis.setex(hourKey, ttl, JSON.stringify(finalIndex));
     
-    console.log(`✅ Successfully indexed ${totalUniqueIPs} unique visitors across ${Object.keys(landingPageData).length} landing pages`);
+    console.log(`Successfully indexed ${totalUniqueIPs} unique visitors across ${Object.keys(landingPageData).length} landing pages`);
     
     return { 
       status: 'processed', 
@@ -158,7 +156,7 @@ const buildHourlyLandingPageIndexes = async () => {
     };
     
   } catch (error) {
-    console.error(`❌ Error during hourly indexing:`, error);
+    console.error(`Error during hourly indexing:`, error);
     throw error;
   }
 };
@@ -173,11 +171,11 @@ exports.handler = async (event, context) => {
     };
   }
 
-  console.log(`🚀 Manual landing page indexing triggered at ${new Date().toISOString()}`);
+  console.log(`Manual landing page indexing triggered at ${new Date().toISOString()}`);
   
   try {
     const result = await buildHourlyLandingPageIndexes();
-    console.log(`✅ Manual indexing completed:`, result.summary || result.status);
+    console.log(`Manual indexing completed:`, result.summary || result.status);
     
     return {
       statusCode: 200,
@@ -185,7 +183,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify(result)
     };
   } catch (error) {
-    console.error(`❌ Manual indexing failed:`, error);
+    console.error(`Manual indexing failed:`, error);
     return {
       statusCode: 500,
       body: JSON.stringify({
@@ -196,6 +194,3 @@ exports.handler = async (event, context) => {
     };
   }
 };
-```
-
-This version uses the same Redis approach as your existing functions (direct fetch calls to Upstash REST API) - no external dependencies needed!
