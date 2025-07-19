@@ -1,17 +1,49 @@
+Let me rewrite this using the same Redis approach as your existing functions, without any external dependencies:
+
+```javascript
 // netlify/functions/build-landing-page-indexes-hourly.js
-
-const { createClient } = require('@upstash/redis');
-
-const redis = createClient({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
 
 const buildHourlyLandingPageIndexes = async () => {
   const currentHour = new Date().toISOString().substring(0, 13); // 2025-07-19T14
   const hourKey = `landing_page_hourly:${currentHour.replace('T', '-')}`;
   
   console.log(`🕐 Starting hourly landing page indexing for ${currentHour}`);
+  
+  // Redis client setup using fetch (same as your other functions)
+  const redis = {
+    async get(key) {
+      const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
+        headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await response.json();
+      return data.result;
+    },
+    
+    async keys(pattern) {
+      const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/keys/${encodeURIComponent(pattern)}`, {
+        headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await response.json();
+      return data.result || [];
+    },
+    
+    async mget(keys) {
+      const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/mget/${keys.map(k => encodeURIComponent(k)).join('/')}`, {
+        headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await response.json();
+      return data.result || [];
+    },
+    
+    async setex(key, ttl, value) {
+      const response = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/setex/${encodeURIComponent(key)}/${ttl}/${encodeURIComponent(value)}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await response.json();
+      return data.result;
+    }
+  };
   
   // Check if already processed
   const existing = await redis.get(hourKey);
@@ -164,3 +196,6 @@ exports.handler = async (event, context) => {
     };
   }
 };
+```
+
+This version uses the same Redis approach as your existing functions (direct fetch calls to Upstash REST API) - no external dependencies needed!
