@@ -1,5 +1,6 @@
 // query-pageviews-enhanced.js - Enhanced pageview search with OPTIMIZED multi-signal attribution
 // UPDATED: Uses enhanced IP indexes with complete attribution data
+// FIXED: Properly uses attribution_window_hours parameter instead of hardcoded 24 hours
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -40,17 +41,22 @@ exports.handler = async (event, context) => {
       device_signature,
       screen_value,
       gpu_signature,
-      window_hours = 24
+      attribution_window_hours = 168,  // FIXED: Use attribution_window_hours instead of window_hours
+      window_hours = attribution_window_hours  // FIXED: Fallback for backward compatibility
     } = JSON.parse(event.body || '{}');
 
+    // FIXED: Use attribution_window_hours parameter properly
+    const actualWindowHours = attribution_window_hours || window_hours || 168;
+
     console.log('🔍 ENHANCED QUERY: Multi-signal attribution search with optimized IP indexes');
-    console.log(`   🕐 Window: ${window_hours}h before ${conversion_timestamp}`);
+    console.log(`   🕐 Window: ${actualWindowHours}h before ${conversion_timestamp}`);
     console.log(`   📍 IPs: ${ips_to_check.length}`);
     console.log(`   🔐 Session: ${!!session_id}`);
     console.log(`   📱 Device sig: ${!!device_signature}`);
 
     const conversionTime = new Date(conversion_timestamp).getTime();
-    const windowStart = conversionTime - (window_hours * 60 * 60 * 1000);
+    // FIXED: Use actualWindowHours instead of hardcoded 24
+    const windowStart = conversionTime - (actualWindowHours * 60 * 60 * 1000);
     
     let allMatches = [];
     const queryMethods = [];
@@ -158,7 +164,7 @@ exports.handler = async (event, context) => {
         },
         window_info: {
           conversion_timestamp,
-          window_hours,
+          window_hours: actualWindowHours,  // FIXED: Use actualWindowHours instead of hardcoded 24
           window_start: new Date(windowStart).toISOString()
         }
       })
