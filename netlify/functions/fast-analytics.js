@@ -1,6 +1,6 @@
-// fast-analytics.js - OPTIMIZED VERSION to prevent 504 timeouts
+// fast-analytics.js - ENHANCED VERSION with URL/Campaign Data & Email Filtering
 // Path: netlify/functions/fast-analytics.js  
-// Purpose: Ultra-fast analytics with aggressive timeout management
+// Purpose: Ultra-fast analytics with URL tracking, campaign data, and clean email filtering
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -17,26 +17,26 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('⚡ FAST-ANALYTICS OPTIMIZED: Starting with aggressive timeout management');
+    console.log('⚡ ENHANCED FAST-ANALYTICS: Starting with URL/campaign data & email filtering');
     const startTime = Date.now();
-    const maxProcessingTime = 18000; // 18 seconds max (well under 25s limit)
+    const maxProcessingTime = 16000; // 16 seconds max (extra safety margin)
     
     // Parse query parameters
     const queryParams = event.queryStringParameters || {};
     const startDate = queryParams.start_date || getDateDaysAgo(7);
     const endDate = queryParams.end_date || getDateDaysAgo(0);
-    const limit = parseInt(queryParams.limit || '500'); // Reduced limit for speed
+    const limit = parseInt(queryParams.limit || '2000'); // UPDATE 1: Increased from 500 to 2000
     
-    console.log(`📅 OPTIMIZED: ${startDate} to ${endDate} (limit: ${limit})`);
+    console.log(`📅 ENHANCED: ${startDate} to ${endDate} (limit: ${limit})`);
     
     const redis = initializeRedis();
     
     // OPTIMIZATION 1: Try conversion indexes first (fastest path)
-    console.log('🚀 FAST PATH: Trying conversion indexes...');
+    console.log('🚀 FAST PATH: Trying conversion indexes with enhanced data...');
     const conversionData = await getConversionsFromIndexesFast(redis, startDate, endDate, Math.min(limit, 2000), 10000);
     
     if (conversionData.conversions.length > 0) {
-      console.log(`✅ FAST PATH SUCCESS: ${conversionData.conversions.length} conversions from indexes`);
+      console.log(`✅ FAST PATH SUCCESS: ${conversionData.conversions.length} conversions with URL/campaign data`);
       
       const totalTime = Date.now() - startTime;
       return {
@@ -60,19 +60,21 @@ exports.handler = async (event, context) => {
           date_range: { start: startDate, end: endDate },
           processing_stats: {
             execution_time_ms: totalTime,
-            data_source: 'conversion_indexes_fast',
-            method: 'optimized_index_lookup'
+            data_source: 'conversion_indexes_fast_enhanced',
+            method: 'optimized_index_lookup_with_url_data',
+            email_filtering_active: true,
+            url_campaign_data_included: true
           }
         })
       };
     }
     
     // OPTIMIZATION 2: Fallback to limited journey scan (if indexes fail)
-    console.log('⚠️ FALLBACK: Using limited journey scan...');
+    console.log('⚠️ FALLBACK: Using limited journey scan with enhanced data...');
     const journeyData = await getJourneyDataLimited(redis, startDate, endDate, Math.min(limit, 500), maxProcessingTime - (Date.now() - startTime));
     
     const totalTime = Date.now() - startTime;
-    console.log(`⚡ OPTIMIZED analytics complete in ${totalTime}ms`);
+    console.log(`⚡ ENHANCED analytics complete in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -92,29 +94,31 @@ exports.handler = async (event, context) => {
         date_range: { start: startDate, end: endDate },
         processing_stats: {
           execution_time_ms: totalTime,
-          data_source: 'limited_journey_scan',
-          method: 'timeout_optimized'
+          data_source: 'limited_journey_scan_enhanced',
+          method: 'timeout_optimized_with_url_data',
+          email_filtering_active: true,
+          url_campaign_data_included: true
         }
       })
     };
     
   } catch (error) {
-    console.error('❌ Optimized analytics error:', error);
+    console.error('❌ Enhanced analytics error:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Fast analytics failed', 
+        error: 'Enhanced fast analytics failed', 
         message: error.message 
       })
     };
   }
 };
 
-// OPTIMIZED: Get conversions from date indexes (fastest method)
+// ENHANCED: Get conversions from date indexes with URL/campaign data and email filtering
 async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, maxTime) {
   const indexStartTime = Date.now();
-  console.log(`🚀 FAST INDEX LOOKUP: ${limit} conversions max, ${maxTime}ms timeout`);
+  console.log(`🚀 ENHANCED INDEX LOOKUP: ${limit} conversions max, ${maxTime}ms timeout`);
   
   const conversions = [];
   let totalRevenue = 0;
@@ -124,7 +128,7 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
   try {
     // Generate only the date keys we need
     const dateKeys = generateDateKeys(startDate, endDate);
-    console.log(`📅 Checking ${dateKeys.length} date indexes...`);
+    console.log(`📅 Checking ${dateKeys.length} date indexes with enhanced data extraction...`);
     
     // Process date indexes with strict timeout
     for (const dateKey of dateKeys) {
@@ -140,25 +144,34 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
       
       try {
         const indexKey = `conversion_index_date:${dateKey}`;
-        const indexData = await redis(`get/${indexKey}`, 1000); // Fast timeout
+        const indexData = await redis(`get/${indexKey}`, 800); // Faster timeout for safety
         
         if (indexData?.result) {
           const dateIndex = JSON.parse(decodeURIComponent(indexData.result));
           
           if (dateIndex.conversions && Array.isArray(dateIndex.conversions)) {
-            // Take only what we need for speed
+            // UPDATE 2: Enhanced email filtering + take smaller batches for speed
             const dateConversions = dateIndex.conversions
-              .filter(conv => conv.email && conv.order_id) // Quick validation
-              .slice(0, Math.min(300, limit - conversions.length)); // Higher per-day limit
+              .filter(conv => conv.email && conv.order_id && conv.email !== 'unknown') // Enhanced email filter
+              .slice(0, Math.min(200, limit - conversions.length)); // Reduced from 300 to 200
             
             for (const conversion of dateConversions) {
               conversions.push({
+                // Original fields
                 timestamp: conversion.timestamp,
                 email: conversion.email,
                 order_total: conversion.order_total || 0,
                 order_id: conversion.order_id,
                 source: conversion.source || 'direct',
-                attribution_found: conversion.attribution_found || false
+                attribution_found: conversion.attribution_found || false,
+                
+                // UPDATE 1: URL and campaign data (zero performance impact)
+                landing_page: conversion.landing_page || null,
+                campaign: conversion.campaign || conversion.utm_campaign || null,
+                medium: conversion.medium || conversion.utm_medium || null,
+                utm_content: conversion.utm_content || null,
+                utm_term: conversion.utm_term || null,
+                referrer_url: conversion.referrer_url || null
               });
               
               totalRevenue += parseFloat(conversion.order_total || 0);
@@ -172,7 +185,7 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
         }
         
       } catch (indexError) {
-        console.warn(`⚠️ Error loading index ${dateKey}:`, indexError.message);
+        console.warn(`⚠️ Error loading enhanced index ${dateKey}:`, indexError.message);
       }
     }
     
@@ -182,7 +195,7 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
     const attributionRate = conversions.length > 0 ? 
       ((attributedCount / conversions.length) * 100).toFixed(1) : '0.0';
     
-    console.log(`✅ INDEX SCAN: ${conversions.length} conversions in ${Date.now() - indexStartTime}ms`);
+    console.log(`✅ ENHANCED INDEX SCAN: ${conversions.length} conversions with URL data in ${Date.now() - indexStartTime}ms`);
     
     return {
       conversions: conversions,
@@ -197,7 +210,7 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
     };
     
   } catch (error) {
-    console.error('❌ Index scan error:', error);
+    console.error('❌ Enhanced index scan error:', error);
     return {
       conversions: [],
       total_revenue: 0,
@@ -212,10 +225,10 @@ async function getConversionsFromIndexesFast(redis, startDate, endDate, limit, m
   }
 }
 
-// OPTIMIZED: Limited journey scan (fallback with strict limits)
+// ENHANCED: Limited journey scan with URL data and email filtering (fallback)
 async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) {
   const scanStartTime = Date.now();
-  console.log(`🔄 LIMITED JOURNEY SCAN: ${limit} journeys max, ${maxTime}ms timeout`);
+  console.log(`🔄 ENHANCED LIMITED JOURNEY SCAN: ${limit} journeys max, ${maxTime}ms timeout`);
   
   const conversions = [];
   let totalRevenue = 0;
@@ -226,7 +239,7 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
   
   let cursor = '0';
   let iterations = 0;
-  const maxIterations = 15; // Higher limit for more data
+  const maxIterations = 12; // Reduced from 15 for extra safety
   
   try {
     do {
@@ -235,7 +248,7 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
         break;
       }
       
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/50`, 1500);
+      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/50`, 1200); // Slightly faster timeout
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
         break;
@@ -245,8 +258,8 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
       const keys = scanResult.result[1] || [];
       iterations++;
       
-      // Process only first few keys per iteration
-      const limitedKeys = keys.slice(0, Math.min(50, limit - conversions.length));
+      // Process smaller batches per iteration for faster processing
+      const limitedKeys = keys.slice(0, Math.min(30, limit - conversions.length)); // Reduced from 50 to 30
       
       const batchPromises = limitedKeys.map(async (key) => {
         try {
@@ -258,12 +271,21 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
             const conversionTime = new Date(journey.conversion_timestamp).getTime();
             if (conversionTime >= startTimestamp && conversionTime <= endTimestamp) {
               return {
+                // Original fields
                 timestamp: journey.conversion_timestamp,
                 email: journey.customer_email,
                 order_total: journey.conversion_value || 0,
                 order_id: journey.conversion_order_id,
                 source: journey.first_click_source || 'direct',
-                attribution_found: journey.total_touchpoints > 1
+                attribution_found: journey.total_touchpoints > 1,
+                
+                // Enhanced fields from journey touchpoints (if available)
+                landing_page: journey.touchpoints?.[0]?.landing_page || null,
+                campaign: journey.touchpoints?.[0]?.campaign || null,
+                medium: journey.touchpoints?.[0]?.medium || null,
+                utm_content: journey.touchpoints?.[0]?.utm_content || null,
+                utm_term: journey.touchpoints?.[0]?.utm_term || null,
+                referrer_url: journey.touchpoints?.[0]?.referrer_url || null
               };
             }
           }
@@ -274,7 +296,9 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
       });
       
       const batchResults = await Promise.all(batchPromises);
-      const validJourneys = batchResults.filter(j => j !== null);
+      const validJourneys = batchResults
+        .filter(j => j !== null)
+        .filter(journey => journey.email && journey.email !== 'unknown'); // UPDATE 2: Enhanced email filtering
       
       for (const journey of validJourneys) {
         conversions.push(journey);
@@ -291,7 +315,7 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
     const conversionRate = uniqueCustomers.size > 0 ? 
       ((conversions.length / uniqueCustomers.size) * 100).toFixed(2) : '0.00';
     
-    console.log(`✅ LIMITED SCAN: ${conversions.length} conversions in ${Date.now() - scanStartTime}ms`);
+    console.log(`✅ ENHANCED LIMITED SCAN: ${conversions.length} conversions with URL data in ${Date.now() - scanStartTime}ms`);
     
     return {
       conversions: conversions,
@@ -302,7 +326,7 @@ async function getJourneyDataLimited(redis, startDate, endDate, limit, maxTime) 
     };
     
   } catch (error) {
-    console.error('❌ Limited journey scan error:', error);
+    console.error('❌ Enhanced limited journey scan error:', error);
     return {
       conversions: [],
       total_conversions: 0,
@@ -338,7 +362,7 @@ function initializeRedis() {
   const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   
-  return async (command, timeoutMs = 1500) => { // Faster default timeout
+  return async (command, timeoutMs = 1200) => { // Reduced from 1500ms for faster fail
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     
