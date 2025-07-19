@@ -1,6 +1,5 @@
 // netlify/functions/scheduled-landing-page-indexing.js
 
-// These imports will work automatically on Netlify
 const { schedule } = require('@netlify/functions');
 const { createClient } = require('@upstash/redis');
 
@@ -42,7 +41,7 @@ const buildHourlyLandingPageIndexes = async () => {
     
     // Process in timeout-safe chunks
     for (let i = 0; i < ipIndexKeys.length; i += 100) {
-      // Timeout protection (Netlify has 10-second limit on free, 25-second on Pro)
+      // Timeout protection
       if (Date.now() - startTime > 20000) {
         console.log(`⏰ Timeout protection triggered after ${Date.now() - startTime}ms`);
         break;
@@ -120,11 +119,6 @@ const buildHourlyLandingPageIndexes = async () => {
     await redis.setex(hourKey, ttl, JSON.stringify(finalIndex));
     
     console.log(`✅ Successfully indexed ${totalUniqueIPs} unique visitors across ${Object.keys(landingPageData).length} landing pages`);
-    console.log(`📊 Top landing pages:`, Object.entries(landingPageData)
-      .sort(([,a], [,b]) => b.count - a.count)
-      .slice(0, 5)
-      .map(([page, data]) => `${page}: ${data.count} unique visitors`)
-    );
     
     return { 
       status: 'processed', 
@@ -138,8 +132,8 @@ const buildHourlyLandingPageIndexes = async () => {
   }
 };
 
-// Schedule to run at the top of every hour
-const handler = schedule('0 * * * *', async (event) => {
+// Export the scheduled handler - this is the key fix!
+exports.handler = schedule('0 * * * *', async (event) => {
   console.log(`🚀 Scheduled landing page indexing triggered at ${new Date().toISOString()}`);
   
   try {
@@ -161,5 +155,3 @@ const handler = schedule('0 * * * *', async (event) => {
     };
   }
 });
-
-module.exports = { handler };
