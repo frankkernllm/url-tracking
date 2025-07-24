@@ -24,7 +24,7 @@ exports.handler = async (event, context) => {
     
     // Parse request parameters  
     const body = event.body ? JSON.parse(event.body) : {};
-    const batchSize = body.batch_size || 40; // 🚀 INCREASED: Default batch size for faster processing
+    const batchSize = body.batch_size || 80; // 🚀 AGGRESSIVE: 80 conversions per batch for maximum speed
     const journeyWindowHours = body.journey_window_hours || 168;
     
     // 🆕 FIXED: Load existing progress or start fresh
@@ -225,7 +225,7 @@ async function saveJourneyProgress(redis, progressKey, progress) {
 // 🔄 MODIFIED: Process conversions with progress tracking
 async function processConversionsForJourneys(redis, conversions, progress, journeyWindowHours, maxTime) {
   const processStartTime = Date.now();
-  console.log(`⚡ FIXED processing: ${conversions.length} conversions with journey window ${journeyWindowHours}h in ${maxTime}ms`);
+  console.log(`⚡ FIXED processing: ${conversions.length} conversions with journey window ${journeyWindowHours}h in ${maxTime}ms (AGGRESSIVE BATCH SIZE)`);
   console.log(`📊 Starting from overall conversion ${progress.last_conversion_index}/${progress.total_conversions}`);
   
   let conversionsProcessedThisRun = 0;
@@ -257,8 +257,8 @@ async function processConversionsForJourneys(redis, conversions, progress, journ
       
       conversionsProcessedThisRun++;
       
-      // 🆕 Save progress every 10 conversions for better resilience
-      if (conversionsProcessedThisRun % 10 === 0) {
+      // 🆕 Save progress every 20 conversions for better resilience (adjusted for larger batches)
+      if (conversionsProcessedThisRun % 20 === 0) {
         const tempProgress = {
           ...progress,
           conversions_processed: progress.conversions_processed + conversionsProcessedThisRun,
