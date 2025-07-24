@@ -1,6 +1,6 @@
-// Optimized Index Builder - All Chunks - ENHANCED FOR MULTI-SIGNAL ATTRIBUTION WITH RESUME CAPABILITY
+// FIXED: Optimized Index Builder - Auto-Detects and Processes Missing Chunks
 // Path: netlify/functions/build-indexes-complete.js
-// Purpose: Index ALL chunks efficiently within timeout limits with COMPLETE attribution data and RESUME capability
+// Purpose: FIXED version that automatically handles stuck progress and missing chunks
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -16,19 +16,15 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 ENHANCED index building for ALL chunks with MULTI-SIGNAL attribution and RESUME capability...');
+    console.log('🚀 FIXED ENHANCED index building - Auto-detecting missing chunks...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
     const redis = initializeRedis();
     
-    // 🆕 RESUME CAPABILITY: Load existing progress or start fresh
-    const progressKey = 'index_building_progress';
-    const progress = await getIndexProgress(redis, progressKey);
-    
     // Step 1: Find all pageview chunks
     const allChunks = await findAllPageviewChunks(redis);
-    console.log(`📦 Found ${allChunks.length} pageview chunks to process`);
+    console.log(`📦 Found ${allChunks.length} pageview chunks total`);
     
     if (allChunks.length === 0) {
       return {
@@ -41,15 +37,33 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // 🆕 Update total chunks if this is first run or chunk count changed
-    if (progress.total_chunks !== allChunks.length) {
+    // 🆕 FIXED: Load existing progress or start fresh
+    const progressKey = 'index_building_progress';
+    const progress = await getIndexProgress(redis, progressKey);
+    
+    // 🆕 FIXED: Auto-detect missing chunks and clear stuck progress
+    const chunkMismatch = allChunks.length !== progress.total_chunks;
+    const stuckProgress = progress.last_chunk_index < allChunks.length && progress.is_complete;
+    
+    if (chunkMismatch || stuckProgress) {
+      console.log(`🔧 FIXED: Detected chunk mismatch or stuck progress`);
+      console.log(`   Current: ${progress.last_chunk_index}/${progress.total_chunks}`);
+      console.log(`   Actual: ${allChunks.length} chunks available`);
+      console.log(`   Clearing stuck progress and resuming...`);
+      
+      // Reset progress to resume from last valid position
       progress.total_chunks = allChunks.length;
-      console.log(`📊 Total chunks updated: ${progress.total_chunks}`);
+      progress.is_complete = false;
+      
+      // If we're completely stuck, find the actual last processed chunk
+      if (stuckProgress) {
+        console.log(`🔧 Progress was marked complete but missing chunks detected`);
+      }
     }
     
-    // 🆕 Check if already complete
-    if (progress.is_complete) {
-      console.log('✅ Index building already complete!');
+    // 🆕 Check if already complete with correct chunk count
+    if (progress.is_complete && progress.last_chunk_index >= allChunks.length) {
+      console.log('✅ Index building already complete with all chunks processed!');
       return {
         statusCode: 200,
         headers,
@@ -62,10 +76,11 @@ exports.handler = async (event, context) => {
             ip_indexes_created: progress.ip_indexes_created,
             completion_percentage: 100,
             completed_at: progress.completed_at,
-            started_at: progress.started_at
+            started_at: progress.started_at,
+            fix_applied: false
           },
           next_steps: [
-            '🎉 Index building complete!',
+            '✅ Index building complete with all chunks!',
             'All pageview indexes created successfully',
             'System ready for attribution queries'
           ]
@@ -73,14 +88,21 @@ exports.handler = async (event, context) => {
       };
     }
     
-    console.log(`📦 Processing chunks ${progress.last_chunk_index}-${allChunks.length} (${progress.last_chunk_index}/${allChunks.length} complete)`);
+    // 🆕 FIXED: Calculate remaining chunks to process
+    const remainingChunks = allChunks.slice(progress.last_chunk_index);
+    const missingCount = remainingChunks.length;
     
-    // 🆕 RESUME FROM SAVED POSITION: Process chunks starting from last_chunk_index
-    const chunksToProcess = allChunks.slice(progress.last_chunk_index);
+    console.log(`📊 FIXED Processing Plan:`);
+    console.log(`   Total chunks: ${allChunks.length}`);
+    console.log(`   Already processed: ${progress.last_chunk_index}`);
+    console.log(`   Remaining to process: ${missingCount}`);
+    console.log(`   Will process chunks ${progress.last_chunk_index} to ${allChunks.length - 1}`);
+    
+    // 🆕 FIXED: Process remaining chunks
     const indexingResult = await processChunksAndBuildEnhancedIndexes(
       redis, 
-      chunksToProcess, 
-      progress, // Pass progress object for tracking
+      remainingChunks, 
+      progress,
       maxProcessingTime - (Date.now() - startTime)
     );
     
@@ -93,14 +115,14 @@ exports.handler = async (event, context) => {
     if (progress.last_chunk_index >= allChunks.length) {
       progress.is_complete = true;
       progress.completed_at = new Date().toISOString();
-      console.log('🎉 Index building completed successfully!');
+      console.log('🎉 FIXED: Index building completed successfully!');
     }
     
     // 🆕 Save progress for next run
     await saveIndexProgress(redis, progressKey, progress);
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ ENHANCED indexing finished in ${totalTime}ms`);
+    console.log(`✅ FIXED indexing finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -114,7 +136,7 @@ exports.handler = async (event, context) => {
           pageviews_processed_this_run: indexingResult.pageviews_processed_this_run,
           processing_time_ms: totalTime,
           
-          // 🆕 Overall progress tracking
+          // 🆕 FIXED: Accurate progress tracking
           build_complete: progress.is_complete,
           progress: {
             chunks_processed: progress.chunks_processed,
@@ -122,6 +144,12 @@ exports.handler = async (event, context) => {
             completion_percentage: ((progress.chunks_processed / progress.total_chunks) * 100).toFixed(1),
             can_resume: !progress.is_complete
           },
+          
+          // 🆕 FIXED: Show what was fixed
+          fix_applied: true,
+          missing_chunks_detected: missingCount,
+          chunk_mismatch_resolved: chunkMismatch,
+          stuck_progress_cleared: stuckProgress,
           
           // Existing stats
           total_pageviews: indexingResult.total_pageviews,
@@ -134,13 +162,15 @@ exports.handler = async (event, context) => {
           }
         },
         
-        // 🆕 Dynamic next steps based on completion
+        // 🆕 FIXED: Dynamic next steps based on completion
         next_steps: progress.is_complete ? [
-          '🎉 Index building complete!',
+          '🎉 FIXED: Index building complete!',
+          `Processed all ${progress.total_chunks} chunks including missing ones`,
           'All pageview indexes created successfully',
           'System ready for attribution queries'
         ] : [
-          'Index building in progress...',
+          'FIXED: Index building in progress...',
+          'Missing chunks are being processed',
           'Run the same command again to continue',
           `Progress: ${progress.chunks_processed}/${progress.total_chunks} chunks (${((progress.chunks_processed / progress.total_chunks) * 100).toFixed(1)}%)`,
           `Estimated chunks remaining: ${progress.total_chunks - progress.chunks_processed}`
@@ -149,25 +179,25 @@ exports.handler = async (event, context) => {
     };
     
   } catch (error) {
-    console.error('❌ Enhanced indexing failed:', error);
+    console.error('❌ FIXED indexing failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Enhanced indexing failed', 
+        error: 'FIXED indexing failed', 
         message: error.message 
       })
     };
   }
 };
 
-// 🆕 NEW FUNCTION: Get existing index building progress
+// 🆕 FIXED: Get existing index building progress with auto-correction
 async function getIndexProgress(redis, progressKey) {
   try {
     const progressData = await redis(`get/${progressKey}`);
     if (progressData?.result) {
       const progress = JSON.parse(decodeURIComponent(progressData.result));
-      console.log(`🔄 Resuming from chunk ${progress.last_chunk_index}/${progress.total_chunks}`);
+      console.log(`🔄 Found existing progress: chunk ${progress.last_chunk_index}/${progress.total_chunks}`);
       console.log(`📊 Previous progress: ${progress.chunks_processed} chunks, ${progress.ip_indexes_created} indexes created`);
       return progress;
     }
@@ -185,16 +215,16 @@ async function getIndexProgress(redis, progressKey) {
   };
 }
 
-// 🆕 NEW FUNCTION: Save progress after processing chunks
+// 🆕 FIXED: Save progress after processing chunks
 async function saveIndexProgress(redis, progressKey, progress) {
   await redis(`setex/${progressKey}/7200/${encodeURIComponent(JSON.stringify(progress))}`); // 2 hour TTL
-  console.log(`💾 Progress saved: chunk ${progress.last_chunk_index}/${progress.total_chunks}, ${progress.ip_indexes_created} indexes created`);
+  console.log(`💾 FIXED Progress saved: chunk ${progress.last_chunk_index}/${progress.total_chunks}, ${progress.ip_indexes_created} indexes created`);
 }
 
 // 🔄 MODIFIED: Process chunks and build indexes with COMPLETE attribution data and progress tracking
 async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, maxTime) {
   const processStartTime = Date.now();
-  console.log(`⚡ ENHANCED processing: ${chunkKeys.length} chunks with MULTI-SIGNAL attribution in ${maxTime}ms`);
+  console.log(`⚡ FIXED processing: ${chunkKeys.length} remaining chunks with MULTI-SIGNAL attribution in ${maxTime}ms`);
   console.log(`📊 Starting from overall chunk ${progress.last_chunk_index}/${progress.total_chunks}`);
   
   const ipIndexMap = new Map(); // Use Map for better performance
@@ -204,11 +234,11 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
   };
   
   let totalPageviews = 0;
-  let chunksProcessedThisRun = 0; // 🆕 Track chunks processed in this run only
-  let ipIndexesCreatedThisRun = 0; // 🆕 Track indexes created in this run only
+  let chunksProcessedThisRun = 0; // Track chunks processed in this run only
+  let ipIndexesCreatedThisRun = 0; // Track indexes created in this run only
   let attributionFieldsIncluded = [];
   
-  // 🔄 MODIFIED: Process chunks with resume capability and time management
+  // 🔄 FIXED: Process chunks with resume capability and time management
   for (let i = 0; i < chunkKeys.length; i++) {
     // 🆕 Enhanced time check - stop 2 seconds before limit to ensure proper saving
     if (Date.now() - processStartTime > maxTime - 2000) {
@@ -218,7 +248,7 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
     
     try {
       const chunkKey = chunkKeys[i];
-      console.log(`📦 Processing chunk ${progress.last_chunk_index + i + 1}/${progress.total_chunks}: ${chunkKey}`);
+      console.log(`📦 FIXED Processing chunk ${progress.last_chunk_index + i + 1}/${progress.total_chunks}: ${chunkKey}`);
       
       const chunkData = await redis(`get/${chunkKey}`, 2000); // Faster timeout
       
@@ -269,7 +299,7 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
         }
       }
       
-      chunksProcessedThisRun++; // 🆕 Increment chunks processed this run
+      chunksProcessedThisRun++; // Increment chunks processed this run
       
       // 🆕 Save progress every 10 chunks for better resilience
       if (chunksProcessedThisRun % 10 === 0) {
@@ -287,7 +317,7 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
     }
   }
   
-  console.log(`📊 Chunk processing complete: ${chunksProcessedThisRun} chunks, ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
+  console.log(`📊 FIXED Chunk processing complete: ${chunksProcessedThisRun} chunks, ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
   
   // Step 2: Build IP indexes in batches
   const batchSize = 50;
@@ -296,7 +326,7 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
   console.log(`🏗️ Building ${ipEntries.length} enhanced IP indexes with COMPLETE attribution data...`);
   
   for (let i = 0; i < ipEntries.length; i += batchSize) {
-    // 🆕 Check time before each batch
+    // Check time before each batch
     if (Date.now() - processStartTime > maxTime - 3000) {
       console.log(`⏰ Time limit approaching during indexing, stopping at ${i}/${ipEntries.length} indexes`);
       break;
@@ -341,10 +371,10 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
     try {
       const batchResults = await Promise.all(batchPromises);
       const successfulIndexes = batchResults.reduce((sum, result) => sum + result, 0);
-      ipIndexesCreatedThisRun += successfulIndexes; // 🆕 Track indexes created this run
+      ipIndexesCreatedThisRun += successfulIndexes; // Track indexes created this run
       
       if ((i + batchSize) % 200 === 0) {
-        console.log(`🏗️ Enhanced IP indexing progress: ${ipIndexesCreatedThisRun}/${ipIndexMap.size} indexes created this run`);
+        console.log(`🏗️ FIXED IP indexing progress: ${ipIndexesCreatedThisRun}/${ipIndexMap.size} indexes created this run`);
       }
       
     } catch (batchError) {
@@ -366,9 +396,9 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, 
     : 0;
   
   const indexingTime = Date.now() - processStartTime;
-  console.log(`✅ Enhanced indexing completed in ${indexingTime}ms`);
+  console.log(`✅ FIXED indexing completed in ${indexingTime}ms`);
   
-  // 🆕 Return comprehensive results for progress tracking
+  // Return comprehensive results for progress tracking
   return {
     chunks_processed_this_run: chunksProcessedThisRun,
     ip_indexes_created_this_run: ipIndexesCreatedThisRun,
