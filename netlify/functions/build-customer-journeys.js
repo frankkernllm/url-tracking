@@ -289,61 +289,126 @@ async function processConversionsForJourneys(redis, conversions, progress, journ
 // EXISTING FUNCTIONS BELOW - MODIFIED FOR COMPATIBILITY
 // ====================================================
 
-// Get all conversions for journey building
+// 🔧 FIXED: Get all conversions using the EXACT same logic as extract-conversions-chunked-enhanced.js
 async function getAllConversionsForJourneyBuilding(redis) {
-  console.log('🔍 Finding all conversions for journey building...');
+  console.log('🔍 FIXED: Finding all conversions using proven extraction logic...');
+  
+  // Step 1: Find all conversion keys (same as extract-conversions-chunked-enhanced.js)
+  const conversionKeys = await findAllConversionKeys(redis);
+  console.log(`📊 Found ${conversionKeys.length} conversion keys`);
+  
+  if (conversionKeys.length === 0) {
+    return [];
+  }
+  
+  // Step 2: Load conversions using proven batch logic
+  const allConversions = await loadAllConversionsEnhanced(redis, conversionKeys, 20000);
+  console.log(`💰 Loaded ${allConversions.length} conversions for journey building`);
+  
+  // Sort by timestamp for consistent processing order
+  allConversions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  
+  return allConversions;
+}
+
+// 🔧 FIXED: Use EXACT same findAllConversionKeys logic as extract-conversions-chunked-enhanced.js
+async function findAllConversionKeys(redis) {
+  console.log('🔍 Scanning for conversion keys...');
+  
+  const conversionKeys = [];
   let cursor = '0';
-  let allConversions = [];
+  let iterations = 0;
+  const maxIterations = 20;
   
   do {
     try {
       const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/1000`);
       
-      if (scanResult?.result && Array.isArray(scanResult.result) && scanResult.result.length >= 2) {
-        cursor = scanResult.result[0];
-        const keys = scanResult.result[1] || [];
-        
-        // Get conversion data in batches
-        if (keys.length > 0) {
-          const conversionPromises = keys.map(async (key) => {
-            try {
-              const conversionData = await redis(`get/${key}`, 2000);
-              if (conversionData?.result) {
-                const conversion = JSON.parse(decodeURIComponent(conversionData.result));
-                return {
-                  order_id: conversion.order_id,
-                  customer_email: conversion.customer_email,
-                  timestamp: conversion.timestamp,
-                  redis_key: key,
-                  ...conversion
-                };
-              }
-            } catch (error) {
-              console.log(`⚠️ Error loading conversion ${key}: ${error.message}`);
-            }
-            return null;
-          });
-          
-          const batchResults = await Promise.all(conversionPromises);
-          const validConversions = batchResults.filter(conv => conv !== null);
-          allConversions.push(...validConversions);
-        }
-        
-        console.log(`💰 Found ${keys.length} conversion keys, cursor: ${cursor}, total loaded: ${allConversions.length}`);
-      } else {
-        cursor = '0';
+      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        break;
       }
-    } catch (error) {
-      console.log(`⚠️ Error scanning for conversions: ${error.message}`);
+      
+      cursor = scanResult.result[0];
+      const keys = scanResult.result[1] || [];
+      conversionKeys.push(...keys);
+      iterations++;
+      
+      if (conversionKeys.length % 500 === 0) {
+        console.log(`📊 Conversion scan progress: ${conversionKeys.length} keys found`);
+      }
+      
+    } catch (scanError) {
+      console.log(`⚠️ Conversion scan error: ${scanError.message}`);
       break;
     }
-  } while (cursor !== '0');
+    
+  } while (cursor !== '0' && iterations < maxIterations);
   
-  // Sort by timestamp for consistent processing order
-  allConversions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  console.log(`✅ Conversion scan complete: ${conversionKeys.length} keys found`);
+  return conversionKeys;
+}
+
+// 🔧 FIXED: Use EXACT same loadAllConversionsEnhanced logic as extract-conversions-chunked-enhanced.js  
+async function loadAllConversionsEnhanced(redis, conversionKeys, maxTime) {
+  const loadStartTime = Date.now();
+  const conversions = [];
   
-  console.log(`✅ Found ${allConversions.length} total conversions for journey building`);
-  return allConversions;
+  console.log(`💰 Loading ${conversionKeys.length} conversions with enhanced logic...`);
+  
+  const batchSize = 50;
+  for (let i = 0; i < conversionKeys.length; i += batchSize) {
+    if (Date.now() - loadStartTime > maxTime - 3000) {
+      console.log(`⏰ Time limit reached while loading conversions`);
+      break;
+    }
+    
+    const batch = conversionKeys.slice(i, i + batchSize);
+    
+    try {
+      const batchPromises = batch.map(async (key) => {
+        try {
+          const conversionData = await redis(`get/${key}`);
+          if (conversionData?.result) {
+            const conversion = JSON.parse(decodeURIComponent(conversionData.result));
+            
+            // Enhanced validation - require key fields
+            if (conversion.timestamp && conversion.order_id) {
+              return {
+                timestamp: conversion.timestamp,
+                order_id: conversion.order_id,
+                customer_email: conversion.customer_email || conversion.email,
+                order_total: conversion.order_total || conversion.value || 0,
+                source: conversion.source,
+                campaign: conversion.campaign,
+                medium: conversion.medium, 
+                landing_page: conversion.landing_page,
+                ip_address: conversion.ip_address,
+                session_id: conversion.session_id,
+                _redis_key: key
+              };
+            }
+          }
+        } catch (parseError) {
+          console.warn(`⚠️ Failed to parse conversion ${key}`);
+        }
+        return null;
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      const validResults = batchResults.filter(result => result !== null);
+      conversions.push(...validResults);
+      
+      if (conversions.length % 500 === 0 && conversions.length > 0) {
+        console.log(`📊 Conversion loading progress: ${conversions.length} conversions loaded`);
+      }
+      
+    } catch (batchError) {
+      console.log(`⚠️ Batch loading error: ${batchError.message}`);
+    }
+  }
+  
+  console.log(`✅ Loaded ${conversions.length} total conversions from Redis`);
+  return conversions;
 }
 
 // Build journey for individual conversion (simplified for compatibility)
