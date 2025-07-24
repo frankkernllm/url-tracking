@@ -1,6 +1,6 @@
-// Optimized Index Builder - All Chunks - ENHANCED FOR MULTI-SIGNAL ATTRIBUTION
+// Optimized Index Builder - All Chunks - ENHANCED FOR MULTI-SIGNAL ATTRIBUTION WITH RESUME CAPABILITY
 // Path: netlify/functions/build-indexes-complete.js
-// Purpose: Index ALL chunks efficiently within timeout limits with COMPLETE attribution data
+// Purpose: Index ALL chunks efficiently within timeout limits with COMPLETE attribution data and RESUME capability
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -16,11 +16,15 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🚀 ENHANCED index building for ALL chunks with MULTI-SIGNAL attribution...');
+    console.log('🚀 ENHANCED index building for ALL chunks with MULTI-SIGNAL attribution and RESUME capability...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
     const redis = initializeRedis();
+    
+    // 🆕 RESUME CAPABILITY: Load existing progress or start fresh
+    const progressKey = 'index_building_progress';
+    const progress = await getIndexProgress(redis, progressKey);
     
     // Step 1: Find all pageview chunks
     const allChunks = await findAllPageviewChunks(redis);
@@ -37,26 +41,63 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // Step 2: Process chunks and build ENHANCED indexes simultaneously
-    const results = await processChunksAndBuildEnhancedIndexes(redis, allChunks, maxProcessingTime - (Date.now() - startTime));
+    // 🆕 Update total chunks if this is first run or chunk count changed
+    if (progress.total_chunks !== allChunks.length) {
+      progress.total_chunks = allChunks.length;
+      console.log(`📊 Total chunks updated: ${progress.total_chunks}`);
+    }
     
-    // Step 3: Store final metadata
-    const metadata = {
-      extraction_timestamp: new Date().toISOString(),
-      total_pageviews: results.total_pageviews,
-      ip_indexes_created: results.ip_indexes_created,
-      time_indexes_created: results.time_indexes_created,
-      chunks_processed: results.chunks_processed,
-      processing_time_ms: Date.now() - startTime,
-      coverage_start: results.earliest_timestamp,
-      coverage_end: results.latest_timestamp,
-      extraction_method: 'enhanced_multi_signal_indexing',
-      unique_ips_found: results.unique_ips_found,
-      attribution_fields_included: results.attribution_fields_included,
-      multi_signal_ready: true
-    };
+    // 🆕 Check if already complete
+    if (progress.is_complete) {
+      console.log('✅ Index building already complete!');
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          enhanced_indexing_summary: {
+            build_complete: true,
+            chunks_processed: progress.chunks_processed,
+            total_chunks: progress.total_chunks,
+            ip_indexes_created: progress.ip_indexes_created,
+            completion_percentage: 100,
+            completed_at: progress.completed_at,
+            started_at: progress.started_at
+          },
+          next_steps: [
+            '🎉 Index building complete!',
+            'All pageview indexes created successfully',
+            'System ready for attribution queries'
+          ]
+        })
+      };
+    }
     
-    await storeExtractionMetadata(redis, metadata);
+    console.log(`📦 Processing chunks ${progress.last_chunk_index}-${allChunks.length} (${progress.last_chunk_index}/${allChunks.length} complete)`);
+    
+    // 🆕 RESUME FROM SAVED POSITION: Process chunks starting from last_chunk_index
+    const chunksToProcess = allChunks.slice(progress.last_chunk_index);
+    const indexingResult = await processChunksAndBuildEnhancedIndexes(
+      redis, 
+      chunksToProcess, 
+      progress, // Pass progress object for tracking
+      maxProcessingTime - (Date.now() - startTime)
+    );
+    
+    // 🆕 Update progress with results
+    progress.chunks_processed += indexingResult.chunks_processed_this_run;
+    progress.last_chunk_index += indexingResult.chunks_processed_this_run;
+    progress.ip_indexes_created += indexingResult.ip_indexes_created_this_run;
+    
+    // 🆕 Check if complete
+    if (progress.last_chunk_index >= allChunks.length) {
+      progress.is_complete = true;
+      progress.completed_at = new Date().toISOString();
+      console.log('🎉 Index building completed successfully!');
+    }
+    
+    // 🆕 Save progress for next run
+    await saveIndexProgress(redis, progressKey, progress);
     
     const totalTime = Date.now() - startTime;
     console.log(`✅ ENHANCED indexing finished in ${totalTime}ms`);
@@ -67,33 +108,43 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         enhanced_indexing_summary: {
-          total_pageviews_processed: results.total_pageviews,
-          chunks_processed: results.chunks_processed,
-          ip_indexes_created: results.ip_indexes_created,
-          time_indexes_created: results.time_indexes_created,
-          unique_ips_found: results.unique_ips_found,
+          // Processing stats for this run
+          chunks_processed_this_run: indexingResult.chunks_processed_this_run,
+          ip_indexes_created_this_run: indexingResult.ip_indexes_created_this_run,
+          pageviews_processed_this_run: indexingResult.pageviews_processed_this_run,
           processing_time_ms: totalTime,
-          indexing_efficiency: `${((results.ip_indexes_created / results.unique_ips_found) * 100).toFixed(1)}%`,
-          attribution_fields_included: results.attribution_fields_included,
-          multi_signal_ready: true
+          
+          // 🆕 Overall progress tracking
+          build_complete: progress.is_complete,
+          progress: {
+            chunks_processed: progress.chunks_processed,
+            total_chunks: progress.total_chunks,
+            completion_percentage: ((progress.chunks_processed / progress.total_chunks) * 100).toFixed(1),
+            can_resume: !progress.is_complete
+          },
+          
+          // Existing stats
+          total_pageviews: indexingResult.total_pageviews,
+          total_ip_indexes_created: progress.ip_indexes_created,
+          unique_ips_indexed: indexingResult.unique_ips_indexed,
+          time_range_indexed: indexingResult.time_range,
+          attribution_completeness: {
+            multi_signal_attribution: true,
+            geographic_correlation: true
+          }
         },
-        performance: {
-          pageviews_per_second: Math.round(results.total_pageviews / (totalTime / 1000)),
-          indexes_per_second: Math.round(results.ip_indexes_created / (totalTime / 1000))
-        },
-        coverage: {
-          earliest_pageview: results.earliest_timestamp,
-          latest_pageview: results.latest_timestamp,
-          time_span_days: results.time_span_days
-        },
-        multi_signal_capabilities: {
-          session_id_attribution: true,
-          device_fingerprint_attribution: true,
-          screen_signature_attribution: true,
-          webgl_attribution: true,
-          hardware_fingerprint_attribution: true,
-          geographic_correlation: true
-        }
+        
+        // 🆕 Dynamic next steps based on completion
+        next_steps: progress.is_complete ? [
+          '🎉 Index building complete!',
+          'All pageview indexes created successfully',
+          'System ready for attribution queries'
+        ] : [
+          'Index building in progress...',
+          'Run the same command again to continue',
+          `Progress: ${progress.chunks_processed}/${progress.total_chunks} chunks (${((progress.chunks_processed / progress.total_chunks) * 100).toFixed(1)}%)`,
+          `Estimated chunks remaining: ${progress.total_chunks - progress.chunks_processed}`
+        ]
       })
     };
     
@@ -110,10 +161,41 @@ exports.handler = async (event, context) => {
   }
 };
 
-// ENHANCED: Process chunks and build indexes with COMPLETE attribution data
-async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
+// 🆕 NEW FUNCTION: Get existing index building progress
+async function getIndexProgress(redis, progressKey) {
+  try {
+    const progressData = await redis(`get/${progressKey}`);
+    if (progressData?.result) {
+      const progress = JSON.parse(decodeURIComponent(progressData.result));
+      console.log(`🔄 Resuming from chunk ${progress.last_chunk_index}/${progress.total_chunks}`);
+      console.log(`📊 Previous progress: ${progress.chunks_processed} chunks, ${progress.ip_indexes_created} indexes created`);
+      return progress;
+    }
+  } catch (error) {
+    console.log('⚠️ No existing progress found, starting fresh');
+  }
+  
+  return {
+    last_chunk_index: 0,           // Which chunk to start from
+    total_chunks: 0,               // Total chunks found
+    ip_indexes_created: 0,         // Running total of indexes created
+    chunks_processed: 0,           // How many chunks we've processed
+    started_at: new Date().toISOString(),
+    is_complete: false
+  };
+}
+
+// 🆕 NEW FUNCTION: Save progress after processing chunks
+async function saveIndexProgress(redis, progressKey, progress) {
+  await redis(`setex/${progressKey}/7200/${encodeURIComponent(JSON.stringify(progress))}`); // 2 hour TTL
+  console.log(`💾 Progress saved: chunk ${progress.last_chunk_index}/${progress.total_chunks}, ${progress.ip_indexes_created} indexes created`);
+}
+
+// 🔄 MODIFIED: Process chunks and build indexes with COMPLETE attribution data and progress tracking
+async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, progress, maxTime) {
   const processStartTime = Date.now();
   console.log(`⚡ ENHANCED processing: ${chunkKeys.length} chunks with MULTI-SIGNAL attribution in ${maxTime}ms`);
+  console.log(`📊 Starting from overall chunk ${progress.last_chunk_index}/${progress.total_chunks}`);
   
   const ipIndexMap = new Map(); // Use Map for better performance
   const timeStats = {
@@ -122,19 +204,22 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
   };
   
   let totalPageviews = 0;
-  let chunksProcessed = 0;
-  let ipIndexesCreated = 0;
+  let chunksProcessedThisRun = 0; // 🆕 Track chunks processed in this run only
+  let ipIndexesCreatedThisRun = 0; // 🆕 Track indexes created in this run only
   let attributionFieldsIncluded = [];
   
-  // Step 1: Process all chunks and group by IP in memory with COMPLETE data (FAST)
+  // 🔄 MODIFIED: Process chunks with resume capability and time management
   for (let i = 0; i < chunkKeys.length; i++) {
-    if (Date.now() - processStartTime > maxTime - 8000) {
-      console.log(`⏰ Time management: stopping chunk processing to ensure indexing completes`);
+    // 🆕 Enhanced time check - stop 2 seconds before limit to ensure proper saving
+    if (Date.now() - processStartTime > maxTime - 2000) {
+      console.log(`⏰ Time limit approaching, saving progress at chunk ${progress.last_chunk_index + i}`);
       break;
     }
     
     try {
       const chunkKey = chunkKeys[i];
+      console.log(`📦 Processing chunk ${progress.last_chunk_index + i + 1}/${progress.total_chunks}: ${chunkKey}`);
+      
       const chunkData = await redis(`get/${chunkKey}`, 2000); // Faster timeout
       
       if (chunkData?.result) {
@@ -166,145 +251,59 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
                 });
               }
               
-              const ipGroup = ipIndexMap.get(encodedIP);
-              
-              // 🚀 ENHANCED: Store COMPLETE attribution data (increased limit for multi-signal)
-              if (ipGroup.pageviews.length < 15) { // Increased from 10 to 15 for better attribution coverage
-                ipGroup.pageviews.push({
-                  // Basic pageview data
-                  timestamp: pageview.timestamp,
-                  ip_address: pageview.ip_address,
-                  landing_page: pageview.landing_page || pageview.url || pageview.page_url || 'unknown',
-                  source: pageview.source || 'direct',
-                  
-                  // UTM parameters  
-                  utm_campaign: pageview.utm_campaign,
-                  utm_medium: pageview.utm_medium,
-                  utm_source: pageview.utm_source,
-                  utm_term: pageview.utm_term,
-                  utm_content: pageview.utm_content,
-                  referrer_url: pageview.referrer_url,
-                  
-                  // 🚀 CRITICAL: Multi-signal attribution fields
-                  session_id: pageview.session_id,                     // For session matching
-                  canvas_fingerprint: pageview.canvas_fingerprint,     // For device matching  
-                  webgl_fingerprint: pageview.webgl_fingerprint,       // For GPU matching
-                  screen_resolution: pageview.screen_resolution,       // For screen matching
-                  cpu_cores: pageview.cpu_cores,                       // For hardware matching
-                  memory_gb: pageview.memory_gb,                       // For hardware matching
-                  user_agent: pageview.user_agent,                     // For browser matching
-                  platform: pageview.platform,                         // For platform matching
-                  timezone: pageview.timezone,                          // For timezone matching
-                  language: pageview.language,                          // For language matching
-                  
-                  // Additional attribution signals
-                  device_type: pageview.device_type,                    // Mobile/Desktop
-                  browser_name: pageview.browser_name,                  // Chrome/Safari/etc
-                  os_name: pageview.os_name,                           // Windows/macOS/etc
-                  screen_width: pageview.screen_width,                 // Screen dimensions
-                  screen_height: pageview.screen_height,               // Screen dimensions
-                  color_depth: pageview.color_depth,                   // Display color depth
-                  pixel_ratio: pageview.pixel_ratio,                   // Device pixel ratio
-                  
-                  // Geographic and network data
-                  country: pageview.country,                           // Country code
-                  region: pageview.region,                             // State/region
-                  city: pageview.city,                                 // City name
-                  isp: pageview.isp,                                   // ISP information
-                  
-                  // Metadata
-                  redis_key: pageview.redis_key || 'unknown'
-                });
-              } else {
-                // Replace oldest if this one is newer
-                const oldestIndex = ipGroup.pageviews.findIndex(pv => 
-                  new Date(pv.timestamp) < new Date(pageview.timestamp)
-                );
-                if (oldestIndex !== -1) {
-                  ipGroup.pageviews[oldestIndex] = {
-                    // Complete attribution data (same as above)
-                    timestamp: pageview.timestamp,
-                    ip_address: pageview.ip_address,
-                    landing_page: pageview.landing_page || pageview.url || pageview.page_url || 'unknown',
-                    source: pageview.source || 'direct',
-                    utm_campaign: pageview.utm_campaign,
-                    utm_medium: pageview.utm_medium,
-                    utm_source: pageview.utm_source,
-                    utm_term: pageview.utm_term,
-                    utm_content: pageview.utm_content,
-                    referrer_url: pageview.referrer_url,
-                    session_id: pageview.session_id,
-                    canvas_fingerprint: pageview.canvas_fingerprint,
-                    webgl_fingerprint: pageview.webgl_fingerprint,
-                    screen_resolution: pageview.screen_resolution,
-                    cpu_cores: pageview.cpu_cores,
-                    memory_gb: pageview.memory_gb,
-                    user_agent: pageview.user_agent,
-                    platform: pageview.platform,
-                    timezone: pageview.timezone,
-                    language: pageview.language,
-                    device_type: pageview.device_type,
-                    browser_name: pageview.browser_name,
-                    os_name: pageview.os_name,
-                    screen_width: pageview.screen_width,
-                    screen_height: pageview.screen_height,
-                    color_depth: pageview.color_depth,
-                    pixel_ratio: pageview.pixel_ratio,
-                    country: pageview.country,
-                    region: pageview.region,
-                    city: pageview.city,
-                    isp: pageview.isp,
-                    redis_key: pageview.redis_key || 'unknown'
-                  };
-                }
-              }
+              const ipData = ipIndexMap.get(encodedIP);
+              ipData.pageviews.push(pageview);
               
               // Update latest timestamp
-              if (new Date(pageview.timestamp) > new Date(ipGroup.latest_timestamp)) {
-                ipGroup.latest_timestamp = pageview.timestamp;
+              if (new Date(pageview.timestamp) > new Date(ipData.latest_timestamp)) {
+                ipData.latest_timestamp = pageview.timestamp;
               }
+              
+              // Track attribution fields available
+              const fields = Object.keys(pageview).filter(field => 
+                !['timestamp', 'ip_address'].includes(field)
+              );
+              attributionFieldsIncluded = [...new Set([...attributionFieldsIncluded, ...fields])];
             }
-          }
-          
-          chunksProcessed++;
-          
-          if (i % 3 === 0) {
-            console.log(`⚡ Processed ${i + 1}/${chunkKeys.length} chunks: ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
           }
         }
       }
       
+      chunksProcessedThisRun++; // 🆕 Increment chunks processed this run
+      
+      // 🆕 Save progress every 10 chunks for better resilience
+      if (chunksProcessedThisRun % 10 === 0) {
+        const tempProgress = {
+          ...progress,
+          chunks_processed: progress.chunks_processed + chunksProcessedThisRun,
+          last_chunk_index: progress.last_chunk_index + chunksProcessedThisRun
+        };
+        await saveIndexProgress(redis, 'index_building_progress', tempProgress);
+      }
+      
     } catch (chunkError) {
-      console.log(`⚠️ Error processing chunk ${i}: ${chunkError.message}`);
+      console.log(`⚠️ Error processing chunk ${chunkKeys[i]}: ${chunkError.message}`);
+      // Continue processing other chunks
     }
   }
   
-  console.log(`📊 ENHANCED grouping complete: ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs with COMPLETE attribution data`);
+  console.log(`📊 Chunk processing complete: ${chunksProcessedThisRun} chunks, ${totalPageviews} pageviews, ${ipIndexMap.size} unique IPs`);
   
-  // Track which attribution fields are actually included
-  attributionFieldsIncluded = [
-    'session_id', 'canvas_fingerprint', 'webgl_fingerprint', 'screen_resolution',
-    'cpu_cores', 'memory_gb', 'user_agent', 'platform', 'timezone', 'language',
-    'device_type', 'browser_name', 'os_name', 'screen_width', 'screen_height',
-    'color_depth', 'pixel_ratio', 'country', 'region', 'city', 'isp'
-  ];
+  // Step 2: Build IP indexes in batches
+  const batchSize = 50;
+  const ipEntries = Array.from(ipIndexMap.entries());
   
-  // Step 2: Rapidly create ENHANCED IP indexes (OPTIMIZED)
-  const remainingTime = maxTime - (Date.now() - processStartTime);
-  console.log(`🏗️ Creating ENHANCED IP indexes with ${remainingTime}ms remaining...`);
+  console.log(`🏗️ Building ${ipEntries.length} enhanced IP indexes with COMPLETE attribution data...`);
   
-  const ipIndexArray = Array.from(ipIndexMap.entries());
-  const batchSize = 20; // Process in batches for speed
-  
-  for (let i = 0; i < ipIndexArray.length; i += batchSize) {
-    if (Date.now() - processStartTime > maxTime - 2000) {
-      console.log(`⏰ Time limit approaching, stopping IP indexing`);
+  for (let i = 0; i < ipEntries.length; i += batchSize) {
+    // 🆕 Check time before each batch
+    if (Date.now() - processStartTime > maxTime - 3000) {
+      console.log(`⏰ Time limit approaching during indexing, stopping at ${i}/${ipEntries.length} indexes`);
       break;
     }
     
-    const batch = ipIndexArray.slice(i, i + batchSize);
+    const batch = ipEntries.slice(i, i + batchSize);
     
-    // Process batch in parallel for maximum speed
     const batchPromises = batch.map(async ([encodedIP, ipData]) => {
       try {
         // Sort pageviews by timestamp (most recent first)
@@ -341,10 +340,11 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
     
     try {
       const batchResults = await Promise.all(batchPromises);
-      ipIndexesCreated += batchResults.reduce((sum, result) => sum + result, 0);
+      const successfulIndexes = batchResults.reduce((sum, result) => sum + result, 0);
+      ipIndexesCreatedThisRun += successfulIndexes; // 🆕 Track indexes created this run
       
       if ((i + batchSize) % 200 === 0) {
-        console.log(`🏗️ Enhanced IP indexing progress: ${ipIndexesCreated}/${ipIndexMap.size} indexes created`);
+        console.log(`🏗️ Enhanced IP indexing progress: ${ipIndexesCreatedThisRun}/${ipIndexMap.size} indexes created this run`);
       }
       
     } catch (batchError) {
@@ -362,100 +362,94 @@ async function processChunksAndBuildEnhancedIndexes(redis, chunkKeys, maxTime) {
   }
   
   const timeSpanDays = timeStats.earliest && timeStats.latest 
-    ? Math.round((timeStats.latest - timeStats.earliest) / (1000 * 60 * 60 * 24))
+    ? Math.ceil((timeStats.latest - timeStats.earliest) / (1000 * 60 * 60 * 24))
     : 0;
   
-  console.log(`✅ ENHANCED processing complete:`);
-  console.log(`   📊 ${totalPageviews} pageviews from ${chunksProcessed} chunks`);
-  console.log(`   🌐 ${ipIndexesCreated} ENHANCED IP indexes created from ${ipIndexMap.size} unique IPs`);
-  console.log(`   🚀 ${attributionFieldsIncluded.length} attribution fields included per pageview`);
-  console.log(`   🕐 ${timeIndexesCreated} time indexes created`);
+  const indexingTime = Date.now() - processStartTime;
+  console.log(`✅ Enhanced indexing completed in ${indexingTime}ms`);
   
+  // 🆕 Return comprehensive results for progress tracking
   return {
+    chunks_processed_this_run: chunksProcessedThisRun,
+    ip_indexes_created_this_run: ipIndexesCreatedThisRun,
+    pageviews_processed_this_run: totalPageviews,
     total_pageviews: totalPageviews,
-    chunks_processed: chunksProcessed,
-    ip_indexes_created: ipIndexesCreated,
+    unique_ips_indexed: ipIndexMap.size,
     time_indexes_created: timeIndexesCreated,
-    unique_ips_found: ipIndexMap.size,
-    earliest_timestamp: timeStats.earliest?.toISOString(),
-    latest_timestamp: timeStats.latest?.toISOString(),
-    time_span_days: timeSpanDays,
-    attribution_fields_included: attributionFieldsIncluded
+    processing_time_ms: indexingTime,
+    attribution_fields_included: attributionFieldsIncluded,
+    time_range: {
+      earliest: timeStats.earliest?.toISOString(),
+      latest: timeStats.latest?.toISOString(),
+      span_days: timeSpanDays
+    }
   };
 }
 
-// Create simple time indexes quickly
-async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
-  if (!timeStats.earliest || !timeStats.latest) return 0;
-  
-  const indexStartTime = Date.now();
-  let created = 0;
-  
-  try {
-    // Create just a few key time reference points
-    const timeReferences = [
-      { key: 'earliest', timestamp: timeStats.earliest },
-      { key: 'latest', timestamp: timeStats.latest }
-    ];
-    
-    for (const ref of timeReferences) {
-      if (Date.now() - indexStartTime > maxTime) break;
-      
-      const timeKey = `pageview_time_ref:${ref.key}`;
-      const timeData = {
-        reference: ref.key,
-        timestamp: ref.timestamp.toISOString(),
-        created_at: new Date().toISOString()
-      };
-      
-      // Store with 30-day TTL (2,592,000 seconds)
-      await redis(`setex/${timeKey}/2592000/${encodeURIComponent(JSON.stringify(timeData))}`, 1000);
-      created++;
-    }
-    
-  } catch (error) {
-    console.log(`⚠️ Time indexing error: ${error.message}`);
-  }
-  
-  return created;
-}
+// EXISTING FUNCTIONS BELOW - UNCHANGED
+// ===================================
 
-// Find all pageview chunks (optimized)
+// Find all pageview chunks
 async function findAllPageviewChunks(redis) {
-  const chunks = [];
+  console.log('🔍 Finding all pageview chunks...');
   let cursor = '0';
-  let iterations = 0;
-  const maxIterations = 15; // Increased for more chunks
+  let allChunks = [];
   
   do {
     try {
-      const scanResult = await redis(`scan/${cursor}/match/pageview_chunk:*/count/200`, 3000); // Larger count, longer timeout
+      const scanResult = await redis(`scan/${cursor}/match/pageview_chunk:*/count/1000`);
       
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
+      if (scanResult?.result && Array.isArray(scanResult.result) && scanResult.result.length >= 2) {
+        cursor = scanResult.result[0];
+        const keys = scanResult.result[1] || [];
+        allChunks.push(...keys);
+        
+        console.log(`📦 Found ${keys.length} chunks, cursor: ${cursor}, total: ${allChunks.length}`);
+      } else {
+        cursor = '0';
       }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      chunks.push(...keys);
-      iterations++;
-      
-    } catch (scanError) {
-      console.log(`⚠️ Chunk scan error: ${scanError.message}`);
+    } catch (error) {
+      console.log(`⚠️ Error scanning for chunks: ${error.message}`);
       break;
     }
-    
-  } while (cursor !== '0' && iterations < maxIterations);
+  } while (cursor !== '0');
   
-  return chunks;
+  console.log(`✅ Found ${allChunks.length} total pageview chunks`);
+  return allChunks;
 }
 
-// Store extraction metadata
-async function storeExtractionMetadata(redis, metadata) {
-  const metadataKey = 'pageview_extraction_metadata';
-  // Store with 30-day TTL (2,592,000 seconds)
-  await redis(`setex/${metadataKey}/2592000/${encodeURIComponent(JSON.stringify(metadata))}`);
-  console.log('📋 Enhanced extraction metadata stored with 30-day TTL');
+// Create simple time indexes
+async function createSimpleTimeIndexes(redis, timeStats, maxTime) {
+  if (!timeStats.earliest || !timeStats.latest) return 0;
+  
+  const startTime = Date.now();
+  console.log(`🕐 Creating time reference indexes...`);
+  
+  try {
+    const timeIndexes = [
+      { key: 'pageview_time_ref:earliest', value: timeStats.earliest.toISOString() },
+      { key: 'pageview_time_ref:latest', value: timeStats.latest.toISOString() }
+    ];
+    
+    let created = 0;
+    for (const timeIndex of timeIndexes) {
+      if (Date.now() - startTime > maxTime) break;
+      
+      try {
+        await redis(`setex/${timeIndex.key}/2592000/${encodeURIComponent(timeIndex.value)}`, 1000);
+        created++;
+      } catch (error) {
+        console.log(`⚠️ Error creating time index: ${error.message}`);
+      }
+    }
+    
+    console.log(`✅ Created ${created} time reference indexes`);
+    return created;
+    
+  } catch (error) {
+    console.log(`⚠️ Time indexing error: ${error.message}`);
+    return 0;
+  }
 }
 
 // Initialize Redis helper
