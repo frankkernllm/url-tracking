@@ -60,9 +60,9 @@ exports.handler = async (event, context) => {
       };
     }
     
-    console.log(`📊 ANALYSIS: ${analysis.total_conversions} total conversions, ${analysis.existing_journeys} journeys exist, ${analysis.remaining_conversions} remaining`);
+    console.log(`📊 ANALYSIS: ${analysis.total_conversions} total conversions, ${analysis.existing_journeys} complete journeys, ${analysis.remaining_conversions} remaining (includes broken journeys to reprocess)`);
     
-    // FIXED: Load remaining conversions in chronological order
+    // FIXED: Load remaining conversions in chronological order (includes broken journeys for reprocessing)
     const conversionsToProcess = await loadRemainingConversions(
       redis, 
       analysis.processed_order_ids, 
@@ -193,8 +193,8 @@ async function getConversionJourneyAnalysis(redis, resetProgress = false) {
   
   return {
     total_conversions: totalConversions,
-    existing_journeys: processedOrderIds.size,
-    remaining_conversions: totalConversions - processedOrderIds.size,
+    existing_journeys: processedOrderIds.size, // Only complete journeys
+    remaining_conversions: totalConversions - processedOrderIds.size, // Includes broken journeys that need reprocessing
     processed_order_ids: processedOrderIds
   };
 }
@@ -229,9 +229,10 @@ async function getTotalConversionsCount(redis) {
   return totalCount;
 }
 
-// FIXED: Get existing journey order IDs for tracking progress
+// FIXED: Get existing journey order IDs for tracking progress - ONLY count journeys with touchpoints
 async function getExistingJourneyOrderIds(redis) {
   const processedOrderIds = new Set();
+  const brokenJourneyIds = new Set(); // Track broken journeys for reprocessing
   let cursor = '0';
   const maxIterations = 50;
   let iterations = 0;
@@ -258,7 +259,13 @@ async function getExistingJourneyOrderIds(redis) {
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
               if (journey.conversion_order_id) {
-                return journey.conversion_order_id;
+                // CRITICAL FIX: Only count journeys with touchpoints as "processed"
+                if (journey.total_touchpoints > 0) {
+                  return { orderId: journey.conversion_order_id, status: 'complete' };
+                } else {
+                  // Mark broken journeys for potential reprocessing
+                  return { orderId: journey.conversion_order_id, status: 'broken', key: key };
+                }
               }
             }
           } catch (e) {
@@ -268,8 +275,12 @@ async function getExistingJourneyOrderIds(redis) {
         });
         
         const batchResults = await Promise.all(batchPromises);
-        batchResults.filter(orderId => orderId !== null).forEach(orderId => {
-          processedOrderIds.add(orderId);
+        batchResults.filter(result => result !== null).forEach(result => {
+          if (result.status === 'complete') {
+            processedOrderIds.add(result.orderId);
+          } else if (result.status === 'broken') {
+            brokenJourneyIds.add(result.orderId);
+          }
         });
       }
       
@@ -280,7 +291,8 @@ async function getExistingJourneyOrderIds(redis) {
     console.warn('⚠️ Error loading existing journey order IDs:', error.message);
   }
   
-  console.log(`📊 Found ${processedOrderIds.size} existing journey order IDs`);
+  console.log(`📊 Found ${processedOrderIds.size} complete journeys (with touchpoints)`);
+  console.log(`📊 Found ${brokenJourneyIds.size} broken journeys (0 touchpoints) - these will be reprocessed`);
   return processedOrderIds;
 }
 
@@ -357,7 +369,7 @@ async function loadRemainingConversions(redis, processedOrderIds, targetEmail = 
               const email = conversion.customer_email || conversion.email;
               const orderId = conversion.conversion_order_id || conversion.order_id;
               
-              // Skip if already processed
+              // Skip if already processed (only journeys with touchpoints are considered "processed")
               if (processedOrderIds.has(orderId)) {
                 return null;
               }
