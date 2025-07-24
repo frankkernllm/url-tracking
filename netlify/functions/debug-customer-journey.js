@@ -217,7 +217,7 @@ exports.handler = async (event, context) => {
   
   // API key validation
   const apiKey = event.headers['x-api-key'] || event.headers['X-API-Key'];
-  if (apiKey !== 'ojoy_track_2025_secure_key_v1') {
+  if (apiKey !== process.env.OJOY_API_KEY) {
     return createCorsResponse(401, { error: 'Invalid API key' });
   }
   
