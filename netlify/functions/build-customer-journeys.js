@@ -22,9 +22,9 @@ exports.handler = async (event, context) => {
     
     const redis = initializeRedis();
     
-    // Parse request parameters
+    // Parse request parameters  
     const body = event.body ? JSON.parse(event.body) : {};
-    const batchSize = body.batch_size || 20;
+    const batchSize = body.batch_size || 40; // 🚀 INCREASED: Default batch size for faster processing
     const journeyWindowHours = body.journey_window_hours || 168;
     
     // 🆕 FIXED: Load existing progress or start fresh
