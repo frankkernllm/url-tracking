@@ -1,5 +1,9 @@
 // netlify/functions/build-customer-journeys.js
-// FIXED: Proper stateless resume with correct field names and chronological processing
+// FIXED VERSION: Uses same working attribution logic as query-pageviews-enhanced.js
+// KEY CHANGES: 
+// 1. Properly split comma-separated IPs from conversions
+// 2. Use enhanced IP indexes as primary attribution source
+// 3. Fixed IPv6 encoding (colons to underscores)
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -26,601 +30,311 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🏗️ FIXED: Customer Journey Builder Starting...');
+    console.log('🔧 FIXED CUSTOMER JOURNEY BUILDER: Starting with corrected attribution logic...');
     const startTime = Date.now();
-    const maxProcessingTime = 25000; // 25 seconds
+    const maxProcessingTime = 25000; // 25 seconds max
     
     const redis = initializeRedis();
     
     // Get parameters
     const body = event.body ? JSON.parse(event.body) : {};
     const {
-      batch_size = 100,
-      reset_progress = false,
-      target_email = null,
-      max_conversions = null
+      journey_window_hours = 168, // 7-day journey lookback window
+      batch_size = 20,            // Process 20 conversions per batch
+      force_rebuild = false       // Force rebuild specific conversions
     } = body;
     
-    // FIXED: Get proper conversion/journey analysis
-    const analysis = await getConversionJourneyAnalysis(redis, reset_progress);
+    console.log(`📊 Journey Parameters: ${journey_window_hours}h lookback window, batch size: ${batch_size}`);
     
-    if (!reset_progress && analysis.remaining_conversions === 0) {
+    // Step 1: Load ALL conversions (no date limits - truly stateless)
+    const allConversions = await loadAllConversionsStateless(redis, maxProcessingTime - (Date.now() - startTime));
+    console.log(`💰 Found ${allConversions.length} total conversions in database`);
+    
+    if (allConversions.length === 0) {
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({
           success: true,
-          status: 'all_journeys_complete',
-          total_conversions: analysis.total_conversions,
-          journeys_built: analysis.existing_journeys,
-          message: '🎉 ALL CUSTOMER JOURNEYS COMPLETE!',
-          processing_time_ms: Date.now() - startTime,
-          completion_percentage: '100.0%'
+          message: 'No conversions found in database'
         })
       };
     }
     
-    console.log(`📊 ANALYSIS: ${analysis.total_conversions} total conversions, ${analysis.existing_journeys} already processed, ${analysis.remaining_conversions} remaining`);
+    // Step 2: Find conversions needing journeys or force rebuild
+    const conversionsNeedingJourneys = force_rebuild ? 
+      allConversions : 
+      await filterConversionsNeedingJourneysOptimized(redis, allConversions, maxProcessingTime - (Date.now() - startTime));
     
-    // FIXED: Load remaining conversions in chronological order
-    const conversionsToProcess = await loadRemainingConversions(
+    console.log(`📊 Journey Status: ${conversionsNeedingJourneys.length} need processing, ${allConversions.length - conversionsNeedingJourneys.length} already complete`);
+    
+    if (conversionsNeedingJourneys.length === 0) {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          build_complete: true,
+          message: '🎉 ALL CUSTOMER JOURNEYS COMPLETE!',
+          summary: {
+            total_conversions: allConversions.length,
+            conversions_with_journeys: allConversions.length,
+            conversion_coverage: '100%',
+            processing_status: 'complete'
+          }
+        })
+      };
+    }
+    
+    // Step 3: Process conversions with FIXED attribution logic
+    const processingResults = await processConversionsWithFixedAttribution(
       redis, 
-      analysis.processed_order_ids, 
-      target_email, 
-      max_conversions || batch_size
+      conversionsNeedingJourneys, 
+      journey_window_hours,
+      batch_size,
+      maxProcessingTime - (Date.now() - startTime)
     );
     
-    if (conversionsToProcess.length === 0) {
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          success: true,
-          status: 'no_remaining_conversions',
-          message: 'No remaining conversions to process.',
-          total_conversions: analysis.total_conversions,
-          journeys_built: analysis.existing_journeys,
-          processing_time_ms: Date.now() - startTime,
-          completion_percentage: ((analysis.existing_journeys / analysis.total_conversions) * 100).toFixed(1) + '%'
-        })
-      };
-    }
-    
-    console.log(`🔨 Processing ${conversionsToProcess.length} conversions (${conversionsToProcess[0]?.timestamp} to ${conversionsToProcess[conversionsToProcess.length-1]?.timestamp})`);
-    
-    // Process conversions with proper attribution
-    let totalJourneysBuilt = 0;
-    let totalAttributionCalls = 0;
-    let totalAttributionSuccesses = 0;
-    
-    for (let i = 0; i < conversionsToProcess.length; i += Math.min(batch_size, 50)) {
-      if (Date.now() - startTime > maxProcessingTime - 3000) {
-        console.log('⏰ Time limit approaching, stopping build process');
-        break;
-      }
-      
-      const batch = conversionsToProcess.slice(i, i + Math.min(batch_size, 50));
-      console.log(`🔨 Processing batch ${Math.floor(i/50) + 1}: ${batch.length} conversions`);
-      
-      const batchResult = await processBatchFixed(redis, batch);
-      
-      totalJourneysBuilt += batchResult.journeys.length;
-      totalAttributionCalls += batchResult.attribution_calls;
-      totalAttributionSuccesses += batchResult.attribution_successes;
-      
-      // Store journeys
-      for (const journey of batchResult.journeys) {
-        const journeyKey = `customer_journey:${journey.journey_id}`;
-        await redis(`setex/${journeyKey}/2592000/${encodeURIComponent(JSON.stringify(journey))}`); // 30-day TTL
-      }
-    }
-    
     const totalTime = Date.now() - startTime;
-    const newTotalJourneys = analysis.existing_journeys + totalJourneysBuilt;
-    const completionPercentage = ((newTotalJourneys / analysis.total_conversions) * 100).toFixed(1);
-    const conversionsRemaining = analysis.total_conversions - newTotalJourneys;
+    const completionPercentage = ((allConversions.length - processingResults.conversions_remaining) / allConversions.length * 100).toFixed(1);
     
-    console.log(`✅ BATCH COMPLETE: ${totalJourneysBuilt} new journeys built in ${totalTime}ms`);
+    console.log(`✅ FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        status: conversionsRemaining === 0 ? 'all_journeys_complete' : 'batch_complete',
-        batch_summary: {
-          conversions_processed: totalJourneysBuilt,
-          attribution_calls: totalAttributionCalls,
-          attribution_successes: totalAttributionSuccesses,
-          attribution_success_rate: totalAttributionCalls > 0 ? 
-            ((totalAttributionSuccesses / totalAttributionCalls) * 100).toFixed(1) + '%' : '0%',
+        attribution_fixed: true,
+        build_complete: processingResults.is_complete,
+        execution_summary: {
+          total_conversions_in_database: allConversions.length,
+          conversions_needing_journeys_at_start: conversionsNeedingJourneys.length,
+          conversions_processed_this_run: processingResults.conversions_processed_this_run,
+          journeys_created_this_run: processingResults.journeys_created_this_run,
+          conversions_remaining: processingResults.conversions_remaining,
+          completion_percentage: completionPercentage,
           processing_time_ms: totalTime,
-          journeys_per_second: Math.round(totalJourneysBuilt / (totalTime / 1000))
+          fixed_attribution_calls: processingResults.attribution_calls_made,
+          attribution_success_rate: processingResults.attribution_success_rate
         },
-        progress: {
-          total_conversions: analysis.total_conversions,
-          journeys_built: newTotalJourneys,
-          conversions_remaining: conversionsRemaining,
-          completion_percentage: completionPercentage + '%'
+        performance_metrics: {
+          conversions_per_second: Math.round(processingResults.conversions_processed_this_run / (totalTime / 1000)),
+          average_attribution_time_ms: processingResults.avg_attribution_time_ms,
+          enhanced_ip_index_usage: 'primary_attribution_source'
         },
-        next_steps: conversionsRemaining === 0 ? [
-          '🎉 ALL CUSTOMER JOURNEYS COMPLETE!',
-          'System ready for comprehensive multi-touch attribution analysis',
-          'Use query-customer-journeys.js for business intelligence reports'
-        ] : [
-          `Continue processing: ${conversionsRemaining} conversions remaining`,
-          'Run the same command again to continue automatically',
-          `Estimated runs remaining: ${Math.ceil(conversionsRemaining / batch_size)}`
+        fixes_applied: [
+          'Split comma-separated IPs from conversions',
+          'Use enhanced IP indexes as primary source',
+          'Fixed IPv6 encoding (colons to underscores)',
+          'Proper multi-signal attribution matching'
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Journey building failed:', error);
+    console.error('❌ Fixed journey building failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Journey building failed', 
-        message: error.message
+        error: 'Fixed journey building failed', 
+        message: error.message 
       })
     };
   }
 };
 
-// FIXED: Proper analysis of conversions vs existing journeys
-async function getConversionJourneyAnalysis(redis, resetProgress = false) {
-  console.log('📊 Analyzing conversions vs existing journeys...');
-  
-  // Get total conversions count
-  const totalConversions = await getTotalConversionsCount(redis);
-  
-  if (resetProgress) {
-    console.log('🔄 Reset requested - clearing all existing journeys');
-    await clearAllExistingJourneys(redis);
-    return {
-      total_conversions: totalConversions,
-      existing_journeys: 0,
-      remaining_conversions: totalConversions,
-      processed_order_ids: new Set()
-    };
-  }
-  
-  // Get existing journey order IDs
-  const processedOrderIds = await getExistingJourneyOrderIds(redis);
-  
-  console.log(`📊 Found ${totalConversions} total conversions, ${processedOrderIds.size} existing journeys`);
-  
-  return {
-    total_conversions: totalConversions,
-    existing_journeys: processedOrderIds.size, // All journey attempts (prevents infinite loops)
-    remaining_conversions: totalConversions - processedOrderIds.size, // Only truly unprocessed conversions
-    processed_order_ids: processedOrderIds
-  };
-}
-
-// FIXED: Get accurate total conversions count
-async function getTotalConversionsCount(redis) {
-  let totalCount = 0;
-  let cursor = '0';
-  const maxIterations = 50;
-  let iterations = 0;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/500`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      totalCount += keys.length;
-      iterations++;
-      
-    } while (cursor !== '0' && iterations < maxIterations);
-    
-  } catch (error) {
-    console.warn('⚠️ Error counting conversions:', error.message);
-  }
-  
-  console.log(`📊 Total conversions found: ${totalCount}`);
-  return totalCount;
-}
-
-// FIXED: Get existing journey order IDs for tracking progress - Count ALL journey attempts to prevent infinite loops
-async function getExistingJourneyOrderIds(redis) {
-  const processedOrderIds = new Set();
-  const successfulJourneyIds = new Set(); // Track successful journeys separately for reporting
-  let cursor = '0';
-  const maxIterations = 50;
-  let iterations = 0;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/500`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      
-      // Load journey data to get order IDs
-      const batchSize = 50;
-      for (let i = 0; i < keys.length; i += batchSize) {
-        const batch = keys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const journeyData = await redis(`get/${key}`, 1000);
-            if (journeyData?.result) {
-              const journey = JSON.parse(decodeURIComponent(journeyData.result));
-              if (journey.conversion_order_id) {
-                // CRITICAL FIX: Count ALL journey attempts as processed to prevent infinite loops
-                processedOrderIds.add(journey.conversion_order_id);
-                
-                // Track successful journeys separately for reporting
-                if (journey.total_touchpoints > 0) {
-                  successfulJourneyIds.add(journey.conversion_order_id);
-                }
-                
-                return { orderId: journey.conversion_order_id, hasData: journey.total_touchpoints > 0 };
-              }
-            }
-          } catch (e) {
-            // Skip invalid journeys
-          }
-          return null;
-        });
-        
-        const batchResults = await Promise.all(batchPromises);
-        // Results already processed in the map function above
-      }
-      
-      iterations++;
-    } while (cursor !== '0' && iterations < maxIterations);
-    
-  } catch (error) {
-    console.warn('⚠️ Error loading existing journey order IDs:', error.message);
-  }
-  
-  console.log(`📊 Found ${processedOrderIds.size} journey attempts (prevents reprocessing)`);
-  console.log(`📊 Found ${successfulJourneyIds.size} successful journeys (with pageview data)`);
-  console.log(`📊 ${processedOrderIds.size - successfulJourneyIds.size} conversions have no pageview data available`);
-  
-  return processedOrderIds;
-}
-
-// Clear all existing journeys for reset
-async function clearAllExistingJourneys(redis) {
-  let cursor = '0';
-  let deletedCount = 0;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/100`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      
-      // Delete journeys in batches
-      for (const key of keys) {
-        try {
-          await redis(`del/${key}`);
-          deletedCount++;
-        } catch (e) {
-          // Skip deletion errors
-        }
-      }
-      
-    } while (cursor !== '0' && deletedCount < 10000); // Safety limit
-    
-  } catch (error) {
-    console.warn('⚠️ Error clearing existing journeys:', error.message);
-  }
-  
-  console.log(`🗑️ Cleared ${deletedCount} existing journey records`);
-}
-
-// FIXED: Load remaining conversions in chronological order
-async function loadRemainingConversions(redis, processedOrderIds, targetEmail = null, maxConversions = 100) {
-  console.log('📊 Loading remaining conversions in chronological order...');
-  
-  const conversions = [];
-  let cursor = '0';
-  let keysScanned = 0;
-  const maxIterations = 50;
-  let iterations = 0;
-  
-  try {
-    do {
-      const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/200`);
-      
-      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        break;
-      }
-      
-      cursor = scanResult.result[0];
-      const keys = scanResult.result[1] || [];
-      keysScanned += keys.length;
-      iterations++;
-      
-      // Load conversion data
-      const batchSize = 50;
-      for (let i = 0; i < keys.length; i += batchSize) {
-        const batch = keys.slice(i, i + batchSize);
-        
-        const batchPromises = batch.map(async (key) => {
-          try {
-            const conversionData = await redis(`get/${key}`, 1500);
-            if (conversionData?.result) {
-              const conversion = JSON.parse(decodeURIComponent(conversionData.result));
-              
-              // FIXED: Check correct field names (customer_email AND email)
-              const email = conversion.customer_email || conversion.email;
-              const orderId = conversion.conversion_order_id || conversion.order_id;
-              
-              // Skip if already processed (any journey attempt counts as processed to prevent infinite loops)
-              if (processedOrderIds.has(orderId)) {
-                return null;
-              }
-              
-              // Filter by target email if specified
-              if (targetEmail && email !== targetEmail) {
-                return null;
-              }
-              
-              // Only process conversions with email and order_id
-              if (email && orderId) {
-                return {
-                  ...conversion,
-                  // Normalize field names
-                  customer_email: email,
-                  conversion_order_id: orderId,
-                  timestamp: conversion.timestamp || conversion.conversion_timestamp,
-                  _redis_key: key
-                };
-              }
-            }
-          } catch (parseError) {
-            // Skip invalid data
-          }
-          return null;
-        });
-        
-        const batchResults = await Promise.all(batchPromises);
-        const validConversions = batchResults.filter(c => c !== null);
-        conversions.push(...validConversions);
-        
-        // Stop if we've reached max conversions
-        if (maxConversions && conversions.length >= maxConversions) {
-          break;
-        }
-      }
-      
-      if (maxConversions && conversions.length >= maxConversions) {
-        break;
-      }
-      
-    } while (cursor !== '0' && iterations < maxIterations);
-    
-  } catch (error) {
-    console.warn('⚠️ Error loading conversions:', error.message);
-  }
-  
-  // FIXED: Sort chronologically (most recent first for faster processing of recent conversions)
-  conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  
-  const finalConversions = conversions.slice(0, maxConversions || 100);
-  console.log(`✅ Loaded ${finalConversions.length} remaining conversions for processing`);
-  
-  if (finalConversions.length > 0) {
-    console.log(`📅 Date range: ${finalConversions[finalConversions.length-1]?.timestamp} to ${finalConversions[0]?.timestamp}`);
-  }
-  
-  return finalConversions;
-}
-
-// FIXED: Process batch with better error handling and attribution debugging
-async function processBatchFixed(redis, conversions) {
-  let attributionCalls = 0;
+// FIXED: Process conversions with corrected attribution logic
+async function processConversionsWithFixedAttribution(redis, conversions, journeyWindowHours, batchSize, maxTime) {
+  const processStartTime = Date.now();
+  let journeysCreated = 0;
+  let conversionsProcessed = 0;
+  let attributionCallsMade = 0;
   let attributionSuccesses = 0;
+  let totalAttributionTime = 0;
   
-  const batchPromises = conversions.map(async (conversion) => {
+  const batchPromises = conversions.slice(0, batchSize).map(async (conversion) => {
     try {
-      attributionCalls++;
-      const journey = await buildJourneyFromConversionFixed(redis, conversion);
+      attributionCallsMade++;
+      conversionsProcessed++;
       
-      if (journey && journey.total_touchpoints > 0) {
+      // FIXED ATTRIBUTION LOGIC: Extract and split comma-separated IPs
+      const extractedIPs = extractAndSplitIPs(conversion);
+      
+      console.log(`🔧 Processing conversion ${conversion.order_id}: Found ${extractedIPs.length} IPs`);
+      
+      const attributionStartTime = Date.now();
+      const journeyPageviews = await performFixedAttribution(redis, {
+        conversion_timestamp: conversion.timestamp,
+        ips_to_check: extractedIPs,  // Use properly extracted IPs
+        session_id: conversion.session_id,
+        device_signature: conversion.device_signature,
+        screen_value: conversion.screen_value,
+        gpu_signature: conversion.gpu_signature,
+        window_hours: journeyWindowHours
+      });
+      
+      totalAttributionTime += (Date.now() - attributionStartTime);
+      
+      if (journeyPageviews && journeyPageviews.length > 0) {
         attributionSuccesses++;
-        console.log(`✅ Attribution success for ${conversion.customer_email}: ${journey.total_touchpoints} touchpoints`);
+        console.log(`✅ Attribution SUCCESS for ${conversion.order_id}: ${journeyPageviews.length} pageviews found`);
+        
+        // Build complete customer journey from found pageviews
+        const journey = buildJourneyFromPageviews(conversion, journeyPageviews);
+        
+        // Store journey record
+        await storeCustomerJourney(redis, journey);
+        journeysCreated++;
+        
+        return journey;
       } else {
-        console.log(`❌ Attribution failed for ${conversion.customer_email} (Order: ${conversion.conversion_order_id})`);
+        console.log(`❌ Attribution FAILED for ${conversion.order_id}: No pageviews found`);
+        
+        // Create conversion-only journey if no pageviews found
+        const conversionOnlyJourney = createConversionOnlyJourney(conversion);
+        await storeCustomerJourney(redis, conversionOnlyJourney);
+        journeysCreated++;
+        
+        return conversionOnlyJourney;
       }
       
-      return journey;
-    } catch (error) {
-      console.warn('⚠️ Failed to build journey:', conversion.conversion_order_id, error.message);
-      return null;
+    } catch (journeyError) {
+      console.warn(`⚠️ Error building journey for conversion ${conversion.order_id}:`, journeyError.message);
+      // Create fallback journey
+      const fallbackJourney = createConversionOnlyJourney(conversion);
+      await storeCustomerJourney(redis, fallbackJourney);
+      journeysCreated++;
+      return fallbackJourney;
     }
   });
   
-  const batchJourneys = await Promise.all(batchPromises);
-  const validJourneys = batchJourneys.filter(journey => journey !== null);
+  await Promise.all(batchPromises);
+  
+  const remainingConversions = Math.max(0, conversions.length - conversionsProcessed);
+  const avgAttributionTime = attributionCallsMade > 0 ? Math.round(totalAttributionTime / attributionCallsMade) : 0;
+  const attributionSuccessRate = attributionCallsMade > 0 ? ((attributionSuccesses / attributionCallsMade) * 100).toFixed(1) : '0.0';
+  
+  console.log(`🏁 FIXED Processing summary: ${journeysCreated} journeys, ${attributionSuccessRate}% attribution success rate`);
   
   return {
-    journeys: validJourneys,
-    attribution_calls: attributionCalls,
-    attribution_successes: attributionSuccesses
+    journeys_created_this_run: journeysCreated,
+    conversions_processed_this_run: conversionsProcessed,
+    conversions_remaining: remainingConversions,
+    is_complete: remainingConversions === 0,
+    attribution_calls_made: attributionCallsMade,
+    attribution_success_rate: attributionSuccessRate,
+    avg_attribution_time_ms: avgAttributionTime,
+    processing_time_ms: Date.now() - processStartTime
   };
 }
 
-// FIXED: Build journey with corrected field names and better debugging
-async function buildJourneyFromConversionFixed(redis, conversion) {
-  const orderId = conversion.conversion_order_id;
-  if (!orderId) {
-    console.warn('⚠️ No order ID found for conversion:', conversion);
-    return null;
-  }
-
-  const journeyId = `journey_${orderId}_${Date.now()}`;
+// NEW: Extract and split comma-separated IPs (CRITICAL FIX)
+function extractAndSplitIPs(conversion) {
+  const ips = [];
   
-  // FIXED: Extract ALL available IP addresses with correct field names
-  const allIPs = [];
-  if (conversion.primary_ip && conversion.primary_ip !== 'unknown') {
-    allIPs.push(conversion.primary_ip);
-  }
-  if (conversion.conversion_ip && conversion.conversion_ip !== 'unknown' && conversion.conversion_ip !== conversion.primary_ip) {
-    allIPs.push(conversion.conversion_ip);
-  }
-  if (conversion.pageview_ip && conversion.pageview_ip !== 'unknown' && !allIPs.includes(conversion.pageview_ip)) {
-    allIPs.push(conversion.pageview_ip);
-  }
-  // Also check IP field variants
-  if (conversion.ip_address && conversion.ip_address !== 'unknown' && !allIPs.includes(conversion.ip_address)) {
-    allIPs.push(conversion.ip_address);
-  }
-  if (conversion.IP && conversion.IP !== 'unknown' && !allIPs.includes(conversion.IP)) {
-    allIPs.push(conversion.IP);
-  }
-
-  console.log(`🔍 Building journey for ${conversion.customer_email} (Order: ${orderId}) with ${allIPs.length} IPs:`, allIPs);
-
-  let pageviews = [];
-  let attributionMethod = 'conversion_only';
-  let attributionScore = 0;
-
-  try {
-    // FIXED: Use enhanced attribution with proper debugging
-    const attributionParams = {
-      conversion_timestamp: conversion.timestamp,
-      ips_to_check: allIPs,
-      session_id: conversion.session_id,
-      device_signature: conversion.device_signature || conversion.dsig || conversion.canvas_fingerprint,
-      screen_value: conversion.screen_value || conversion.SVV,
-      gpu_signature: conversion.gpu_signature || conversion.gsig,
-      window_hours: 168 // 7 days
-    };
-
-    console.log(`🔍 Attribution params:`, {
-      ips: allIPs.length,
-      session: !!attributionParams.session_id,
-      device: !!attributionParams.device_signature,
-      window_hours: attributionParams.window_hours
-    });
-
-    const attributionResults = await performFixedAttribution(redis, attributionParams);
-    
-    if (attributionResults && attributionResults.length > 0) {
-      pageviews = attributionResults.map(pv => ({
-        timestamp: pv.timestamp,
-        landing_page: pv.landing_page,
-        source: pv.source,
-        utm_source: pv.utm_source,
-        utm_medium: pv.utm_medium,
-        utm_campaign: pv.utm_campaign,
-        utm_term: pv.utm_term,
-        utm_content: pv.utm_content,
-        referrer_url: pv.referrer_url,
-        session_id: pv.session_id,
-        confidence: pv.confidence,
-        attribution_method: pv.attribution_method,
-        matched_ip: pv.matched_ip,
-        ip_source: pv.ip_source
-      }));
-
-      // Use highest confidence attribution method
-      const highestConfidence = Math.max(...pageviews.map(pv => pv.confidence || 0));
-      const primaryAttribution = pageviews.find(pv => pv.confidence === highestConfidence);
-      
-      attributionMethod = primaryAttribution?.attribution_method || 'ip_match';
-      attributionScore = highestConfidence;
-      
-      console.log(`✅ Journey built: ${pageviews.length} pageviews, method: ${attributionMethod}, score: ${attributionScore}`);
-    } else {
-      console.log(`❌ No pageviews found for conversion ${orderId}`);
+  // Check all possible IP fields
+  const ipFields = [
+    'main_ip_address', 'winning_ip_value', 'primary_ip', 'conversion_ip', 
+    'pageview_ip', 'ip_address', 'PIP', 'CIP', 'IP'
+  ];
+  
+  ipFields.forEach(field => {
+    const value = conversion[field];
+    if (value && value !== 'unknown') {
+      if (typeof value === 'string' && value.includes(',')) {
+        // CRITICAL FIX: Split comma-separated IPs
+        const splitIPs = value.split(',').map(ip => ip.trim()).filter(ip => ip && ip !== 'unknown');
+        ips.push(...splitIPs);
+      } else {
+        ips.push(value);
+      }
     }
-
-  } catch (error) {
-    console.warn('⚠️ Attribution failed:', orderId, error.message);
-  }
-
-  // Build journey object with correct field names
-  const journey = {
-    journey_id: journeyId,
-    customer_email: conversion.customer_email,
-    conversion_order_id: orderId,
-    conversion_timestamp: conversion.timestamp,
-    conversion_value: parseFloat(conversion.order_total || conversion.value || 0),
-    total_touchpoints: pageviews.length,
-    pageviews: pageviews,
-    attribution_method: attributionMethod,
-    attribution_score: attributionScore,
-    
-    // Dual-IP tracking
-    dual_ip_scenario: allIPs.length > 1,
-    ip_addresses_checked: allIPs,
-    
-    // Journey analysis
-    first_click_source: pageviews.length > 0 ? pageviews[0].source : null,
-    last_click_source: pageviews.length > 0 ? pageviews[pageviews.length - 1].source : null,
-    journey_span_hours: pageviews.length > 0 ? 
-      Math.round((new Date(conversion.timestamp).getTime() - new Date(pageviews[0].timestamp).getTime()) / (1000 * 60 * 60)) : 0,
-    
-    created_at: new Date().toISOString()
-  };
-
-  return journey;
+  });
+  
+  // Remove duplicates and return
+  return [...new Set(ips)];
 }
 
-// FIXED: Attribution logic with better debugging
+// FIXED: Attribution logic using enhanced IP indexes (same as query-pageviews-enhanced.js)
 async function performFixedAttribution(redis, params) {
   const { conversion_timestamp, ips_to_check, session_id, device_signature, screen_value, gpu_signature, window_hours } = params;
   
   const conversionTime = new Date(conversion_timestamp).getTime();
   const windowStart = conversionTime - (window_hours * 60 * 60 * 1000);
   
-  console.log(`🔍 Attribution window: ${new Date(windowStart).toISOString()} to ${new Date(conversionTime).toISOString()}`);
-  
   let allMatches = [];
   
   try {
-    // PRIORITY 1: Enhanced IP Index Search (this should work since query-pageviews-enhanced works)
+    // PRIORITY 1: Enhanced IP Index Multi-Signal Search (FIXED - same as working query-pageviews-enhanced.js)
     if (ips_to_check && ips_to_check.length > 0) {
-      console.log(`🔍 Checking ${ips_to_check.length} IP addresses for pageviews...`);
+      console.log(`🚀 FIXED: Enhanced IP index search for ${ips_to_check.length} IPs`);
+      const ipMatches = await searchByEnhancedIPIndexes(redis, ips_to_check, session_id, device_signature, screen_value, gpu_signature, windowStart, conversionTime);
       
-      for (let i = 0; i < ips_to_check.length; i++) {
-        const ip = ips_to_check[i];
-        if (!ip || ip === 'unknown') continue;
+      if (ipMatches.length > 0) {
+        console.log(`✅ Enhanced IP indexes: ${ipMatches.length} matches found`);
+        allMatches = allMatches.concat(ipMatches);
         
-        console.log(`   Checking IP ${i + 1}/${ips_to_check.length}: ${ip}`);
-        
-        const ipMatches = await searchByFixedIPIndexes(redis, ip, windowStart, conversionTime);
-        
-        if (ipMatches.length > 0) {
-          console.log(`   ✅ Found ${ipMatches.length} pageviews for IP: ${ip}`);
-          
-          // Set confidence based on IP priority
-          const confidence = i === 0 ? 280 : i === 1 ? 260 : 240;
-          const ipType = i === 0 ? 'primary_ip' : i === 1 ? 'conversion_ip' : 'pageview_ip';
-          
-          ipMatches.forEach(match => {
-            match.attribution_method = `${ipType}_match`;
-            match.confidence = Math.max(match.confidence || 0, confidence);
-            match.ip_source = ipType;
-            match.matched_ip = ip;
+        // If we found high-confidence matches, return immediately for performance
+        const highConfidenceMatches = ipMatches.filter(match => match.confidence >= 250);
+        if (highConfidenceMatches.length > 0) {
+          console.log(`🎯 High confidence matches found, returning immediately`);
+          return highConfidenceMatches;
+        }
+      }
+    }
+    
+    // FALLBACK METHODS: Only if no matches found in enhanced IP indexes
+    if (allMatches.length === 0) {
+      console.log(`📍 FALLBACK: No enhanced IP matches, trying fallback methods...`);
+      
+      // Session ID fallback (for very recent data not yet indexed)
+      if (session_id) {
+        const sessionMatches = await searchBySessionId(redis, session_id, windowStart, conversionTime);
+        if (sessionMatches.length > 0) {
+          sessionMatches.forEach(match => {
+            match.attribution_method = 'session_id_match_direct';
+            match.confidence = 300;
           });
+          allMatches = allMatches.concat(sessionMatches);
+          console.log(`✅ Session ID fallback: ${sessionMatches.length} matches found`);
+        }
+      }
+      
+      // Device signature fallback
+      if (device_signature && allMatches.length === 0) {
+        const deviceMatches = await searchByDeviceSignature(redis, device_signature, windowStart, conversionTime);
+        if (deviceMatches.length > 0) {
+          deviceMatches.forEach(match => {
+            match.attribution_method = 'device_signature_match_direct';
+            match.confidence = 260;
+          });
+          allMatches = allMatches.concat(deviceMatches);
+          console.log(`✅ Device signature fallback: ${deviceMatches.length} matches found`);
+        }
+      }
+      
+      // Basic IP fallback (original attribution_ keys)
+      if (ips_to_check && allMatches.length === 0) {
+        for (let i = 0; i < ips_to_check.length; i++) {
+          const ip = ips_to_check[i];
+          if (!ip || ip === 'unknown') continue;
           
-          allMatches = allMatches.concat(ipMatches);
-        } else {
-          console.log(`   ❌ No pageviews found for IP: ${ip}`);
+          const ipMatches = await searchByIpAddress(redis, ip, windowStart, conversionTime);
+          if (ipMatches.length > 0) {
+            const confidence = i === 0 ? 280 : i === 1 ? 260 : 240;
+            const ipType = i === 0 ? 'primary_ip' : i === 1 ? 'conversion_ip' : 'fallback_ip';
+            
+            ipMatches.forEach(match => {
+              match.attribution_method = `${ipType}_match_direct`;
+              match.confidence = confidence;
+            });
+            
+            allMatches = allMatches.concat(ipMatches);
+            console.log(`✅ IP fallback ${ip}: ${ipMatches.length} matches found`);
+            break; // Stop at first IP match
+          }
         }
       }
     }
@@ -629,7 +343,6 @@ async function performFixedAttribution(redis, params) {
     const uniqueMatches = removeDuplicateMatches(allMatches);
     uniqueMatches.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
     
-    console.log(`📊 Attribution result: ${uniqueMatches.length} unique pageviews found`);
     return uniqueMatches;
     
   } catch (error) {
@@ -638,69 +351,386 @@ async function performFixedAttribution(redis, params) {
   }
 }
 
-// FIXED: IP index search with better error handling and debugging
-async function searchByFixedIPIndexes(redis, ip, windowStart, windowEnd) {
+// FIXED: Enhanced IP index search (exact copy from working query-pageviews-enhanced.js)
+async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSignature, screenValue, gpuSignature, windowStart, windowEnd) {
   const matches = [];
-  const encodedIP = ip.replace(/[:.]/g, '_');
-  const ipIndexKey = `pageview_index_ip:${encodedIP}`;
   
-  try {
-    console.log(`    🔍 Looking up index key: ${ipIndexKey}`);
+  console.log(`🔍 Searching enhanced IP indexes for ${ipsToCheck.length} IPs...`);
+  
+  for (const ip of ipsToCheck) {
+    // CRITICAL FIX: Proper IPv6 encoding (colons to underscores)
+    const encodedIP = ip.replace(/:/g, '_');
+    const ipIndexKey = `pageview_index_ip:${encodedIP}`;
     
-    const indexData = await redis(`get/${ipIndexKey}`);
+    console.log(`🔍 Checking IP index: ${ipIndexKey} for IP: ${ip}`);
     
-    if (!indexData?.result) {
-      console.log(`    ❌ No index found for IP: ${ip}`);
-      return [];
+    try {
+      const indexData = await redis(`get/${ipIndexKey}`);
+      
+      if (indexData?.result) {
+        const parsed = JSON.parse(decodeURIComponent(indexData.result));
+        
+        // Verify this is an enhanced index with multi-signal data
+        if (!parsed.multi_signal_ready) {
+          console.log(`⚠️ IP index ${ip} not enhanced yet, skipping`);
+          continue;
+        }
+        
+        console.log(`📊 Enhanced IP index found for ${ip}: ${parsed.pageview_count} pageviews with multi-signal data`);
+        
+        // Filter pageviews within time window
+        const windowPageviews = parsed.pageviews.filter(pv => {
+          const pvTime = new Date(pv.timestamp).getTime();
+          return pvTime >= windowStart && pvTime <= windowEnd;
+        });
+        
+        console.log(`⏰ Time window filter: ${windowPageviews.length}/${parsed.pageviews.length} pageviews within window`);
+        
+        // Multi-signal matching within IP index
+        for (const pv of windowPageviews) {
+          let confidence = 240; // Base IP match confidence
+          let attributionMethod = 'ip_index_match';
+          
+          // Session ID match (highest confidence)
+          if (sessionId && pv.session_id === sessionId) {
+            confidence = 295;
+            attributionMethod = 'session_id_match_ip_index';
+            console.log(`🎯 Session ID match found in IP index`);
+          }
+          // Device signature match
+          else if (deviceSignature && pv.canvas_fingerprint === deviceSignature) {
+            confidence = 255;
+            attributionMethod = 'device_signature_match_ip_index';
+            console.log(`📱 Device signature match found in IP index`);
+          }
+          // Screen signature match
+          else if (screenValue && pv.screen_resolution && hashString(pv.screen_resolution) === screenValue) {
+            confidence = 195;
+            attributionMethod = 'screen_signature_match_ip_index';
+            console.log(`📺 Screen signature match found in IP index`);
+          }
+          // GPU signature match
+          else if (gpuSignature && pv.webgl_fingerprint && hashString(pv.webgl_fingerprint) === gpuSignature) {
+            confidence = 175;
+            attributionMethod = 'webgl_signature_match_ip_index';
+            console.log(`🎮 WebGL signature match found in IP index`);
+          }
+          
+          matches.push({
+            ...pv,
+            matched_ip: ip,
+            match_method: 'enhanced_ip_index_multi_signal',
+            attribution_method: attributionMethod,
+            confidence: confidence,
+            index_source: 'enhanced_ip_index'
+          });
+        }
+      } else {
+        console.log(`⚠️ No enhanced IP index found for ${ip} (key: ${ipIndexKey})`);
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️ Enhanced IP index search failed for ${ip}:`, error.message);
     }
-    
-    const parsed = JSON.parse(decodeURIComponent(indexData.result));
-    console.log(`    📊 Index contains ${parsed.pageviews?.length || 0} pageviews`);
-    
-    if (!parsed.pageviews || parsed.pageviews.length === 0) {
-      console.log(`    ❌ Index exists but no pageviews in it`);
-      return [];
-    }
-    
-    // Filter pageviews within time window
-    const windowPageviews = parsed.pageviews.filter(pv => {
-      const pvTime = new Date(pv.timestamp).getTime();
-      return pvTime >= windowStart && pvTime <= windowEnd;
-    });
-    
-    console.log(`    📅 ${windowPageviews.length} pageviews within time window`);
-    
-    // Return all pageviews in time window with basic confidence
-    for (const pv of windowPageviews) {
-      matches.push({
-        ...pv,
-        matched_ip: ip,
-        match_method: 'enhanced_ip_index',
-        attribution_method: 'ip_index_match',
-        confidence: 240,
-        index_source: 'enhanced_ip_index'
-      });
-    }
-    
-  } catch (error) {
-    console.warn(`⚠️ IP index search failed for ${ip}:`, error.message);
   }
   
-  console.log(`    📊 Returning ${matches.length} matches for IP: ${ip}`);
+  console.log(`✅ Enhanced IP index search complete: ${matches.length} matches found`);
   return matches;
 }
 
-// Remove duplicate matches
+// Helper function for hashing (should match store-attribution.js)
+function hashString(str) {
+  if (!str) return '';
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
+
+// Fallback attribution methods (unchanged)
+async function searchBySessionId(redis, sessionId, windowStart, conversionTime) {
+  try {
+    const sessionKey = `attribution_session_${sessionId}`;
+    const sessionResult = await redis(`get/${sessionKey}`);
+    
+    if (sessionResult.result) {
+      const attributionResult = await redis(`get/${sessionResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function searchByDeviceSignature(redis, deviceSig, windowStart, conversionTime) {
+  try {
+    const deviceKey = `attribution_fp_${deviceSig}`;
+    const deviceResult = await redis(`get/${deviceKey}`);
+    
+    if (deviceResult.result) {
+      const attributionResult = await redis(`get/${deviceResult.result}`);
+      if (attributionResult.result) {
+        const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+        const pageviewTime = new Date(pageview.timestamp).getTime();
+        
+        if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+          return [pageview];
+        }
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function searchByIpAddress(redis, ip, windowStart, conversionTime) {
+  try {
+    const encodedIp = ip.replace(/:/g, '_');
+    const ipKey = `attribution_ip_${encodedIp}`;
+    const ipResult = await redis(`get/${ipKey}`);
+    
+    if (ipResult.result) {
+      const attributionKeys = Array.isArray(ipResult.result) ? ipResult.result : [ipResult.result];
+      const matches = [];
+      
+      for (const key of attributionKeys) {
+        try {
+          const attributionResult = await redis(`get/${key}`);
+          if (attributionResult.result) {
+            const pageview = JSON.parse(decodeURIComponent(attributionResult.result));
+            const pageviewTime = new Date(pageview.timestamp).getTime();
+            
+            if (pageviewTime >= windowStart && pageviewTime <= conversionTime) {
+              matches.push(pageview);
+            }
+          }
+        } catch (e) {
+          console.warn(`⚠️ Failed to parse pageview for key ${key}`);
+        }
+      }
+      
+      return matches;
+    }
+    
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// Remove duplicate matches (same pageview found via multiple signals)
 function removeDuplicateMatches(matches) {
   const seen = new Set();
   return matches.filter(match => {
-    const key = `${match.timestamp}_${match.session_id || match.ip_address || 'unknown'}`;
+    const key = `${match.timestamp}_${match.session_id || match.ip_address}`;
     if (seen.has(key)) {
       return false;
     }
     seen.add(key);
     return true;
   });
+}
+
+// Build journey from pageviews
+function buildJourneyFromPageviews(conversion, pageviews) {
+  const journey = {
+    journey_id: `journey_${conversion.order_id}_${Date.now()}`,
+    customer_email: conversion.email,
+    conversion_order_id: conversion.order_id,
+    conversion_timestamp: conversion.timestamp,
+    conversion_value: conversion.value || 0,
+    total_touchpoints: pageviews.length,
+    pageviews: pageviews.map((pv, index) => ({
+      ...pv,
+      touchpoint_number: index + 1,
+      time_to_conversion_hours: Math.round((new Date(conversion.timestamp) - new Date(pv.timestamp)) / (1000 * 60 * 60))
+    })),
+    attribution_method: 'multi_signal_embedded_fixed',
+    created_at: new Date().toISOString()
+  };
+  
+  return journey;
+}
+
+// Create conversion-only journey
+function createConversionOnlyJourney(conversion) {
+  return {
+    journey_id: `journey_${conversion.order_id}_${Date.now()}`,
+    customer_email: conversion.email,
+    conversion_order_id: conversion.order_id,
+    conversion_timestamp: conversion.timestamp,
+    conversion_value: conversion.value || 0,
+    total_touchpoints: 0,
+    pageviews: [],
+    attribution_method: 'conversion_only',
+    created_at: new Date().toISOString()
+  };
+}
+
+// Store customer journey
+async function storeCustomerJourney(redis, journey) {
+  try {
+    const journeyKey = `customer_journey:${journey.journey_id}`;
+    const journeyData = encodeURIComponent(JSON.stringify(journey));
+    
+    await redis(`setex/${journeyKey}/2592000/${journeyData}`, 3000); // 30-day TTL
+    
+    return true;
+  } catch (error) {
+    console.warn(`⚠️ Failed to store journey ${journey.journey_id}:`, error.message);
+    return false;
+  }
+}
+
+// Load all conversions (unchanged)
+async function loadAllConversionsStateless(redis, maxTime) {
+  console.log('📊 Loading ALL conversions from indexes (stateless)...');
+  
+  const conversions = [];
+  let cursor = '0';
+  let iterations = 0;
+  const maxIterations = 50;
+  const scanStartTime = Date.now();
+  
+  try {
+    do {
+      if (Date.now() - scanStartTime > maxTime - 5000) {
+        console.log('⏰ Time limit during conversion loading, stopping');
+        break;
+      }
+      
+      const scanResult = await redis(`scan/${cursor}/match/conversion_index_date:*/count/20`);
+      
+      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        break;
+      }
+      
+      cursor = scanResult.result[0];
+      const keys = scanResult.result[1] || [];
+      iterations++;
+      
+      if (keys.length === 0) continue;
+      
+      const batchSize = 5;
+      for (let i = 0; i < keys.length; i += batchSize) {
+        if (Date.now() - scanStartTime > maxTime - 3000) break;
+        
+        const batch = keys.slice(i, i + batchSize);
+        
+        const batchPromises = batch.map(async (key) => {
+          try {
+            const indexData = await redis(`get/${key}`);
+            if (indexData?.result) {
+              const parsed = JSON.parse(decodeURIComponent(indexData.result));
+              if (parsed.conversions && Array.isArray(parsed.conversions)) {
+                return parsed.conversions.map(conversion => ({
+                  ...conversion,
+                  source_key: key,
+                  order_id: conversion.order_id || conversion.conversion_order_id,
+                  timestamp: conversion.timestamp || conversion.conversion_timestamp,
+                  email: conversion.email || conversion.customer_email,
+                  value: conversion.value || conversion.conversion_value || 0,
+                  ip_addresses: conversion.ip_addresses || [],
+                  _redis_key: key
+                }));
+              }
+            }
+          } catch (parseError) {
+            console.warn(`⚠️ Failed to parse conversion index ${key}`);
+          }
+          return null;
+        });
+        
+        const batchResults = await Promise.all(batchPromises);
+        const validResults = batchResults.filter(result => result !== null);
+        validResults.forEach(conversionArray => {
+          if (Array.isArray(conversionArray)) {
+            conversions.push(...conversionArray);
+          }
+        });
+      }
+      
+      if (conversions.length % 500 === 0 && conversions.length > 0) {
+        console.log(`📊 Conversion loading progress: ${conversions.length} conversions loaded`);
+      }
+      
+    } while (cursor !== '0' && iterations < maxIterations);
+    
+  } catch (scanError) {
+    console.log(`⚠️ Conversion scan error: ${scanError.message}`);
+  }
+  
+  // Sort by timestamp (most recent first)
+  conversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  console.log(`✅ Loaded ${conversions.length} total conversions from database (ALL historical data)`);
+  return conversions;
+}
+
+// Filter conversions needing journeys (unchanged)
+async function filterConversionsNeedingJourneysOptimized(redis, allConversions, maxTime) {
+  console.log('🔍 Checking which conversions need journey building (optimized)...');
+  
+  const existingJourneyIds = new Set();
+  let cursor = '0';
+  let keysScanned = 0;
+  const scanStartTime = Date.now();
+  
+  try {
+    do {
+      if (Date.now() - scanStartTime > maxTime - 2000) {
+        console.log('⏰ Time limit during journey check, stopping');
+        break;
+      }
+      
+      const scanResult = await redis(`scan/${cursor}/match/customer_journey:*/count/200`);
+      
+      if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        break;
+      }
+      
+      cursor = scanResult.result[0];
+      const keys = scanResult.result[1] || [];
+      keysScanned += keys.length;
+      
+      // Extract order IDs from journey keys for fast lookup
+      keys.forEach(key => {
+        const journeyMatch = key.match(/customer_journey:journey_(\d+)_/);
+        if (journeyMatch) {
+          existingJourneyIds.add(journeyMatch[1]);
+        }
+      });
+      
+    } while (cursor !== '0');
+    
+  } catch (scanError) {
+    console.log(`⚠️ Journey check scan error: ${scanError.message}`);
+  }
+  
+  // Filter conversions that don't have journeys yet
+  const conversionsNeedingJourneys = allConversions.filter(conversion => {
+    const orderId = String(conversion.order_id || conversion.conversion_order_id);
+    return !existingJourneyIds.has(orderId);
+  });
+  
+  console.log(`🔍 Journey check complete: ${keysScanned} keys scanned, ${existingJourneyIds.size} existing journeys found`);
+  console.log(`📊 ${conversionsNeedingJourneys.length}/${allConversions.length} conversions need journey building`);
+  
+  return conversionsNeedingJourneys;
 }
 
 // Initialize Redis helper
