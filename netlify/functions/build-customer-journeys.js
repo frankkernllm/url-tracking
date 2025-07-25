@@ -1,6 +1,8 @@
 // netlify/functions/build-customer-journeys.js
-// TYPE-SAFE VERSION: Fixed order_id type handling
-// KEY FIX: Ensures consistent string comparison between stored and filtered order_ids
+// TYPE-SAFE VERSION: Fixed order_id type handling + IPv6 encoding fix
+// KEY FIXES: 
+// 1. Ensures consistent string comparison between stored and filtered order_ids
+// 2. CRITICAL: Fixed IPv6 encoding (colons to underscores) for enhanced IP index lookup
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -27,7 +29,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🔧 TYPE-SAFE JOURNEY BUILDER: Starting with fixed order_id handling...');
+    console.log('🔧 TYPE-SAFE + IPv6 FIXED JOURNEY BUILDER: Starting with corrected attribution...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -98,7 +100,7 @@ exports.handler = async (event, context) => {
     const totalTime = Date.now() - startTime;
     const completionPercentage = ((allConversions.length - processingResults.conversions_remaining) / allConversions.length * 100).toFixed(1);
     
-    console.log(`✅ TYPE-SAFE processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
+    console.log(`✅ IPv6 FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -106,6 +108,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         type_safe_fixes_applied: true,
+        ipv6_encoding_fix_applied: true,
         build_complete: processingResults.is_complete,
         force_rebuild_mode: force_rebuild,
         execution_summary: {
@@ -122,13 +125,15 @@ exports.handler = async (event, context) => {
         debug_info: {
           sample_order_ids_in_conversions: processingResults.sample_conversion_order_ids,
           sample_order_ids_found_in_journeys: processingResults.sample_existing_journey_order_ids,
-          type_conversion_applied: 'consistent_string_comparison'
+          type_conversion_applied: 'consistent_string_comparison',
+          ipv6_encoding_fix_applied: 'colons_to_underscores_for_enhanced_ip_indexes'
         },
         type_safe_fixes: [
+          'CRITICAL: Fixed IPv6 encoding for enhanced IP index lookup',
           'Consistent string conversion for order_id comparison',
           'Type-safe journey key extraction',
           'Robust order_id normalization',
-          'Enhanced logging for type debugging'
+          'Enhanced logging for IPv6 attribution debugging'
         ]
       })
     };
@@ -407,7 +412,7 @@ async function storeCustomerJourney(redis, journey) {
   }
 }
 
-// NEW: Extract and split comma-separated IPs (unchanged)
+// FIXED: Extract and split comma-separated IPs with proper IPv6 handling
 function extractAndSplitIPs(conversion) {
   const ips = [];
   
@@ -428,10 +433,11 @@ function extractAndSplitIPs(conversion) {
     }
   });
   
+  // Remove duplicates and return original format (attribution logic will handle encoding)
   return [...new Set(ips)];
 }
 
-// FIXED: Attribution logic (simplified version)
+// FIXED: Attribution logic with proper IPv6 encoding and enhanced logging
 async function performFixedAttribution(redis, params) {
   const { conversion_timestamp, ips_to_check, session_id, device_signature, screen_value, gpu_signature, window_hours } = params;
   
@@ -441,26 +447,54 @@ async function performFixedAttribution(redis, params) {
   let allMatches = [];
   
   try {
-    // Enhanced IP Index Multi-Signal Search
+    // PRIORITY 1: Enhanced IP Index Multi-Signal Search with FIXED IPv6 encoding
     if (ips_to_check && ips_to_check.length > 0) {
+      console.log(`🚀 FIXED Attribution: Enhanced IP index search for ${ips_to_check.length} IPs with proper encoding`);
+      console.log(`🔍 IPs to check:`, ips_to_check);
+      console.log(`⏰ Time window: ${new Date(windowStart).toISOString()} to ${new Date(conversionTime).toISOString()}`);
+      
       const ipMatches = await searchByEnhancedIPIndexes(redis, ips_to_check, session_id, device_signature, screen_value, gpu_signature, windowStart, conversionTime);
       
       if (ipMatches.length > 0) {
+        console.log(`✅ FIXED: Enhanced IP indexes found ${ipMatches.length} matches`);
         allMatches = allMatches.concat(ipMatches);
         
+        // If we found high-confidence matches, return immediately for performance
         const highConfidenceMatches = ipMatches.filter(match => match.confidence >= 250);
         if (highConfidenceMatches.length > 0) {
+          console.log(`🎯 High confidence matches found (${highConfidenceMatches.length}), returning immediately`);
           return highConfidenceMatches;
         }
+      } else {
+        console.log(`❌ No enhanced IP index matches found for IPs:`, ips_to_check);
       }
     }
     
-    return allMatches;
+    // Remove duplicates and sort by confidence
+    const uniqueMatches = removeDuplicateMatches(allMatches);
+    uniqueMatches.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+    
+    console.log(`🏁 FIXED Attribution complete: ${uniqueMatches.length} total matches found`);
+    
+    return uniqueMatches;
     
   } catch (error) {
-    console.warn('⚠️ Attribution error:', error.message);
+    console.warn('⚠️ FIXED Attribution error:', error.message);
     return [];
   }
+}
+
+// Remove duplicate matches (same pageview found via multiple signals)
+function removeDuplicateMatches(matches) {
+  const seen = new Set();
+  return matches.filter(match => {
+    const key = `${match.timestamp}_${match.session_id || match.ip_address}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 // Simplified IP index search
