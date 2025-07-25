@@ -60,9 +60,9 @@ exports.handler = async (event, context) => {
       };
     }
     
-    console.log(`📊 ANALYSIS: ${analysis.total_conversions} total conversions, ${analysis.existing_journeys} complete journeys, ${analysis.remaining_conversions} remaining (includes broken journeys to reprocess)`);
+    console.log(`📊 ANALYSIS: ${analysis.total_conversions} total conversions, ${analysis.existing_journeys} already processed, ${analysis.remaining_conversions} remaining`);
     
-    // FIXED: Load remaining conversions in chronological order (includes broken journeys for reprocessing)
+    // FIXED: Load remaining conversions in chronological order
     const conversionsToProcess = await loadRemainingConversions(
       redis, 
       analysis.processed_order_ids, 
@@ -193,8 +193,8 @@ async function getConversionJourneyAnalysis(redis, resetProgress = false) {
   
   return {
     total_conversions: totalConversions,
-    existing_journeys: processedOrderIds.size, // Only complete journeys
-    remaining_conversions: totalConversions - processedOrderIds.size, // Includes broken journeys that need reprocessing
+    existing_journeys: processedOrderIds.size, // All journey attempts (prevents infinite loops)
+    remaining_conversions: totalConversions - processedOrderIds.size, // Only truly unprocessed conversions
     processed_order_ids: processedOrderIds
   };
 }
@@ -229,10 +229,10 @@ async function getTotalConversionsCount(redis) {
   return totalCount;
 }
 
-// FIXED: Get existing journey order IDs for tracking progress - ONLY count journeys with touchpoints
+// FIXED: Get existing journey order IDs for tracking progress - Count ALL journey attempts to prevent infinite loops
 async function getExistingJourneyOrderIds(redis) {
   const processedOrderIds = new Set();
-  const brokenJourneyIds = new Set(); // Track broken journeys for reprocessing
+  const successfulJourneyIds = new Set(); // Track successful journeys separately for reporting
   let cursor = '0';
   const maxIterations = 50;
   let iterations = 0;
@@ -259,13 +259,15 @@ async function getExistingJourneyOrderIds(redis) {
             if (journeyData?.result) {
               const journey = JSON.parse(decodeURIComponent(journeyData.result));
               if (journey.conversion_order_id) {
-                // CRITICAL FIX: Only count journeys with touchpoints as "processed"
+                // CRITICAL FIX: Count ALL journey attempts as processed to prevent infinite loops
+                processedOrderIds.add(journey.conversion_order_id);
+                
+                // Track successful journeys separately for reporting
                 if (journey.total_touchpoints > 0) {
-                  return { orderId: journey.conversion_order_id, status: 'complete' };
-                } else {
-                  // Mark broken journeys for potential reprocessing
-                  return { orderId: journey.conversion_order_id, status: 'broken', key: key };
+                  successfulJourneyIds.add(journey.conversion_order_id);
                 }
+                
+                return { orderId: journey.conversion_order_id, hasData: journey.total_touchpoints > 0 };
               }
             }
           } catch (e) {
@@ -275,13 +277,7 @@ async function getExistingJourneyOrderIds(redis) {
         });
         
         const batchResults = await Promise.all(batchPromises);
-        batchResults.filter(result => result !== null).forEach(result => {
-          if (result.status === 'complete') {
-            processedOrderIds.add(result.orderId);
-          } else if (result.status === 'broken') {
-            brokenJourneyIds.add(result.orderId);
-          }
-        });
+        // Results already processed in the map function above
       }
       
       iterations++;
@@ -291,8 +287,10 @@ async function getExistingJourneyOrderIds(redis) {
     console.warn('⚠️ Error loading existing journey order IDs:', error.message);
   }
   
-  console.log(`📊 Found ${processedOrderIds.size} complete journeys (with touchpoints)`);
-  console.log(`📊 Found ${brokenJourneyIds.size} broken journeys (0 touchpoints) - these will be reprocessed`);
+  console.log(`📊 Found ${processedOrderIds.size} journey attempts (prevents reprocessing)`);
+  console.log(`📊 Found ${successfulJourneyIds.size} successful journeys (with pageview data)`);
+  console.log(`📊 ${processedOrderIds.size - successfulJourneyIds.size} conversions have no pageview data available`);
+  
   return processedOrderIds;
 }
 
@@ -369,7 +367,7 @@ async function loadRemainingConversions(redis, processedOrderIds, targetEmail = 
               const email = conversion.customer_email || conversion.email;
               const orderId = conversion.conversion_order_id || conversion.order_id;
               
-              // Skip if already processed (only journeys with touchpoints are considered "processed")
+              // Skip if already processed (any journey attempt counts as processed to prevent infinite loops)
               if (processedOrderIds.has(orderId)) {
                 return null;
               }
