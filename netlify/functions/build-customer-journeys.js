@@ -1,9 +1,11 @@
 // netlify/functions/build-customer-journeys.js
-// TYPE-SAFE VERSION: Fixed order_id type handling + IPv6 encoding fix
+// TYPE-SAFE VERSION: Fixed order_id type handling + IPv6 encoding fix + MULTI-SIGNAL ATTRIBUTION FIXED
 // KEY FIXES: 
 // 1. Ensures consistent string comparison between stored and filtered order_ids
 // 2. CRITICAL: Fixed IPv6 encoding (colons to underscores) for enhanced IP index lookup
 // 3. FIXED: IPv4 encoding bug - now preserves dots for IPv4, only converts colons for IPv6
+// 4. CRITICAL: Added complete multi-signal attribution logic from working version
+// 5. ADDED: Missing hashString() function for signature matching
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -30,7 +32,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🔧 TYPE-SAFE + IPv4/IPv6 FIXED JOURNEY BUILDER: Starting with corrected attribution...');
+    console.log('🔧 MULTI-SIGNAL ATTRIBUTION FIXED: Starting with complete attribution logic...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -101,13 +103,14 @@ exports.handler = async (event, context) => {
     const totalTime = Date.now() - startTime;
     const completionPercentage = ((allConversions.length - processingResults.conversions_remaining) / allConversions.length * 100).toFixed(1);
     
-    console.log(`✅ IPv4/IPv6 FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
+    console.log(`✅ MULTI-SIGNAL ATTRIBUTION FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
     
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
+        multi_signal_attribution_fixed: true,
         type_safe_fixes_applied: true,
         ipv4_ipv6_encoding_fix_applied: true,
         build_complete: processingResults.is_complete,
@@ -127,31 +130,47 @@ exports.handler = async (event, context) => {
           sample_order_ids_in_conversions: processingResults.sample_conversion_order_ids,
           sample_order_ids_found_in_journeys: processingResults.sample_existing_journey_order_ids,
           type_conversion_applied: 'consistent_string_comparison',
-          ip_encoding_fix_applied: 'ipv4_dots_preserved_ipv6_colons_to_underscores'
+          ip_encoding_fix_applied: 'ipv4_dots_preserved_ipv6_colons_to_underscores',
+          multi_signal_attribution_status: 'complete_logic_from_working_version'
         },
-        type_safe_fixes: [
+        fixes_applied: [
+          'CRITICAL: Added complete multi-signal attribution logic (session, device, screen, GPU)',
+          'CRITICAL: Added missing hashString() function for signature matching',
+          'CRITICAL: Fixed dynamic confidence scoring (295 > 255 > 195 > 175 > 240)',
           'CRITICAL: Fixed IPv4 encoding bug - dots now preserved for IPv4 IPs',
           'CRITICAL: Fixed IPv6 encoding for enhanced IP index lookup',
           'Consistent string conversion for order_id comparison',
           'Type-safe journey key extraction',
           'Robust order_id normalization',
-          'Enhanced logging for IPv4/IPv6 attribution debugging'
+          'Enhanced logging for multi-signal attribution debugging'
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Type-safe journey building failed:', error);
+    console.error('❌ Multi-signal attribution journey building failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Type-safe journey building failed', 
+        error: 'Multi-signal attribution journey building failed', 
         message: error.message 
       })
     };
   }
 };
+
+// ADDED: Missing hashString function for signature matching (from working version)
+function hashString(str) {
+  if (!str) return '';
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
 
 // TYPE-SAFE: Filter conversions with consistent string comparison
 async function typeSafeFilterConversionsNeedingJourneys(redis, allConversions, maxTime, forceRebuild = false) {
@@ -287,7 +306,7 @@ async function processConversionsWithTypeSafeStorage(redis, conversions, journey
       // FIXED ATTRIBUTION LOGIC: Extract and split comma-separated IPs
       const extractedIPs = extractAndSplitIPs(conversion);
       
-      console.log(`🔧 TYPE-SAFE: Processing conversion ${orderIdStr}: Found ${extractedIPs.length} IPs`);
+      console.log(`🔧 MULTI-SIGNAL: Processing conversion ${orderIdStr}: Found ${extractedIPs.length} IPs`);
       
       const attributionStartTime = Date.now();
       const journeyPageviews = await performFixedAttribution(redis, {
@@ -341,7 +360,7 @@ async function processConversionsWithTypeSafeStorage(redis, conversions, journey
   const avgAttributionTime = attributionCallsMade > 0 ? Math.round(totalAttributionTime / attributionCallsMade) : 0;
   const attributionSuccessRate = attributionCallsMade > 0 ? ((attributionSuccesses / attributionCallsMade) * 100).toFixed(1) : '0.0';
   
-  console.log(`🏁 TYPE-SAFE Processing summary: ${journeysCreated} journeys created, ${attributionSuccessRate}% attribution success rate`);
+  console.log(`🏁 MULTI-SIGNAL Processing summary: ${journeysCreated} journeys created, ${attributionSuccessRate}% attribution success rate`);
   
   return {
     journeys_created_this_run: journeysCreated,
@@ -451,14 +470,14 @@ async function performFixedAttribution(redis, params) {
   try {
     // PRIORITY 1: Enhanced IP Index Multi-Signal Search with FIXED IPv4/IPv6 encoding
     if (ips_to_check && ips_to_check.length > 0) {
-      console.log(`🚀 FIXED Attribution: Enhanced IP index search for ${ips_to_check.length} IPs with proper IPv4/IPv6 encoding`);
+      console.log(`🚀 MULTI-SIGNAL: Enhanced IP index search for ${ips_to_check.length} IPs with complete attribution logic`);
       console.log(`🔍 IPs to check:`, ips_to_check);
       console.log(`⏰ Time window: ${new Date(windowStart).toISOString()} to ${new Date(conversionTime).toISOString()}`);
       
       const ipMatches = await searchByEnhancedIPIndexes(redis, ips_to_check, session_id, device_signature, screen_value, gpu_signature, windowStart, conversionTime);
       
       if (ipMatches.length > 0) {
-        console.log(`✅ FIXED: Enhanced IP indexes found ${ipMatches.length} matches`);
+        console.log(`✅ MULTI-SIGNAL: Enhanced IP indexes found ${ipMatches.length} matches`);
         allMatches = allMatches.concat(ipMatches);
         
         // If we found high-confidence matches, return immediately for performance
@@ -476,12 +495,12 @@ async function performFixedAttribution(redis, params) {
     const uniqueMatches = removeDuplicateMatches(allMatches);
     uniqueMatches.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
     
-    console.log(`🏁 FIXED Attribution complete: ${uniqueMatches.length} total matches found`);
+    console.log(`🏁 MULTI-SIGNAL Attribution complete: ${uniqueMatches.length} total matches found`);
     
     return uniqueMatches;
     
   } catch (error) {
-    console.warn('⚠️ FIXED Attribution error:', error.message);
+    console.warn('⚠️ MULTI-SIGNAL Attribution error:', error.message);
     return [];
   }
 }
@@ -499,9 +518,11 @@ function removeDuplicateMatches(matches) {
   });
 }
 
-// FIXED: IP index search with proper IPv4/IPv6 encoding
+// COMPLETELY FIXED: Multi-signal IP index search with complete attribution logic from working version
 async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSignature, screenValue, gpuSignature, windowStart, windowEnd) {
   const matches = [];
+  
+  console.log(`🚀 MULTI-SIGNAL: Searching enhanced IP indexes with complete attribution logic...`);
   
   for (const ip of ipsToCheck) {
     // CRITICAL FIX: Proper IP encoding - IPv4 keeps dots, IPv6 converts colons to underscores
@@ -516,27 +537,60 @@ async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSig
       if (indexData?.result) {
         const parsed = JSON.parse(decodeURIComponent(indexData.result));
         
-        if (parsed.multi_signal_ready) {
-          console.log(`📊 Enhanced IP index found for ${ip}: ${parsed.pageview_count} pageviews`);
-          
-          const windowPageviews = parsed.pageviews.filter(pv => {
-            const pvTime = new Date(pv.timestamp).getTime();
-            return pvTime >= windowStart && pvTime <= windowEnd;
-          });
-          
-          console.log(`🕐 Time window filtering: ${windowPageviews.length} of ${parsed.pageviews.length} pageviews within window`);
-          
-          windowPageviews.forEach(pv => {
-            matches.push({
-              ...pv,
-              matched_ip: ip,
-              confidence: 240,
-              attribution_method: 'ip_index_match',
-              index_source: 'enhanced_ip_index'
-            });
-          });
-        } else {
+        // Verify this is an enhanced index with multi-signal data
+        if (!parsed.multi_signal_ready) {
           console.log(`⚠️ IP index ${ip} not enhanced yet, skipping`);
+          continue;
+        }
+        
+        console.log(`📊 Enhanced IP index found for ${ip}: ${parsed.pageview_count} pageviews with multi-signal data`);
+        
+        // Filter pageviews within time window
+        const windowPageviews = parsed.pageviews.filter(pv => {
+          const pvTime = new Date(pv.timestamp).getTime();
+          return pvTime >= windowStart && pvTime <= windowEnd;
+        });
+        
+        console.log(`🕐 Time window filtering: ${windowPageviews.length} of ${parsed.pageviews.length} pageviews within window`);
+        
+        // 🎯 COMPLETE MULTI-SIGNAL MATCHING LOGIC (copied from working version)
+        for (const pv of windowPageviews) {
+          let confidence = 240; // Base IP match confidence
+          let attributionMethod = 'ip_index_match';
+          
+          // 🏆 PRIORITY 1: Session ID match (highest confidence)
+          if (sessionId && pv.session_id === sessionId) {
+            confidence = 295; // Slightly lower than direct session lookup (300)
+            attributionMethod = 'session_id_match_ip_index';
+            console.log(`🎯 Session ID match found in IP index: ${sessionId}`);
+          }
+          // 🥈 PRIORITY 2: Device signature match
+          else if (deviceSignature && pv.canvas_fingerprint === deviceSignature) {
+            confidence = 255; // Slightly lower than direct device lookup (260)
+            attributionMethod = 'device_signature_match_ip_index';
+            console.log(`🔐 Device signature match found in IP index`);
+          }
+          // 🥉 PRIORITY 3: Screen signature match
+          else if (screenValue && pv.screen_resolution && hashString(pv.screen_resolution) === screenValue) {
+            confidence = 195; // Slightly lower than direct screen lookup (200)
+            attributionMethod = 'screen_signature_match_ip_index';
+            console.log(`📺 Screen signature match found in IP index`);
+          }
+          // 🎮 PRIORITY 4: GPU signature match
+          else if (gpuSignature && pv.webgl_fingerprint && hashString(pv.webgl_fingerprint) === gpuSignature) {
+            confidence = 175; // Slightly lower than direct GPU lookup (180)
+            attributionMethod = 'webgl_signature_match_ip_index';
+            console.log(`🎮 WebGL signature match found in IP index`);
+          }
+          
+          matches.push({
+            ...pv,
+            matched_ip: ip,
+            match_method: 'enhanced_ip_index_multi_signal',
+            attribution_method: attributionMethod,
+            confidence: confidence,
+            index_source: 'enhanced_ip_index'
+          });
         }
       } else {
         console.log(`❌ No enhanced IP index found for ${ip} (key: ${ipIndexKey})`);
@@ -546,7 +600,7 @@ async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSig
     }
   }
   
-  console.log(`✅ Enhanced IP index search complete: ${matches.length} matches found`);
+  console.log(`✅ MULTI-SIGNAL Enhanced IP index search complete: ${matches.length} matches found`);
   return matches;
 }
 
