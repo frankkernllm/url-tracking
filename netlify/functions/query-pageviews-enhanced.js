@@ -1,6 +1,7 @@
 // query-pageviews-enhanced.js - Enhanced pageview search with OPTIMIZED multi-signal attribution
 // UPDATED: Uses enhanced IP indexes with complete attribution data
 // FIXED: Properly uses attribution_window_hours parameter instead of hardcoded 24 hours
+// FIXED: Accepts both 'ip_addresses' and 'ips_to_check' parameter names
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -34,16 +35,21 @@ exports.handler = async (event, context) => {
 
   try {
     const startTime = Date.now();
+    
+    // FIXED: Parse request body and handle both parameter names for IP addresses
+    const requestBody = JSON.parse(event.body || '{}');
     const {
       conversion_timestamp,
-      ips_to_check = [],
       session_id,
       device_signature,
       screen_value,
       gpu_signature,
-      attribution_window_hours = 168,  // FIXED: Use attribution_window_hours instead of window_hours
+      attribution_window_hours = 168,
       window_hours = attribution_window_hours  // FIXED: Fallback for backward compatibility
-    } = JSON.parse(event.body || '{}');
+    } = requestBody;
+
+    // FIXED: Handle both 'ip_addresses' and 'ips_to_check' parameter names
+    const ips_to_check = requestBody.ip_addresses || requestBody.ips_to_check || [];
 
     // FIXED: Use attribution_window_hours parameter properly
     const actualWindowHours = attribution_window_hours || window_hours || 168;
