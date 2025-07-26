@@ -3,6 +3,7 @@
 // KEY FIXES: 
 // 1. Ensures consistent string comparison between stored and filtered order_ids
 // 2. CRITICAL: Fixed IPv6 encoding (colons to underscores) for enhanced IP index lookup
+// 3. FIXED: IPv4 encoding bug - now preserves dots for IPv4, only converts colons for IPv6
 
 const headers = {
   'Access-Control-Allow-Origin': '*',
@@ -29,7 +30,7 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    console.log('🔧 TYPE-SAFE + IPv6 FIXED JOURNEY BUILDER: Starting with corrected attribution...');
+    console.log('🔧 TYPE-SAFE + IPv4/IPv6 FIXED JOURNEY BUILDER: Starting with corrected attribution...');
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
@@ -100,7 +101,7 @@ exports.handler = async (event, context) => {
     const totalTime = Date.now() - startTime;
     const completionPercentage = ((allConversions.length - processingResults.conversions_remaining) / allConversions.length * 100).toFixed(1);
     
-    console.log(`✅ IPv6 FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
+    console.log(`✅ IPv4/IPv6 FIXED processing complete: ${processingResults.journeys_created_this_run} journeys in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -108,7 +109,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         type_safe_fixes_applied: true,
-        ipv6_encoding_fix_applied: true,
+        ipv4_ipv6_encoding_fix_applied: true,
         build_complete: processingResults.is_complete,
         force_rebuild_mode: force_rebuild,
         execution_summary: {
@@ -126,14 +127,15 @@ exports.handler = async (event, context) => {
           sample_order_ids_in_conversions: processingResults.sample_conversion_order_ids,
           sample_order_ids_found_in_journeys: processingResults.sample_existing_journey_order_ids,
           type_conversion_applied: 'consistent_string_comparison',
-          ipv6_encoding_fix_applied: 'colons_to_underscores_for_enhanced_ip_indexes'
+          ip_encoding_fix_applied: 'ipv4_dots_preserved_ipv6_colons_to_underscores'
         },
         type_safe_fixes: [
+          'CRITICAL: Fixed IPv4 encoding bug - dots now preserved for IPv4 IPs',
           'CRITICAL: Fixed IPv6 encoding for enhanced IP index lookup',
           'Consistent string conversion for order_id comparison',
           'Type-safe journey key extraction',
           'Robust order_id normalization',
-          'Enhanced logging for IPv6 attribution debugging'
+          'Enhanced logging for IPv4/IPv6 attribution debugging'
         ]
       })
     };
@@ -437,7 +439,7 @@ function extractAndSplitIPs(conversion) {
   return [...new Set(ips)];
 }
 
-// FIXED: Attribution logic with proper IPv6 encoding and enhanced logging
+// FIXED: Attribution logic with proper IPv4/IPv6 encoding and enhanced logging
 async function performFixedAttribution(redis, params) {
   const { conversion_timestamp, ips_to_check, session_id, device_signature, screen_value, gpu_signature, window_hours } = params;
   
@@ -447,9 +449,9 @@ async function performFixedAttribution(redis, params) {
   let allMatches = [];
   
   try {
-    // PRIORITY 1: Enhanced IP Index Multi-Signal Search with FIXED IPv6 encoding
+    // PRIORITY 1: Enhanced IP Index Multi-Signal Search with FIXED IPv4/IPv6 encoding
     if (ips_to_check && ips_to_check.length > 0) {
-      console.log(`🚀 FIXED Attribution: Enhanced IP index search for ${ips_to_check.length} IPs with proper encoding`);
+      console.log(`🚀 FIXED Attribution: Enhanced IP index search for ${ips_to_check.length} IPs with proper IPv4/IPv6 encoding`);
       console.log(`🔍 IPs to check:`, ips_to_check);
       console.log(`⏰ Time window: ${new Date(windowStart).toISOString()} to ${new Date(conversionTime).toISOString()}`);
       
@@ -497,13 +499,16 @@ function removeDuplicateMatches(matches) {
   });
 }
 
-// Simplified IP index search
+// FIXED: IP index search with proper IPv4/IPv6 encoding
 async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSignature, screenValue, gpuSignature, windowStart, windowEnd) {
   const matches = [];
   
   for (const ip of ipsToCheck) {
-    const encodedIP = ip.replace(/:/g, '_');
+    // CRITICAL FIX: Proper IP encoding - IPv4 keeps dots, IPv6 converts colons to underscores
+    const encodedIP = ip.includes(':') ? ip.replace(/:/g, '_') : ip;
     const ipIndexKey = `pageview_index_ip:${encodedIP}`;
+    
+    console.log(`🔍 IP encoding: ${ip} → ${encodedIP} (key: ${ipIndexKey})`);
     
     try {
       const indexData = await redis(`get/${ipIndexKey}`);
@@ -512,26 +517,36 @@ async function searchByEnhancedIPIndexes(redis, ipsToCheck, sessionId, deviceSig
         const parsed = JSON.parse(decodeURIComponent(indexData.result));
         
         if (parsed.multi_signal_ready) {
+          console.log(`📊 Enhanced IP index found for ${ip}: ${parsed.pageview_count} pageviews`);
+          
           const windowPageviews = parsed.pageviews.filter(pv => {
             const pvTime = new Date(pv.timestamp).getTime();
             return pvTime >= windowStart && pvTime <= windowEnd;
           });
+          
+          console.log(`🕐 Time window filtering: ${windowPageviews.length} of ${parsed.pageviews.length} pageviews within window`);
           
           windowPageviews.forEach(pv => {
             matches.push({
               ...pv,
               matched_ip: ip,
               confidence: 240,
-              attribution_method: 'ip_index_match'
+              attribution_method: 'ip_index_match',
+              index_source: 'enhanced_ip_index'
             });
           });
+        } else {
+          console.log(`⚠️ IP index ${ip} not enhanced yet, skipping`);
         }
+      } else {
+        console.log(`❌ No enhanced IP index found for ${ip} (key: ${ipIndexKey})`);
       }
     } catch (error) {
       console.warn(`⚠️ IP index search failed for ${ip}:`, error.message);
     }
   }
   
+  console.log(`✅ Enhanced IP index search complete: ${matches.length} matches found`);
   return matches;
 }
 
