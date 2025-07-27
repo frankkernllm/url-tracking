@@ -243,6 +243,7 @@ async function getConversionsForDateRange(redis, query) {
       const scanResult = await redis(`scan/${cursor}/match/conversions:*/count/500`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
+        console.log(`🔍 Scan ended: no more results at cursor ${cursor}`);
         break;
       }
       
@@ -250,9 +251,12 @@ async function getConversionsForDateRange(redis, query) {
       const keys = scanResult.result[1] || [];
       keysScanned += keys.length;
       
-      console.log(`📦 Conversion scan: Found ${keys.length} keys, cursor: ${cursor}`);
+      console.log(`📦 Conversion scan: Found ${keys.length} keys, cursor: ${cursor}, total scanned: ${keysScanned}`);
       
-      // Process keys in batches
+      // Log first few keys for debugging
+      if (keys.length > 0) {
+        console.log(`🔍 Sample keys:`, keys.slice(0, 3));
+      }
       if (keys.length > 0) {
         const batchSize = 50;
         for (let i = 0; i < keys.length; i += batchSize) {
@@ -279,13 +283,13 @@ async function getConversionsForDateRange(redis, query) {
                     
                     const conversionDate = new Date(parsed.timestamp);
                     
-                    // Check if conversion is within date range
+                    // Check if conversion is within date range FIRST
                     if (conversionDate >= startDate && conversionDate <= endDate) {
                       
-                      // Extract ALL required conversion fields
-                      const extractedConversion = extractAllConversionFields(parsed, key);
+                      // Extract ALL required conversion fields AFTER date validation
+                      const extractedConversion = extractAllConversionFields(parsed, key, query);
                       
-                      // Validate required fields
+                      // Validate required fields for stats (but don't filter out)
                       if (!extractedConversion.email) extractionStats.missing_fields.email++;
                       if (!extractedConversion.timestamp) extractionStats.missing_fields.timestamp++;
                       if (!extractedConversion.conversion_ip && !extractedConversion.primary_ip) extractionStats.missing_fields.ips++;
@@ -320,6 +324,7 @@ async function getConversionsForDateRange(redis, query) {
     console.log(`📊 Extraction stats:`, {
       total_processed: extractionStats.total_processed,
       valid_conversions: extractionStats.valid_conversions,
+      date_range: `${query.start_date} to ${query.end_date}`,
       missing_email: extractionStats.missing_fields.email,
       missing_ips: extractionStats.missing_fields.ips,
       missing_session_ids: extractionStats.missing_fields.session_ids
@@ -338,7 +343,7 @@ async function getConversionsForDateRange(redis, query) {
 }
 
 // Extract ALL required conversion fields
-function extractAllConversionFields(rawConversion, redisKey) {
+function extractAllConversionFields(rawConversion, redisKey, query = {}) {
   // Extract unique IPs from comma-separated field
   const parseUniqueIPs = (uniqueIPsField) => {
     if (!uniqueIPsField) return [];
