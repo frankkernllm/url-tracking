@@ -29,23 +29,23 @@ exports.handler = async (event, context) => {
     
     // Parse request body
     const requestData = JSON.parse(event.body || '{}');
-    const { email, timestamp } = requestData;
+    const { email, timestamp, conversion_index } = requestData;
     
-    if (!email || !timestamp) {
+    if (!email) {
       return {
         statusCode: 400,
         headers,
         body: JSON.stringify({ 
-          error: 'Missing required fields: email and timestamp' 
+          error: 'Missing required field: email' 
         })
       };
     }
     
-    console.log(`🎯 Starting multi-touch attribution for: ${email} at ${timestamp}`);
+    console.log(`🎯 Starting multi-touch attribution for: ${email}${timestamp ? ` at ${timestamp}` : ' (most recent conversion)'}`);
     
     // Step 1: Get conversion data from conversion indexes
     console.log('📊 Step 1: Looking up conversion data...');
-    const conversionData = await getConversionData(redis, email, timestamp);
+    const conversionData = await getConversionData(redis, email, timestamp, conversion_index);
     
     if (!conversionData) {
       return {
@@ -54,7 +54,8 @@ exports.handler = async (event, context) => {
         body: JSON.stringify({ 
           error: 'Conversion not found in conversion indexes',
           email: email,
-          timestamp: timestamp
+          timestamp: timestamp || 'auto-select most recent',
+          conversion_index: conversion_index || 0
         })
       };
     }
@@ -84,6 +85,12 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         success: true,
         attribution_result: attributionResult,
+        conversion_selection: {
+          email: email,
+          timestamp: timestamp || 'auto-selected',
+          conversion_index: timestamp ? 'exact_match' : (conversion_index || 0),
+          selection_method: timestamp ? 'timestamp_match' : 'index_selection'
+        },
         storage: {
           stored_permanently: storageResult.success,
           storage_key: storageResult.key,
@@ -107,7 +114,7 @@ exports.handler = async (event, context) => {
 };
 
 // Get conversion data from conversion indexes
-async function getConversionData(redis, email, timestamp) {
+async function getConversionData(redis, email, timestamp, conversionIndex = 0) {
   try {
     // Look up conversion by email index
     const emailIndexKey = `conversion_index_v1_email:${encodeURIComponent(email)}`;
@@ -120,21 +127,50 @@ async function getConversionData(redis, email, timestamp) {
       return null;
     }
     
-    const conversionIndex = JSON.parse(decodeURIComponent(indexResult.result));
-    console.log(`📊 Found conversion index with ${conversionIndex.conversion_count} conversions`);
+    const conversionIndexData = JSON.parse(decodeURIComponent(indexResult.result));
+    console.log(`📊 Found conversion index with ${conversionIndexData.conversion_count} conversions`);
     
-    // Find the specific conversion by timestamp
-    const targetConversion = conversionIndex.conversions.find(conv => 
-      conv.timestamp === timestamp
-    );
+    // If timestamp provided, find exact match
+    if (timestamp) {
+      console.log(`🎯 Looking for specific timestamp: ${timestamp}`);
+      const targetConversion = conversionIndexData.conversions.find(conv => 
+        conv.timestamp === timestamp
+      );
+      
+      if (!targetConversion) {
+        console.log('❌ Specific conversion timestamp not found in index');
+        console.log('📋 Available conversions:', conversionIndexData.conversions.map(c => ({
+          timestamp: c.timestamp,
+          order_total: c.order_total
+        })));
+        return null;
+      }
+      
+      console.log('✅ Target conversion found by timestamp');
+      return targetConversion;
+    }
     
-    if (!targetConversion) {
-      console.log('❌ Specific conversion timestamp not found in index');
+    // If no timestamp, use conversion index (default 0 = most recent)
+    if (conversionIndexData.conversions.length === 0) {
+      console.log('❌ No conversions found in index');
       return null;
     }
     
-    console.log('✅ Target conversion found in index');
-    return targetConversion;
+    if (conversionIndex >= conversionIndexData.conversions.length) {
+      console.log(`❌ Conversion index ${conversionIndex} out of range (0-${conversionIndexData.conversions.length - 1})`);
+      return null;
+    }
+    
+    const selectedConversion = conversionIndexData.conversions[conversionIndex];
+    console.log(`✅ Selected conversion #${conversionIndex} (${conversionIndex === 0 ? 'most recent' : 'historical'}): ${selectedConversion.timestamp}`);
+    console.log('📋 Available conversions:', conversionIndexData.conversions.map((c, i) => ({
+      index: i,
+      timestamp: c.timestamp,
+      order_total: c.order_total,
+      selected: i === conversionIndex
+    })));
+    
+    return selectedConversion;
     
   } catch (error) {
     console.log('❌ Error looking up conversion data:', error.message);
