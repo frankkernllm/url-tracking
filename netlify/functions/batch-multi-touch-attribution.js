@@ -30,7 +30,7 @@ exports.handler = async (event, context) => {
     
     // Parse request body
     const requestData = JSON.parse(event.body || '{}');
-    const { query_type, date, emails, limit = 50, resume_from } = requestData;
+    const { query_type, date, emails, limit = 100, resume_from } = requestData;
     
     if (!query_type) {
       return {
