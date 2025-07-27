@@ -146,16 +146,53 @@ exports.handler = async (event, context) => {
     if (attributionQuery.debug) {
       response.debug_info = {
         conversions_processed: conversionsResult.conversions.length,
+        extraction_stats: conversionsResult.extraction_stats,
         attribution_attempts: attributionResult.attributionAttempts,
         matching_statistics: attributionResult.matchingStats,
-        sample_conversions: attributionResult.attributedConversions.slice(0, 5).map(conv => ({
+        
+        // Field extraction summary
+        field_extraction_summary: {
+          conversions_with_conversion_ip: conversionsResult.conversions.filter(c => c.conversion_ip).length,
+          conversions_with_primary_ip: conversionsResult.conversions.filter(c => c.primary_ip).length,
+          conversions_with_unique_ips: conversionsResult.conversions.filter(c => c.unique_ips?.length > 0).length,
+          conversions_with_dual_ip: conversionsResult.conversions.filter(c => c.dual_ip_scenario).length,
+          conversions_with_session_id: conversionsResult.conversions.filter(c => c.session_id).length,
+          conversions_with_ssid: conversionsResult.conversions.filter(c => c.ssid).length,
+          conversions_with_landing_page: conversionsResult.conversions.filter(c => c.landing_page).length,
+          average_unique_ips_per_conversion: conversionsResult.conversions.length > 0 
+            ? (conversionsResult.conversions.reduce((sum, c) => sum + (c.unique_ips?.length || 0), 0) / conversionsResult.conversions.length).toFixed(2)
+            : 0
+        },
+        
+        // Sample conversion data (first 3 conversions)
+        sample_conversions: conversionsResult.conversions.slice(0, 3).map(conv => ({
           email: conv.email,
           order_total: conv.order_total,
           timestamp: conv.timestamp,
-          attribution_method: conv.attribution_method,
-          attributed_landing_page: conv.attributed_landing_page,
-          attributed_source: conv.attributed_source
-        }))
+          conversion_ip: conv.conversion_ip,
+          primary_ip: conv.primary_ip,
+          unique_ips_count: conv.unique_ips?.length || 0,
+          unique_ip_sample: conv.unique_ips?.slice(0, 2) || [],
+          dual_ip_scenario: conv.dual_ip_scenario,
+          session_id: conv.session_id,
+          ssid: conv.ssid,
+          landing_page: conv.landing_page,
+          attribution_method: conv.attribution_method || 'none',
+          attributed_landing_page: conv.attributed_landing_page || 'none',
+          attributed_source: conv.attributed_source || 'none'
+        })),
+        
+        // Attribution breakdown
+        attribution_breakdown: {
+          total_conversions: conversionsResult.conversions.length,
+          session_id_matches: attributionResult.attributionAttempts.session_matches,
+          ip_address_matches: attributionResult.attributionAttempts.ip_matches,
+          fingerprint_matches: attributionResult.attributionAttempts.fingerprint_matches,
+          no_attribution: attributionResult.attributionAttempts.no_matches,
+          attribution_rate: conversionsResult.conversions.length > 0 
+            ? `${((attributionResult.attributedConversions.length / conversionsResult.conversions.length) * 100).toFixed(1)}%`
+            : '0%'
+        }
       };
     }
     
@@ -178,7 +215,7 @@ exports.handler = async (event, context) => {
   }
 };
 
-// Get conversions for specified date range
+// Get conversions for specified date range with ALL required fields
 async function getConversionsForDateRange(redis, query) {
   console.log(`🔍 Fetching conversions from ${query.start_date} to ${query.end_date}...`);
   
@@ -189,6 +226,16 @@ async function getConversionsForDateRange(redis, query) {
   let cursor = '0';
   let allConversions = [];
   let keysScanned = 0;
+  let extractionStats = {
+    total_processed: 0,
+    valid_conversions: 0,
+    missing_fields: {
+      email: 0,
+      timestamp: 0,
+      ips: 0,
+      session_ids: 0
+    }
+  };
   
   try {
     // Scan for conversion keys
@@ -228,15 +275,24 @@ async function getConversionsForDateRange(redis, query) {
                   }
                   
                   if (parsed && parsed.timestamp) {
+                    extractionStats.total_processed++;
+                    
                     const conversionDate = new Date(parsed.timestamp);
                     
                     // Check if conversion is within date range
                     if (conversionDate >= startDate && conversionDate <= endDate) {
-                      return {
-                        ...parsed,
-                        redis_key: key,
-                        conversion_date: conversionDate
-                      };
+                      
+                      // Extract ALL required conversion fields
+                      const extractedConversion = extractAllConversionFields(parsed, key);
+                      
+                      // Validate required fields
+                      if (!extractedConversion.email) extractionStats.missing_fields.email++;
+                      if (!extractedConversion.timestamp) extractionStats.missing_fields.timestamp++;
+                      if (!extractedConversion.conversion_ip && !extractedConversion.primary_ip) extractionStats.missing_fields.ips++;
+                      if (!extractedConversion.session_id && !extractedConversion.ssid) extractionStats.missing_fields.session_ids++;
+                      
+                      extractionStats.valid_conversions++;
+                      return extractedConversion;
                     }
                   }
                 }
@@ -261,16 +317,98 @@ async function getConversionsForDateRange(redis, query) {
     }
     
     console.log(`✅ Conversions fetch complete: ${allConversions.length} conversions, ${keysScanned} keys scanned`);
+    console.log(`📊 Extraction stats:`, {
+      total_processed: extractionStats.total_processed,
+      valid_conversions: extractionStats.valid_conversions,
+      missing_email: extractionStats.missing_fields.email,
+      missing_ips: extractionStats.missing_fields.ips,
+      missing_session_ids: extractionStats.missing_fields.session_ids
+    });
     
     return {
       conversions: allConversions,
-      keys_scanned: keysScanned
+      keys_scanned: keysScanned,
+      extraction_stats: extractionStats
     };
     
   } catch (error) {
     console.error('❌ Conversion fetching failed:', error);
     return { conversions: [], keys_scanned: keysScanned };
   }
+}
+
+// Extract ALL required conversion fields
+function extractAllConversionFields(rawConversion, redisKey) {
+  // Extract unique IPs from comma-separated field
+  const parseUniqueIPs = (uniqueIPsField) => {
+    if (!uniqueIPsField) return [];
+    
+    // Handle array format
+    if (Array.isArray(uniqueIPsField)) {
+      return uniqueIPsField.filter(ip => ip && ip !== 'unknown');
+    }
+    
+    // Handle comma-separated string format
+    if (typeof uniqueIPsField === 'string') {
+      return uniqueIPsField.split(',')
+        .map(ip => ip.trim())
+        .filter(ip => ip && ip !== 'unknown' && ip !== 'null');
+    }
+    
+    return [];
+  };
+  
+  // Parse unique IPs
+  const uniqueIPs = parseUniqueIPs(rawConversion.unique_ips);
+  
+  return {
+    // Core identifiers
+    email: rawConversion.email || 'unknown',
+    order_id: rawConversion.order_id || null,
+    timestamp: rawConversion.timestamp,
+    
+    // IP addresses (ALL variations from track.js)
+    conversion_ip: rawConversion.conversion_ip || rawConversion.CIP || null,
+    primary_ip: rawConversion.primary_ip || rawConversion.PIP || null,
+    pageview_ip: rawConversion.pageview_ip || rawConversion.IP || null,
+    ip_address: rawConversion.ip_address || null, // Fallback IP
+    unique_ips: uniqueIPs, // Array of unique IPs
+    unique_ip_count: uniqueIPs.length,
+    
+    // Dual IP scenario detection
+    dual_ip_scenario: rawConversion.dual_ip_scenario || false,
+    ip_addresses_detected: rawConversion.ip_addresses_detected || 0,
+    
+    // Session identification
+    session_id: rawConversion.session_id || null,
+    ssid: rawConversion.ssid || null, // Different field name in conversions
+    
+    // Attribution context (may be embedded from track.js)
+    landing_page: rawConversion.landing_page || null,
+    source: rawConversion.source || null,
+    campaign: rawConversion.campaign || rawConversion.utm_campaign || null,
+    attribution_found: rawConversion.attribution_found || false,
+    attribution_method: rawConversion.attribution_method || null,
+    
+    // Order details
+    order_total: parseFloat(rawConversion.order_total) || 0,
+    currency: rawConversion.currency || 'usd',
+    
+    // Device/fingerprint data for matching
+    dsig: rawConversion.dsig || rawConversion.device_signature || null,
+    canvas_fingerprint: rawConversion.canvas_fingerprint || null,
+    webgl_fingerprint: rawConversion.webgl_fingerprint || null,
+    SVV: rawConversion.SVV || rawConversion.SVVV || rawConversion.screen_value || null,
+    gsig: rawConversion.gsig || rawConversion.gpu_signature || null,
+    
+    // Metadata
+    redis_key: redisKey,
+    conversion_date: new Date(rawConversion.timestamp),
+    event_type: rawConversion.event_type || 'purchase',
+    
+    // Original raw data for debugging
+    _raw_conversion: query?.debug ? rawConversion : undefined
+  };
 }
 
 // Perform attribution analysis for conversions
