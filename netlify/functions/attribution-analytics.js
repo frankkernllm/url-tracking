@@ -272,15 +272,13 @@ async function generateAttributionSummaryTable(redis, startDate, endDate, attrib
           groupData.conversions++;
           groupData.revenue += revenue;
           
-          // Keep samples for drill-down (up to 5 per group)
-          if (groupData.conversion_samples.length < 5) {
-            groupData.conversion_samples.push({
-              email: attribution.conversion.email,
-              timestamp: attribution.conversion.timestamp,
-              order_total: revenue,
-              touchpoints: attribution.attribution_summary.total_touchpoints || 0
-            });
-          }
+          // Keep ALL samples for drill-down (REMOVED 5-sample limit)
+          groupData.conversion_samples.push({
+            email: attribution.conversion.email,
+            timestamp: attribution.conversion.timestamp,
+            order_total: revenue,
+            touchpoints: attribution.attribution_summary.total_touchpoints || 0
+          });
           
           totalConversions++;
           totalRevenue += revenue;
