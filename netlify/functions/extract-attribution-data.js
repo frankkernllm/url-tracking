@@ -1,6 +1,7 @@
-// Multi-Source Attribution Data Extractor
+// Multi-Source Attribution Data Extractor - WITH DEBUG FOR TARGET IP
 // Path: netlify/functions/extract-attribution-data.js
 // Purpose: Extract ALL pageviews from multiple sources into attribution-optimized chunks
+// DEBUG: Added logging to trace target IP 42.61.210.120
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -299,7 +300,7 @@ async function extractMultiSourceAttributionData(redis, existingProgress, maxTim
   }
 }
 
-// Process individual attribution pattern
+// Process individual attribution pattern - WITH DEBUG FOR TARGET IP
 async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
   const patternStartTime = Date.now();
   let cursor = startCursor;
@@ -313,6 +314,11 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
   let latestPageview = null;
   
   console.log(`🎯 Processing attribution pattern: ${pattern} from cursor: ${cursor}`);
+  
+  // 🎯 DEBUG: Track target IP findings throughout pattern processing
+  let targetIPKeysFound = 0;
+  let targetIPKeysAfterFilter = 0;
+  let targetIPPageviewsExtracted = 0;
   
   try {
     do {
@@ -341,9 +347,53 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
       
       console.log(`📊 Pattern chunk ${chunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
       
+      // 🎯🎯🎯 DEBUG: Check for target IP keys
+      const targetKeys = keys.filter(key => key.includes('42.61.210.120'));
+      if (targetKeys.length > 0) {
+        targetIPKeysFound += targetKeys.length;
+        console.log(`🎯🎯🎯 FOUND TARGET IP KEYS IN SCAN (chunk ${chunksProcessed}):`, targetKeys);
+        
+        // Test specific keys we're looking for
+        const specificTargetKeys = [
+          'attribution_42.61.210.120_1753484654828',
+          'attribution_42.61.210.120_1753484618503', 
+          'attribution_42.61.210.120_1753463169445'
+        ];
+        
+        specificTargetKeys.forEach(targetKey => {
+          if (keys.includes(targetKey)) {
+            console.log(`🎯🎯🎯 FOUND SPECIFIC TARGET KEY: ${targetKey}`);
+          }
+        });
+      }
+      
       // Filter and extract attribution-relevant keys
       const attributionKeys = filterAttributionKeys(keys, pattern);
       console.log(`📝 Filtered: ${attributionKeys.length} attribution keys from ${keys.length} total`);
+      
+      // 🎯🎯🎯 DEBUG: Check if target keys passed filter
+      if (targetKeys.length > 0) {
+        const filteredTargetKeys = attributionKeys.filter(key => key.includes('42.61.210.120'));
+        targetIPKeysAfterFilter += filteredTargetKeys.length;
+        console.log(`🎯🎯🎯 TARGET KEYS AFTER FILTER: ${filteredTargetKeys.length}/${targetKeys.length} passed`);
+        if (filteredTargetKeys.length > 0) {
+          console.log(`🎯🎯🎯 TARGET KEYS THAT PASSED:`, filteredTargetKeys);
+        }
+        if (filteredTargetKeys.length < targetKeys.length) {
+          const rejectedKeys = targetKeys.filter(key => !filteredTargetKeys.includes(key));
+          console.log(`🎯🎯🎯 TARGET KEYS REJECTED BY FILTER:`, rejectedKeys);
+          
+          // Test each rejected key against filter criteria
+          rejectedKeys.forEach(key => {
+            console.log(`🎯🎯🎯 Testing rejected key: ${key}`);
+            console.log(`   - Starts with attribution_: ${key.startsWith('attribution_')}`);
+            console.log(`   - Ends with digits: ${!!key.match(/\d+$/)}`);
+            console.log(`   - Contains _ip_: ${key.includes('_ip_')}`);
+            console.log(`   - Contains _session_: ${key.includes('_session_')}`);
+            console.log(`   - Contains _fp_: ${key.includes('_fp_')}`);
+          });
+        }
+      }
       
       if (attributionKeys.length === 0) {
         console.log(`⚠️ No attribution keys in this chunk, continuing...`);
@@ -361,6 +411,22 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
         
         const batch = attributionKeys.slice(i, i + batchSize);
         const batchPageviews = await processAttributionKeyBatch(redis, batch, pattern);
+        
+        // 🎯🎯🎯 DEBUG: Check if any target IP pageviews were extracted
+        const targetIPPageviewsInBatch = batchPageviews.filter(pv => 
+          pv && pv.ip_address === '42.61.210.120'
+        );
+        if (targetIPPageviewsInBatch.length > 0) {
+          targetIPPageviewsExtracted += targetIPPageviewsInBatch.length;
+          console.log(`🎯🎯🎯 EXTRACTED ${targetIPPageviewsInBatch.length} TARGET IP PAGEVIEWS:`, 
+            targetIPPageviewsInBatch.map(pv => ({
+              timestamp: pv.timestamp,
+              session_id: pv.session_id,
+              source: pv.source,
+              landing_page: pv.landing_page
+            }))
+          );
+        }
         
         // Extract attribution data
         batchPageviews.forEach(pv => {
@@ -407,6 +473,13 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
     console.log(`   🔗 Unique sessions: ${uniqueSessions.size}`);
     console.log(`   ✅ Complete: ${patternComplete}`);
     console.log(`   ⏱️ Pattern time: ${patternTime}ms`);
+    
+    // 🎯🎯🎯 DEBUG: Final target IP summary
+    console.log(`🎯🎯🎯 TARGET IP 42.61.210.120 SUMMARY FOR PATTERN ${pattern}:`);
+    console.log(`   🎯 Keys found in scan: ${targetIPKeysFound}`);
+    console.log(`   🎯 Keys after filter: ${targetIPKeysAfterFilter}`);
+    console.log(`   🎯 Pageviews extracted: ${targetIPPageviewsExtracted}`);
+    console.log(`   🎯 Target IP in unique IPs: ${uniqueIPs.has('42.61.210.120')}`);
     
     return {
       pageviews: pageviews,
