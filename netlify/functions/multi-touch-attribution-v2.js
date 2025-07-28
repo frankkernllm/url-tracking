@@ -499,9 +499,9 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
     }
   }
   
-  // NEW V2 Attribution Query 4: Landing Page lookup
+  // NEW V2 Attribution Query 4: Landing Page lookup (FILTERED)
   if (conversionData.landing_page && conversionData.landing_page !== 'unknown') {
-    console.log(`📄 V2 Query 4: Landing page attribution for: ${conversionData.landing_page}`);
+    console.log(`📄 V2 Query 4: Filtered landing page attribution for: ${conversionData.landing_page}`);
     
     try {
       const encodedLP = encodeLandingPageForKey(conversionData.landing_page);
@@ -510,25 +510,40 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
       
       if (landingPageResult?.result) {
         const lpIndex = JSON.parse(decodeURIComponent(landingPageResult.result));
-        console.log(`✅ V2 Landing page index found: ${lpIndex.pageview_count} pageviews`);
-        console.log(`📊 Data sources: ${lpIndex.data_sources?.join(', ') || 'unknown'}`);
+        console.log(`✅ V2 Landing page index found: ${lpIndex.pageview_count} total pageviews`);
         
-        if (!attributionMethods.includes('v2_landing_page_match')) {
-          attributionMethods.push('v2_landing_page_match');
+        // FILTER: Only include pageviews that match user's IPs or session
+        const userIPs = [conversionData.primary_ip, conversionData.conversion_ip].filter(Boolean);
+        const userSession = conversionData.ssid;
+        
+        const filteredPageviews = lpIndex.pageviews.filter(pv => {
+          const matchesIP = userIPs.includes(pv.ip_address);
+          const matchesSession = userSession && pv.session_id === userSession;
+          return matchesIP || matchesSession;
+        });
+        
+        console.log(`🔍 Filtered to ${filteredPageviews.length} relevant pageviews (from ${lpIndex.pageview_count} total)`);
+        
+        if (filteredPageviews.length > 0) {
+          if (!attributionMethods.includes('v2_landing_page_match')) {
+            attributionMethods.push('v2_landing_page_match');
+          }
+          if (lpIndex.data_sources) {
+            dataSourcesUsed.push(...lpIndex.data_sources);
+          }
+          
+          const addedInfo = addV2PageviewsToJourney(
+            filteredPageviews, 
+            'v2_landing_page_match', 
+            allPageviews, 
+            seenPageviews, 
+            conversionTime
+          );
+          
+          if (addedInfo.target_ip_found) targetIPDetected = true;
+        } else {
+          console.log('⚠️ No relevant pageviews found after filtering landing page data');
         }
-        if (lpIndex.data_sources) {
-          dataSourcesUsed.push(...lpIndex.data_sources);
-        }
-        
-        const addedInfo = addV2PageviewsToJourney(
-          lpIndex.pageviews, 
-          'v2_landing_page_match', 
-          allPageviews, 
-          seenPageviews, 
-          conversionTime
-        );
-        
-        if (addedInfo.target_ip_found) targetIPDetected = true;
       } else {
         console.log('⚠️ No V2 landing page index found');
       }
@@ -537,9 +552,9 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
     }
   }
   
-  // NEW V2 Attribution Query 5: Source lookup
+  // NEW V2 Attribution Query 5: Source lookup (FILTERED)
   if (conversionData.source && conversionData.source !== 'direct' && conversionData.source !== 'unknown') {
-    console.log(`📊 V2 Query 5: Source attribution for: ${conversionData.source}`);
+    console.log(`📊 V2 Query 5: Filtered source attribution for: ${conversionData.source}`);
     
     try {
       const encodedSource = encodeSourceForKey(conversionData.source);
@@ -548,25 +563,40 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
       
       if (sourceResult?.result) {
         const sourceIndex = JSON.parse(decodeURIComponent(sourceResult.result));
-        console.log(`✅ V2 Source index found: ${sourceIndex.pageview_count} pageviews`);
-        console.log(`📊 Data sources: ${sourceIndex.data_sources?.join(', ') || 'unknown'}`);
+        console.log(`✅ V2 Source index found: ${sourceIndex.pageview_count} total pageviews`);
         
-        if (!attributionMethods.includes('v2_source_match')) {
-          attributionMethods.push('v2_source_match');
+        // FILTER: Only include pageviews that match user's IPs or session
+        const userIPs = [conversionData.primary_ip, conversionData.conversion_ip].filter(Boolean);
+        const userSession = conversionData.ssid;
+        
+        const filteredPageviews = sourceIndex.pageviews.filter(pv => {
+          const matchesIP = userIPs.includes(pv.ip_address);
+          const matchesSession = userSession && pv.session_id === userSession;
+          return matchesIP || matchesSession;
+        });
+        
+        console.log(`🔍 Filtered to ${filteredPageviews.length} relevant pageviews (from ${sourceIndex.pageview_count} total)`);
+        
+        if (filteredPageviews.length > 0) {
+          if (!attributionMethods.includes('v2_source_match')) {
+            attributionMethods.push('v2_source_match');
+          }
+          if (sourceIndex.data_sources) {
+            dataSourcesUsed.push(...sourceIndex.data_sources);
+          }
+          
+          const addedInfo = addV2PageviewsToJourney(
+            filteredPageviews, 
+            'v2_source_match', 
+            allPageviews, 
+            seenPageviews, 
+            conversionTime
+          );
+          
+          if (addedInfo.target_ip_found) targetIPDetected = true;
+        } else {
+          console.log('⚠️ No relevant pageviews found after filtering source data');
         }
-        if (sourceIndex.data_sources) {
-          dataSourcesUsed.push(...sourceIndex.data_sources);
-        }
-        
-        const addedInfo = addV2PageviewsToJourney(
-          sourceIndex.pageviews, 
-          'v2_source_match', 
-          allPageviews, 
-          seenPageviews, 
-          conversionTime
-        );
-        
-        if (addedInfo.target_ip_found) targetIPDetected = true;
       } else {
         console.log('⚠️ No V2 source index found');
       }
@@ -619,8 +649,8 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
 
 // V2 Debug function to trace attribution lookup issues
 async function debugV2AttributionLookup(redis, conversionData) {
-  console.log('🔍 ================== V2 DEBUG ATTRIBUTION LOOKUP ==================');
-  console.log('🔍 V2 DEBUG: Starting attribution lookup for:', {
+  console.log('🔍 ================== V2 DEBUG ATTRIBUTION LOOKUP (FILTERED) ==================');
+  console.log('🔍 V2 DEBUG: Starting filtered attribution lookup for:', {
     email: conversionData.email,
     timestamp: conversionData.timestamp,
     conversion_ip: conversionData.conversion_ip,
@@ -717,7 +747,7 @@ async function debugV2AttributionLookup(redis, conversionData) {
     }
   }
   
-  console.log('🔍 ================== END V2 DEBUG ATTRIBUTION LOOKUP ==================');
+  console.log('🔍 ================== END V2 DEBUG ATTRIBUTION LOOKUP (FILTERED) ==================');
 }
 
 // Add V2 pageviews to journey with enhanced deduplication and target IP detection
