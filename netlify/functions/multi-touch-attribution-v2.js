@@ -499,111 +499,8 @@ async function performV2MultiTouchAttribution(redis, conversionData, forceDebug 
     }
   }
   
-  // NEW V2 Attribution Query 4: Landing Page lookup (FILTERED)
-  if (conversionData.landing_page && conversionData.landing_page !== 'unknown') {
-    console.log(`📄 V2 Query 4: Filtered landing page attribution for: ${conversionData.landing_page}`);
-    
-    try {
-      const encodedLP = encodeLandingPageForKey(conversionData.landing_page);
-      const landingPageKey = `attribution_index_v2_landing:${encodedLP}`;
-      const landingPageResult = await redis(`get/${landingPageKey}`, 3000);
-      
-      if (landingPageResult?.result) {
-        const lpIndex = JSON.parse(decodeURIComponent(landingPageResult.result));
-        console.log(`✅ V2 Landing page index found: ${lpIndex.pageview_count} total pageviews`);
-        
-        // FILTER: Only include pageviews that match user's IPs or session
-        const userIPs = [conversionData.primary_ip, conversionData.conversion_ip].filter(Boolean);
-        const userSession = conversionData.ssid;
-        
-        const filteredPageviews = lpIndex.pageviews.filter(pv => {
-          const matchesIP = userIPs.includes(pv.ip_address);
-          const matchesSession = userSession && pv.session_id === userSession;
-          return matchesIP || matchesSession;
-        });
-        
-        console.log(`🔍 Filtered to ${filteredPageviews.length} relevant pageviews (from ${lpIndex.pageview_count} total)`);
-        
-        if (filteredPageviews.length > 0) {
-          if (!attributionMethods.includes('v2_landing_page_match')) {
-            attributionMethods.push('v2_landing_page_match');
-          }
-          if (lpIndex.data_sources) {
-            dataSourcesUsed.push(...lpIndex.data_sources);
-          }
-          
-          const addedInfo = addV2PageviewsToJourney(
-            filteredPageviews, 
-            'v2_landing_page_match', 
-            allPageviews, 
-            seenPageviews, 
-            conversionTime
-          );
-          
-          if (addedInfo.target_ip_found) targetIPDetected = true;
-        } else {
-          console.log('⚠️ No relevant pageviews found after filtering landing page data');
-        }
-      } else {
-        console.log('⚠️ No V2 landing page index found');
-      }
-    } catch (lpError) {
-      console.log('⚠️ V2 Landing page lookup error:', lpError.message);
-    }
-  }
-  
-  // NEW V2 Attribution Query 5: Source lookup (FILTERED)
-  if (conversionData.source && conversionData.source !== 'direct' && conversionData.source !== 'unknown') {
-    console.log(`📊 V2 Query 5: Filtered source attribution for: ${conversionData.source}`);
-    
-    try {
-      const encodedSource = encodeSourceForKey(conversionData.source);
-      const sourceKey = `attribution_index_v2_source:${encodedSource}`;
-      const sourceResult = await redis(`get/${sourceKey}`, 3000);
-      
-      if (sourceResult?.result) {
-        const sourceIndex = JSON.parse(decodeURIComponent(sourceResult.result));
-        console.log(`✅ V2 Source index found: ${sourceIndex.pageview_count} total pageviews`);
-        
-        // FILTER: Only include pageviews that match user's IPs or session
-        const userIPs = [conversionData.primary_ip, conversionData.conversion_ip].filter(Boolean);
-        const userSession = conversionData.ssid;
-        
-        const filteredPageviews = sourceIndex.pageviews.filter(pv => {
-          const matchesIP = userIPs.includes(pv.ip_address);
-          const matchesSession = userSession && pv.session_id === userSession;
-          return matchesIP || matchesSession;
-        });
-        
-        console.log(`🔍 Filtered to ${filteredPageviews.length} relevant pageviews (from ${sourceIndex.pageview_count} total)`);
-        
-        if (filteredPageviews.length > 0) {
-          if (!attributionMethods.includes('v2_source_match')) {
-            attributionMethods.push('v2_source_match');
-          }
-          if (sourceIndex.data_sources) {
-            dataSourcesUsed.push(...sourceIndex.data_sources);
-          }
-          
-          const addedInfo = addV2PageviewsToJourney(
-            filteredPageviews, 
-            'v2_source_match', 
-            allPageviews, 
-            seenPageviews, 
-            conversionTime
-          );
-          
-          if (addedInfo.target_ip_found) targetIPDetected = true;
-        } else {
-          console.log('⚠️ No relevant pageviews found after filtering source data');
-        }
-      } else {
-        console.log('⚠️ No V2 source index found');
-      }
-    } catch (sourceError) {
-      console.log('⚠️ V2 Source lookup error:', sourceError.message);
-    }
-  }
+  // V2 Attribution is complete - landing page and source attribution removed
+  // These methods were pulling data from other users and creating massive journeys
   
   // Sort customer journey chronologically (oldest first)
   const customerJourney = allPageviews.sort((a, b) => 
@@ -893,14 +790,14 @@ function analyzeSourceProgression(customerJourney, conversionData) {
   };
 }
 
-// Calculate V2 enhanced attribution confidence score
+// Calculate V2 enhanced attribution confidence score (3 methods + enhancements)
 function calculateV2AttributionConfidence(customerJourney, conversionData, attributionMethods, dataSourcesUsed, targetIPDetected) {
   let score = 0;
   const factors = {};
   
   // Session ID available (high confidence)
   if (conversionData.ssid && attributionMethods.includes('v2_session_match')) {
-    score += 35;
+    score += 40;
     factors.session_id_available = true;
   } else {
     factors.session_id_available = false;
@@ -910,29 +807,13 @@ function calculateV2AttributionConfidence(customerJourney, conversionData, attri
   const crossDeviceDetected = conversionData.conversion_ip !== conversionData.primary_ip;
   factors.cross_device_detected = crossDeviceDetected;
   if (crossDeviceDetected) {
-    score += 20;
-  }
-  
-  // V2 NEW: Landing page attribution available
-  if (attributionMethods.includes('v2_landing_page_match')) {
-    score += 10;
-    factors.landing_page_attribution = true;
-  } else {
-    factors.landing_page_attribution = false;
-  }
-  
-  // V2 NEW: Source attribution available
-  if (attributionMethods.includes('v2_source_match')) {
-    score += 10;
-    factors.source_attribution = true;
-  } else {
-    factors.source_attribution = false;
+    score += 25;
   }
   
   // V2 NEW: Verification data quality
   const verificationDataPoints = customerJourney.filter(pv => pv.is_verification_data).length;
   if (verificationDataPoints > 0) {
-    score += 10;
+    score += 15;
     factors.verification_data_recovered = true;
     factors.verification_data_points = verificationDataPoints;
   } else {
@@ -941,7 +822,7 @@ function calculateV2AttributionConfidence(customerJourney, conversionData, attri
   
   // V2 NEW: Target IP detection
   if (targetIPDetected) {
-    score += 5;
+    score += 10;
     factors.target_ip_detected = true;
   } else {
     factors.target_ip_detected = false;
@@ -965,24 +846,21 @@ function calculateV2AttributionConfidence(customerJourney, conversionData, attri
     score += 15;
     factors.journey_completeness = 'high';
   } else if (customerJourney.length >= 2) {
-    score += 8;
+    score += 10;
     factors.journey_completeness = 'medium';
   } else {
     factors.journey_completeness = 'low';
   }
   
-  // V2 Multiple attribution methods (enhanced for 5 methods)
-  if (attributionMethods.length >= 4) {
-    score += 20;
-    factors.attribution_method_coverage = 'excellent';
-  } else if (attributionMethods.length >= 3) {
+  // V2 Multiple attribution methods (3 precise methods)
+  if (attributionMethods.length >= 3) {
     score += 15;
-    factors.attribution_method_coverage = 'high';
+    factors.attribution_method_coverage = 'excellent';
   } else if (attributionMethods.length >= 2) {
     score += 10;
-    factors.attribution_method_coverage = 'medium';
+    factors.attribution_method_coverage = 'good';
   } else {
-    factors.attribution_method_coverage = 'low';
+    factors.attribution_method_coverage = 'basic';
   }
   
   // Temporal accuracy
@@ -1005,7 +883,7 @@ function calculateV2AttributionConfidence(customerJourney, conversionData, attri
   return {
     score: Math.min(score, 100), // Cap at 100
     factors: factors,
-    version: 'v2_enhanced'
+    version: 'v2_precise'
   };
 }
 
