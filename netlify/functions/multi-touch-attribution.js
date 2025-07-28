@@ -1,6 +1,18 @@
 // Multi-Touch Attribution Engine - Phase 1: Single Conversion Attribution
 // Path: netlify/functions/multi-touch-attribution.js
 // Purpose: Reconstruct complete customer journeys by matching conversions with pageview data
+//
+// DEBUG PARAMETERS:
+// - force_debug: true = Enable detailed console logging for troubleshooting
+// - skip_existing_check: true = Process even if attribution already exists
+// 
+// Example debug usage:
+// {
+//   "email": "user@example.com", 
+//   "timestamp": "2025-07-25T23:06:41.043Z",
+//   "force_debug": true,
+//   "skip_existing_check": true
+// }
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -29,19 +41,22 @@ exports.handler = async (event, context) => {
     
     // Parse request body
     const requestData = JSON.parse(event.body || '{}');
-    const { email, timestamp, conversion_index } = requestData;
+    const { email, timestamp, conversion_index, force_debug = false, skip_existing_check = false } = requestData;
     
     if (!email) {
       return {
         statusCode: 400,
         headers,
         body: JSON.stringify({ 
-          error: 'Missing required field: email' 
+          error: 'Missing required field: email',
+          debug_tip: 'Add force_debug: true and skip_existing_check: true for debugging existing attributions'
         })
       };
     }
     
     console.log(`🎯 Starting multi-touch attribution for: ${email}${timestamp ? ` at ${timestamp}` : ' (most recent conversion)'}`);
+    if (force_debug) console.log('🔍 DEBUG MODE ENABLED');
+    if (skip_existing_check) console.log('🔍 SKIP EXISTING CHECK ENABLED');
     
     // Step 1: Get conversion data from conversion indexes
     console.log('📊 Step 1: Looking up conversion data...');
@@ -70,11 +85,46 @@ exports.handler = async (event, context) => {
     
     // Step 2: Multi-criteria pageview lookup
     console.log('🔍 Step 2: Performing multi-criteria pageview lookup...');
-    const attributionResult = await performMultiTouchAttribution(redis, conversionData);
+    
+    // OPTIONAL: Skip existing check for debugging
+    if (!skip_existing_check) {
+      // Check if attribution already exists
+      const existingKey = `multi_touch_attribution:${conversionData.email}:${conversionData.timestamp}`;
+      const existingResult = await redis(`get/${existingKey}`, 1000);
+      
+      if (existingResult?.result) {
+        console.log(`⚠️ Attribution already exists for ${conversionData.email} at ${conversionData.timestamp}`);
+        
+        if (!force_debug) {
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({
+              success: true,
+              message: 'Attribution already exists',
+              existing_attribution: JSON.parse(decodeURIComponent(existingResult.result)),
+              note: 'Use skip_existing_check: true to force reprocessing or force_debug: true to debug existing attribution'
+            })
+          };
+        } else {
+          console.log('🔍 FORCE_DEBUG enabled - will debug existing attribution');
+        }
+      }
+    } else {
+      console.log('🔍 SKIP_EXISTING_CHECK enabled - will process even if attribution exists');
+    }
+    
+    const attributionResult = await performMultiTouchAttribution(redis, conversionData, force_debug);
     
     // Step 3: Store attribution result permanently
     console.log('💾 Step 3: Storing attribution result permanently...');
-    const storageResult = await storeAttributionResult(redis, attributionResult);
+    let storageResult = { success: true, key: 'debug_mode_no_storage', verified: false };
+    
+    if (!force_debug || skip_existing_check) {
+      storageResult = await storeAttributionResult(redis, attributionResult);
+    } else {
+      console.log('🔍 DEBUG MODE: Skipping storage to avoid overwriting existing attribution');
+    }
     
     const processingTime = Date.now() - startTime;
     console.log(`✅ Multi-touch attribution completed in ${processingTime}ms`);
@@ -89,7 +139,9 @@ exports.handler = async (event, context) => {
           email: email,
           timestamp: timestamp || 'auto-selected',
           conversion_index: timestamp ? 'exact_match' : (conversion_index || 0),
-          selection_method: timestamp ? 'timestamp_match' : 'index_selection'
+          selection_method: timestamp ? 'timestamp_match' : 'index_selection',
+          debug_mode: !!force_debug,
+          skipped_existing_check: !!skip_existing_check
         },
         storage: {
           stored_permanently: storageResult.success,
@@ -179,8 +231,13 @@ async function getConversionData(redis, email, timestamp, conversionIndex = 0) {
 }
 
 // Perform multi-touch attribution analysis
-async function performMultiTouchAttribution(redis, conversionData) {
+async function performMultiTouchAttribution(redis, conversionData, forceDebug = false) {
   console.log('🎯 Starting multi-touch attribution analysis...');
+  
+  // DEBUG: Add detailed debugging if requested
+  if (forceDebug) {
+    await debugAttributionLookup(redis, conversionData);
+  }
   
   const conversionTime = new Date(conversionData.timestamp);
   const allPageviews = [];
@@ -292,6 +349,126 @@ async function performMultiTouchAttribution(redis, conversionData) {
     attribution_summary: attributionSummary,
     customer_journey: customerJourney
   };
+}
+
+// Debug function to trace attribution lookup issues
+async function debugAttributionLookup(redis, conversionData) {
+  console.log('🔍 ================== DEBUG ATTRIBUTION LOOKUP ==================');
+  console.log('🔍 DEBUG: Starting attribution lookup for:', {
+    email: conversionData.email,
+    timestamp: conversionData.timestamp,
+    conversion_ip: conversionData.conversion_ip,
+    primary_ip: conversionData.primary_ip,
+    ssid: conversionData.ssid
+  });
+
+  // Debug 1: Check if session index exists
+  if (conversionData.ssid) {
+    const sessionKey = `attribution_index_v1_session:${conversionData.ssid}`;
+    console.log('🔍 Checking session key:', sessionKey);
+    
+    try {
+      const sessionResult = await redis(`get/${sessionKey}`, 3000);
+      console.log('🔍 Session result:', sessionResult ? 'FOUND' : 'NOT FOUND');
+      if (sessionResult?.result) {
+        const sessionIndex = JSON.parse(decodeURIComponent(sessionResult.result));
+        console.log('🔍 Session pageviews:', sessionIndex.pageview_count || 0);
+        console.log('🔍 Session latest timestamp:', sessionIndex.latest_timestamp);
+        console.log('🔍 Session earliest timestamp:', sessionIndex.earliest_timestamp);
+      }
+    } catch (error) {
+      console.log('🔍 Session lookup error:', error.message);
+    }
+  } else {
+    console.log('🔍 No session ID to check');
+  }
+
+  // Debug 2: Check if IP indexes exist
+  const ipsToCheck = [conversionData.primary_ip, conversionData.conversion_ip].filter(Boolean);
+  console.log('🔍 IPs to check:', ipsToCheck);
+  
+  for (const ip of ipsToCheck) {
+    const encodedIP = ip.replace(/:/g, '_').replace(/\./g, '_');
+    const ipKey = `attribution_index_v1_ip:${encodedIP}`;
+    console.log('🔍 Checking IP key:', ipKey);
+    
+    try {
+      const ipResult = await redis(`get/${ipKey}`, 3000);
+      console.log('🔍 IP result for', ip, ':', ipResult ? 'FOUND' : 'NOT FOUND');
+      if (ipResult?.result) {
+        const ipIndex = JSON.parse(decodeURIComponent(ipResult.result));
+        console.log('🔍 IP pageviews:', ipIndex.pageview_count || 0);
+        console.log('🔍 IP latest timestamp:', ipIndex.latest_timestamp);
+        console.log('🔍 IP earliest timestamp:', ipIndex.earliest_timestamp);
+        
+        // Check if any pageviews are within time window
+        const conversionTime = new Date(conversionData.timestamp);
+        const withinWindow = ipIndex.pageviews?.filter(pv => 
+          new Date(pv.timestamp) < conversionTime
+        );
+        console.log('🔍 Pageviews within time window:', withinWindow?.length || 0);
+        
+        // Log first few pageviews for inspection
+        if (withinWindow?.length > 0) {
+          console.log('🔍 Sample pageviews:', withinWindow.slice(0, 3).map(pv => ({
+            timestamp: pv.timestamp,
+            session_id: pv.session_id,
+            source: pv.source,
+            landing_page: pv.landing_page
+          })));
+        }
+        
+        // Check for exact session match
+        if (conversionData.ssid) {
+          const sessionMatches = ipIndex.pageviews?.filter(pv => 
+            pv.session_id === conversionData.ssid
+          );
+          console.log('🔍 Session ID matches in IP index:', sessionMatches?.length || 0);
+        }
+      }
+    } catch (error) {
+      console.log('🔍 IP lookup error for', ip, ':', error.message);
+    }
+  }
+
+  // Debug 3: Check if original attribution keys still exist
+  console.log('🔍 Checking if original attribution keys exist...');
+  for (const ip of ipsToCheck) {
+    try {
+      const originalKeyPattern = `attribution_${ip}_*`;
+      console.log('🔍 Would scan for pattern:', originalKeyPattern);
+      
+      // Scan for original keys to verify they exist
+      const scanResult = await redis(`scan/0/match/attribution_${ip}_*/count/10`);
+      if (scanResult?.result && scanResult.result[1]?.length > 0) {
+        console.log('🔍 Original keys found:', scanResult.result[1].length);
+        console.log('🔍 Sample keys:', scanResult.result[1].slice(0, 3));
+        
+        // Check one of the original keys to see its data
+        try {
+          const sampleKey = scanResult.result[1][0];
+          const sampleResult = await redis(`get/${sampleKey}`);
+          if (sampleResult?.result) {
+            const sampleData = JSON.parse(decodeURIComponent(sampleResult.result));
+            console.log('🔍 Sample original data:', {
+              timestamp: sampleData.timestamp,
+              session_id: sampleData.session_id,
+              source: sampleData.source,
+              landing_page: sampleData.landing_page
+            });
+          }
+        } catch (sampleError) {
+          console.log('🔍 Error reading sample key:', sampleError.message);
+        }
+      } else {
+        console.log('🔍 No original keys found for IP:', ip);
+      }
+    } catch (error) {
+      console.log('🔍 Original key scan error:', error.message);
+    }
+  }
+  
+  console.log('🔍 ================== END DEBUG ATTRIBUTION LOOKUP ==================');
 }
 
 // Add pageviews to journey with deduplication
