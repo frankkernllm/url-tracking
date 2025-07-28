@@ -1,7 +1,6 @@
-// Multi-Source Attribution Data Extractor - WITH DEBUG FOR TARGET IP
-// Path: netlify/functions/extract-attribution-data.js
-// Purpose: Extract ALL pageviews from multiple sources into attribution-optimized chunks
-// DEBUG: Added logging to trace target IP 42.61.210.120
+// Simple Attribution Data Extractor - Based on Working extract-pageviews-chunked.js
+// Path: netlify/functions/extract-attribution-simple.js  
+// Purpose: Extract pageviews using the PROVEN simple method, output attribution format
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -21,49 +20,48 @@ exports.handler = async (event, context) => {
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
-    console.log('🚀 Starting MULTI-SOURCE attribution data extraction...');
+    // Get parameters (using simple single pattern approach)
+    const body = event.body ? JSON.parse(event.body) : {};
+    const pattern = body.pattern || 'attribution_*';  // SINGLE PATTERN ONLY
     
-    // Load existing progress or start fresh
-    const progressKey = 'attribution_extraction_v1_progress';
-    const existingProgress = await getAttributionProgress(redis, progressKey);
+    console.log(`🚀 Starting SIMPLE attribution extraction: pattern=${pattern}`);
     
-    console.log(`📊 Resuming attribution extraction:`, {
+    // Load existing progress or start fresh (simplified)
+    const progressKey = 'simple_attribution_progress';
+    const existingProgress = await getSimpleProgress(redis, progressKey);
+    
+    console.log(`📊 Resuming from simple progress:`, {
       total_extracted: existingProgress.total_extracted,
-      current_pattern_index: existingProgress.current_pattern_index,
-      current_pattern: existingProgress.patterns[existingProgress.current_pattern_index],
       last_cursor: existingProgress.last_cursor,
       chunks_completed: existingProgress.chunks_completed
     });
     
-    // MULTI-SOURCE extraction with smart resume
-    const extractionResult = await extractMultiSourceAttributionData(
+    // SIMPLE EXTRACTION: Use proven method from extract-pageviews-chunked.js
+    const extractionResult = await extractWithSimpleMethod(
       redis, 
+      pattern, 
       existingProgress,
       maxProcessingTime - (Date.now() - startTime)
     );
     
     // Update progress after extraction
     const updatedProgress = {
-      ...existingProgress,
       total_extracted: existingProgress.total_extracted + extractionResult.pageviews_extracted_this_run,
       total_keys_scanned: existingProgress.total_keys_scanned + extractionResult.keys_scanned_this_run,
-      current_pattern_index: extractionResult.final_pattern_index,
       last_cursor: extractionResult.final_cursor,
       chunks_completed: existingProgress.chunks_completed + extractionResult.chunks_processed_this_run,
       chunks_stored: existingProgress.chunks_stored + extractionResult.chunks_stored_this_run,
       unique_ips_found: extractionResult.total_unique_ips,
-      unique_sessions_found: extractionResult.total_unique_sessions,
       last_updated: new Date().toISOString(),
       is_complete: extractionResult.is_complete,
       earliest_pageview: extractionResult.earliest_pageview || existingProgress.earliest_pageview,
-      latest_pageview: extractionResult.latest_pageview || existingProgress.latest_pageview,
-      patterns_completed: extractionResult.patterns_completed
+      latest_pageview: extractionResult.latest_pageview || existingProgress.latest_pageview
     };
     
-    await storeAttributionProgress(redis, progressKey, updatedProgress);
+    await storeSimpleProgress(redis, progressKey, updatedProgress);
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ MULTI-SOURCE attribution extraction finished in ${totalTime}ms`);
+    console.log(`✅ SIMPLE attribution extraction finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -82,19 +80,11 @@ exports.handler = async (event, context) => {
           total_pageviews_extracted: updatedProgress.total_extracted,
           total_keys_scanned: updatedProgress.total_keys_scanned,
           total_chunks_completed: updatedProgress.chunks_completed,
-          extraction_method: 'multi_source_attribution_v1'
-        },
-        multi_source_progress: {
-          patterns_available: existingProgress.patterns.length,
-          patterns_completed: extractionResult.patterns_completed.length,
-          current_pattern: updatedProgress.current_pattern_index < existingProgress.patterns.length ? 
-            existingProgress.patterns[updatedProgress.current_pattern_index] : 'ALL_COMPLETE',
-          patterns_remaining: existingProgress.patterns.length - extractionResult.patterns_completed.length
+          extraction_method: 'simple_attribution_v1'
         },
         performance: {
           pageviews_per_second_this_run: Math.round(extractionResult.pageviews_extracted_this_run / (totalTime / 1000)),
-          unique_ips_found: updatedProgress.unique_ips_found,
-          unique_sessions_found: updatedProgress.unique_sessions_found
+          unique_ips_found: updatedProgress.unique_ips_found
         },
         coverage: {
           earliest_pageview: updatedProgress.earliest_pageview,
@@ -102,220 +92,84 @@ exports.handler = async (event, context) => {
           attribution_fields_coverage: extractionResult.attribution_fields_found
         },
         next_steps: extractionResult.is_complete ? [
-          '✅ Multi-source attribution extraction complete!',
-          'All pageview patterns processed successfully',
+          '✅ Simple attribution extraction complete!',
+          'All attribution_* pageviews processed successfully', 
           'Run build-attribution-indexes.js to build attribution indexes',
           'System ready for attribution analysis'
         ] : [
-          'Multi-source extraction continuing...',
+          'Simple extraction continuing...',
           'Run the same command again to continue processing',
-          `Currently processing: ${existingProgress.patterns[updatedProgress.current_pattern_index] || 'COMPLETING'}`,
-          `Progress: ${extractionResult.patterns_completed.length}/${existingProgress.patterns.length} patterns complete`
+          `Progress: ${updatedProgress.total_extracted} pageviews extracted`,
+          `Next run will start from cursor: ${extractionResult.final_cursor}`
         ]
       })
     };
     
   } catch (error) {
-    console.error('❌ Multi-source attribution extraction failed:', error);
+    console.error('❌ Simple attribution extraction failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Multi-source attribution extraction failed', 
+        error: 'Simple attribution extraction failed', 
         message: error.message 
       })
     };
   }
 };
 
-// Get attribution extraction progress (multi-source aware)
-async function getAttributionProgress(redis, progressKey) {
+// Get simple progress (resume from last position)
+async function getSimpleProgress(redis, progressKey) {
   try {
     const progressData = await redis(`get/${progressKey}`);
     
     if (progressData?.result) {
       const progress = JSON.parse(decodeURIComponent(progressData.result));
-      console.log(`🔄 Found existing attribution progress: ${progress.total_extracted} pageviews extracted`);
+      console.log(`🔄 Found existing simple progress: ${progress.total_extracted} pageviews extracted`);
       return progress;
     }
   } catch (error) {
-    console.log('⚠️ No existing attribution progress found, starting fresh');
+    console.log('⚠️ No existing simple progress found, starting fresh');
   }
   
-  // Default fresh start with all 3 patterns
+  // Default fresh start
   return {
     total_extracted: 0,
     total_keys_scanned: 0,
-    patterns: [
-      'attribution_*',        // Pattern 1: Main source (IPv4 & IPv6)
-      'pageviews:*',         // Pattern 2: Newer format (July 2025 data)
-      'attribution:*'        // Pattern 3: Legacy colon format (June 2025 data)
-    ],
-    current_pattern_index: 0,
     last_cursor: '0',
     chunks_completed: 0,
     chunks_stored: 0,
     unique_ips_found: 0,
-    unique_sessions_found: 0,
     started_at: new Date().toISOString(),
     is_complete: false,
     earliest_pageview: null,
-    latest_pageview: null,
-    patterns_completed: []
+    latest_pageview: null
   };
 }
 
-// Store attribution progress
-async function storeAttributionProgress(redis, progressKey, progress) {
+// Store simple progress
+async function storeSimpleProgress(redis, progressKey, progress) {
   await redis(`setex/${progressKey}/3600/${encodeURIComponent(JSON.stringify(progress))}`); // 1 hour TTL
-  console.log(`💾 Attribution progress saved: ${progress.total_extracted} total pageviews, pattern ${progress.current_pattern_index}/${progress.patterns.length}`);
+  console.log(`💾 Simple progress saved: ${progress.total_extracted} total pageviews, cursor: ${progress.last_cursor}`);
 }
 
-// Extract attribution data from multiple sources with smart resume
-async function extractMultiSourceAttributionData(redis, existingProgress, maxTime) {
+// Extract with simple method (proven working approach from extract-pageviews-chunked.js)
+async function extractWithSimpleMethod(redis, pattern, existingProgress, maxTime) {
   const extractionStartTime = Date.now();
+  let cursor = existingProgress.last_cursor; // RESUME FROM LAST POSITION
   let thisRunPageviews = [];
   let thisRunKeysScanned = 0;
   let thisRunChunksProcessed = 0;
   let thisRunChunksStored = 0;
   let allUniqueIPs = new Set();
-  let allUniqueSessions = new Set();
   let earliestPageview = existingProgress.earliest_pageview;
   let latestPageview = existingProgress.latest_pageview;
   let attributionFieldsFound = new Set();
   
-  let currentPatternIndex = existingProgress.current_pattern_index;
-  let currentCursor = existingProgress.last_cursor;
-  let patternsCompleted = [...existingProgress.patterns_completed];
+  console.log(`🔄 SIMPLE RESUME: Starting from cursor: ${cursor}`);
+  console.log(`📊 Previous progress: ${existingProgress.total_extracted} pageviews already extracted`);
   
-  console.log(`🔄 MULTI-SOURCE RESUME: Starting from pattern ${currentPatternIndex}, cursor: ${currentCursor}`);
-  console.log(`📊 Previous progress: ${existingProgress.total_extracted} pageviews from ${patternsCompleted.length} patterns`);
-  
-  try {
-    // Process remaining patterns
-    while (currentPatternIndex < existingProgress.patterns.length) {
-      const currentPattern = existingProgress.patterns[currentPatternIndex];
-      console.log(`🎯 Processing pattern ${currentPatternIndex + 1}/${existingProgress.patterns.length}: ${currentPattern}`);
-      
-      // Check time remaining for this pattern
-      const timeRemaining = maxTime - (Date.now() - extractionStartTime);
-      if (timeRemaining < 5000) {
-        console.log(`⏰ Time limit approaching: ${timeRemaining}ms remaining, stopping pattern processing`);
-        break;
-      }
-      
-      // Process current pattern
-      const patternResult = await processAttributionPattern(
-        redis, 
-        currentPattern, 
-        currentCursor, 
-        timeRemaining - 2000
-      );
-      
-      // Accumulate results
-      thisRunPageviews.push(...patternResult.pageviews);
-      thisRunKeysScanned += patternResult.keys_scanned;
-      thisRunChunksProcessed += patternResult.chunks_processed;
-      
-      // Track unique values
-      patternResult.unique_ips.forEach(ip => allUniqueIPs.add(ip));
-      patternResult.unique_sessions.forEach(session => allUniqueSessions.add(session));
-      patternResult.attribution_fields.forEach(field => attributionFieldsFound.add(field));
-      
-      // Update time range
-      if (patternResult.earliest_pageview && (!earliestPageview || new Date(patternResult.earliest_pageview) < new Date(earliestPageview))) {
-        earliestPageview = patternResult.earliest_pageview;
-      }
-      if (patternResult.latest_pageview && (!latestPageview || new Date(patternResult.latest_pageview) > new Date(latestPageview))) {
-        latestPageview = patternResult.latest_pageview;
-      }
-      
-      // Check if pattern is complete
-      if (patternResult.pattern_complete) {
-        console.log(`✅ Pattern ${currentPattern} completed successfully`);
-        patternsCompleted.push(currentPattern);
-        currentPatternIndex++;
-        currentCursor = '0'; // Reset cursor for next pattern
-      } else {
-        console.log(`⏸️ Pattern ${currentPattern} incomplete, will resume from cursor: ${patternResult.final_cursor}`);
-        currentCursor = patternResult.final_cursor;
-        break; // Time limit reached, will resume next run
-      }
-    }
-    
-    // Store accumulated pageviews in attribution chunks
-    if (thisRunPageviews.length > 0) {
-      const chunkResult = await storeAttributionChunks(redis, thisRunPageviews, existingProgress.chunks_stored);
-      thisRunChunksStored = chunkResult.chunks_stored;
-      console.log(`💾 Stored ${thisRunChunksStored} attribution chunks with ${thisRunPageviews.length} total pageviews`);
-    }
-    
-    const isComplete = currentPatternIndex >= existingProgress.patterns.length;
-    const processingTime = Date.now() - extractionStartTime;
-    
-    console.log(`🏁 MULTI-SOURCE attribution extraction summary:`);
-    console.log(`   📊 This run pageviews: ${thisRunPageviews.length}`);
-    console.log(`   📊 Total pageviews: ${existingProgress.total_extracted + thisRunPageviews.length}`);
-    console.log(`   🔍 This run keys scanned: ${thisRunKeysScanned}`);
-    console.log(`   📦 This run chunks: ${thisRunChunksProcessed}`);
-    console.log(`   💾 This run chunks stored: ${thisRunChunksStored}`);
-    console.log(`   🌐 Unique IPs found: ${allUniqueIPs.size}`);
-    console.log(`   🔗 Unique sessions found: ${allUniqueSessions.size}`);
-    console.log(`   🎯 Patterns completed: ${patternsCompleted.length}/${existingProgress.patterns.length}`);
-    console.log(`   ✅ Complete: ${isComplete}`);
-    console.log(`   ⏱️ This run time: ${processingTime}ms`);
-    
-    return {
-      pageviews_extracted_this_run: thisRunPageviews.length,
-      keys_scanned_this_run: thisRunKeysScanned,
-      chunks_processed_this_run: thisRunChunksProcessed,
-      chunks_stored_this_run: thisRunChunksStored,
-      total_unique_ips: allUniqueIPs.size,
-      total_unique_sessions: allUniqueSessions.size,
-      earliest_pageview: earliestPageview,
-      latest_pageview: latestPageview,
-      attribution_fields_found: Array.from(attributionFieldsFound),
-      is_complete: isComplete,
-      final_pattern_index: currentPatternIndex,
-      final_cursor: currentCursor,
-      patterns_completed: patternsCompleted,
-      processing_time_ms: processingTime
-    };
-    
-  } catch (error) {
-    console.error('❌ Multi-source attribution extraction error:', error);
-    return {
-      pageviews_extracted_this_run: thisRunPageviews.length,
-      keys_scanned_this_run: thisRunKeysScanned,
-      chunks_processed_this_run: thisRunChunksProcessed,
-      chunks_stored_this_run: thisRunChunksStored,
-      total_unique_ips: allUniqueIPs.size,
-      total_unique_sessions: allUniqueSessions.size,
-      is_complete: false,
-      final_pattern_index: currentPatternIndex,
-      final_cursor: currentCursor,
-      patterns_completed: patternsCompleted,
-      error: error.message
-    };
-  }
-}
-
-// Process individual attribution pattern - WITH DEBUG FOR TARGET IP
-async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
-  const patternStartTime = Date.now();
-  let cursor = startCursor;
-  let pageviews = [];
-  let keysScanned = 0;
-  let chunksProcessed = 0;
-  let uniqueIPs = new Set();
-  let uniqueSessions = new Set();
-  let attributionFields = new Set();
-  let earliestPageview = null;
-  let latestPageview = null;
-  
-  console.log(`🎯 Processing attribution pattern: ${pattern} from cursor: ${cursor}`);
-  
-  // 🎯 DEBUG: Track target IP findings throughout pattern processing
+  // 🎯🎯🎯 DEBUG: Track target IP findings
   let targetIPKeysFound = 0;
   let targetIPKeysAfterFilter = 0;
   let targetIPPageviewsExtracted = 0;
@@ -323,35 +177,35 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
   try {
     do {
       // Check time remaining
-      const timeRemaining = maxTime - (Date.now() - patternStartTime);
+      const timeRemaining = maxTime - (Date.now() - extractionStartTime);
       if (timeRemaining < 3000) {
-        console.log(`⏰ Pattern time limit approaching: ${timeRemaining}ms remaining`);
+        console.log(`⏰ Time limit approaching: ${timeRemaining}ms remaining, stopping extraction`);
         break;
       }
       
-      console.log(`🔍 Pattern scan cursor: ${cursor}, collected: ${pageviews.length} pageviews`);
+      console.log(`🔍 Processing cursor: ${cursor}, this run: ${thisRunPageviews.length} pageviews`);
       
-      // Scan for next batch
+      // Scan for next batch (EXACT same method as working script)
       const scanResult = await redis(`scan/${cursor}/match/${pattern}/count/500`);
       
       if (!scanResult?.result || !Array.isArray(scanResult.result) || scanResult.result.length < 2) {
-        console.log(`🏁 Pattern scan complete: no more results for ${pattern}`);
-        cursor = '0'; // Mark pattern as complete
+        console.log(`🏁 Scan complete: no more results`);
+        cursor = '0'; // Mark as complete
         break;
       }
       
       cursor = scanResult.result[0];
       const keys = scanResult.result[1] || [];
-      keysScanned += keys.length;
-      chunksProcessed++;
+      thisRunKeysScanned += keys.length;
+      thisRunChunksProcessed++;
       
-      console.log(`📊 Pattern chunk ${chunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
+      console.log(`📊 Chunk ${thisRunChunksProcessed}: Found ${keys.length} keys, cursor: ${cursor}`);
       
       // 🎯🎯🎯 DEBUG: Check for target IP keys
       const targetKeys = keys.filter(key => key.includes('42.61.210.120'));
       if (targetKeys.length > 0) {
         targetIPKeysFound += targetKeys.length;
-        console.log(`🎯🎯🎯 FOUND TARGET IP KEYS IN SCAN (chunk ${chunksProcessed}):`, targetKeys);
+        console.log(`🎯🎯🎯 FOUND TARGET IP KEYS IN SCAN (chunk ${thisRunChunksProcessed}):`, targetKeys);
         
         // Test specific keys we're looking for
         const specificTargetKeys = [
@@ -367,272 +221,231 @@ async function processAttributionPattern(redis, pattern, startCursor, maxTime) {
         });
       }
       
-      // Filter and extract attribution-relevant keys
-      const attributionKeys = filterAttributionKeys(keys, pattern);
-      console.log(`📝 Filtered: ${attributionKeys.length} attribution keys from ${keys.length} total`);
+      // Filter main attribution keys (EXACT same filter as working script)
+      const mainKeys = keys.filter(key => {
+        return !key.includes('_ip_') && 
+               !key.includes('_session_') && 
+               !key.includes('_fp_') && 
+               !key.includes('_screen_') && 
+               !key.includes('_webgl_') && 
+               !key.includes('_geo_') &&
+               !key.includes('pageview_index_') &&
+               !key.includes('conversion_index_') &&
+               !key.includes('attribution_stats_') &&
+               !key.includes('geo_cache:') &&
+               !key.includes('_region_') &&
+               !key.includes('_hw_') &&
+               key.startsWith('attribution_') &&
+               key.match(/\d+$/);
+      });
+      
+      console.log(`📝 Filtered: ${mainKeys.length} main keys from ${keys.length} total`);
       
       // 🎯🎯🎯 DEBUG: Check if target keys passed filter
       if (targetKeys.length > 0) {
-        const filteredTargetKeys = attributionKeys.filter(key => key.includes('42.61.210.120'));
+        const filteredTargetKeys = mainKeys.filter(key => key.includes('42.61.210.120'));
         targetIPKeysAfterFilter += filteredTargetKeys.length;
         console.log(`🎯🎯🎯 TARGET KEYS AFTER FILTER: ${filteredTargetKeys.length}/${targetKeys.length} passed`);
         if (filteredTargetKeys.length > 0) {
           console.log(`🎯🎯🎯 TARGET KEYS THAT PASSED:`, filteredTargetKeys);
         }
-        if (filteredTargetKeys.length < targetKeys.length) {
-          const rejectedKeys = targetKeys.filter(key => !filteredTargetKeys.includes(key));
-          console.log(`🎯🎯🎯 TARGET KEYS REJECTED BY FILTER:`, rejectedKeys);
-          
-          // Test each rejected key against filter criteria
-          rejectedKeys.forEach(key => {
-            console.log(`🎯🎯🎯 Testing rejected key: ${key}`);
-            console.log(`   - Starts with attribution_: ${key.startsWith('attribution_')}`);
-            console.log(`   - Ends with digits: ${!!key.match(/\d+$/)}`);
-            console.log(`   - Contains _ip_: ${key.includes('_ip_')}`);
-            console.log(`   - Contains _session_: ${key.includes('_session_')}`);
-            console.log(`   - Contains _fp_: ${key.includes('_fp_')}`);
-          });
-        }
       }
       
-      if (attributionKeys.length === 0) {
-        console.log(`⚠️ No attribution keys in this chunk, continuing...`);
+      if (mainKeys.length === 0) {
+        console.log(`⚠️ No main keys in this chunk, continuing...`);
         continue;
       }
       
-      // Process keys in batches
+      // Process keys in batches (EXACT same method as working script)
       const batchSize = 50;
-      for (let i = 0; i < attributionKeys.length; i += batchSize) {
-        const timeCheck = maxTime - (Date.now() - patternStartTime);
+      const chunkPageviews = [];
+      
+      for (let i = 0; i < mainKeys.length; i += batchSize) {
+        const timeCheck = maxTime - (Date.now() - extractionStartTime);
         if (timeCheck < 2000) {
-          console.log(`⏰ Time limit during batch processing`);
+          console.log(`⏰ Time limit during batch processing, stopping`);
           break;
         }
         
-        const batch = attributionKeys.slice(i, i + batchSize);
-        const batchPageviews = await processAttributionKeyBatch(redis, batch, pattern);
+        const batch = mainKeys.slice(i, i + batchSize);
         
-        // 🎯🎯🎯 DEBUG: Check if any target IP pageviews were extracted
-        const targetIPPageviewsInBatch = batchPageviews.filter(pv => 
-          pv && pv.ip_address === '42.61.210.120'
-        );
-        if (targetIPPageviewsInBatch.length > 0) {
-          targetIPPageviewsExtracted += targetIPPageviewsInBatch.length;
-          console.log(`🎯🎯🎯 EXTRACTED ${targetIPPageviewsInBatch.length} TARGET IP PAGEVIEWS:`, 
-            targetIPPageviewsInBatch.map(pv => ({
-              timestamp: pv.timestamp,
-              session_id: pv.session_id,
-              source: pv.source,
-              landing_page: pv.landing_page
-            }))
-          );
-        }
-        
-        // Extract attribution data
-        batchPageviews.forEach(pv => {
-          if (pv && pv.timestamp && pv.ip_address) {
-            // Track attribution fields
-            Object.keys(pv).forEach(field => attributionFields.add(field));
-            
-            // Track unique values
-            uniqueIPs.add(pv.ip_address);
-            if (pv.session_id) uniqueSessions.add(pv.session_id);
-            
-            // Track time range
-            const pvTime = new Date(pv.timestamp);
-            if (!earliestPageview || pvTime < new Date(earliestPageview)) {
-              earliestPageview = pv.timestamp;
+        const batchPromises = batch.map(async (key) => {
+          try {
+            const data = await redis(`get/${key}`, 1000);
+            if (data?.result) {
+              
+              let parsed;
+              try {
+                parsed = JSON.parse(data.result);
+              } catch (parseError) {
+                try {
+                  parsed = JSON.parse(decodeURIComponent(data.result));
+                } catch (decodeError) {
+                  return null;
+                }
+              }
+              
+              if (parsed && parsed.timestamp && parsed.ip_address) {
+                
+                // Track unique IPs and time range
+                allUniqueIPs.add(parsed.ip_address);
+                
+                const pvTime = new Date(parsed.timestamp);
+                if (!earliestPageview || pvTime < new Date(earliestPageview)) {
+                  earliestPageview = parsed.timestamp;
+                }
+                if (!latestPageview || pvTime > new Date(latestPageview)) {
+                  latestPageview = parsed.timestamp;
+                }
+                
+                // Track attribution fields
+                Object.keys(parsed).forEach(field => attributionFieldsFound.add(field));
+                
+                // 🎯🎯🎯 DEBUG: Check if this is target IP pageview
+                if (parsed.ip_address === '42.61.210.120') {
+                  targetIPPageviewsExtracted++;
+                  console.log(`🎯🎯🎯 EXTRACTED TARGET IP PAGEVIEW:`, {
+                    timestamp: parsed.timestamp,
+                    session_id: parsed.session_id,
+                    source: parsed.source,
+                    landing_page: parsed.landing_page,
+                    redis_key: key
+                  });
+                }
+                
+                // Return pageview in attribution format (compatible with new system)
+                return {
+                  // Core attribution fields
+                  session_id: parsed.session_id || null,
+                  timestamp: parsed.timestamp,
+                  landing_page: parsed.landing_page || 'unknown',
+                  source: parsed.source || 'direct',
+                  ip_address: parsed.ip_address,
+                  
+                  // Canvas/WebGL fingerprints for matching
+                  canvas_fingerprint: parsed.canvas_fingerprint || null,
+                  webgl_fingerprint: parsed.webgl_fingerprint || null,
+                  
+                  // Attribution context
+                  referrer_url: parsed.referrer_url || null,
+                  utm_campaign: parsed.utm_campaign || null,
+                  utm_source: parsed.utm_source || null,
+                  utm_medium: parsed.utm_medium || null,
+                  utm_term: parsed.utm_term || null,
+                  utm_content: parsed.utm_content || null,
+                  
+                  // Technical data for matching
+                  screen_resolution: parsed.screen_resolution || null,
+                  cpu_cores: parsed.cpu_cores || null,
+                  memory_gb: parsed.memory_gb || null,
+                  
+                  // Original key reference
+                  redis_key: key,
+                  source_pattern: pattern
+                };
+              }
             }
-            if (!latestPageview || pvTime > new Date(latestPageview)) {
-              latestPageview = pv.timestamp;
-            }
-            
-            pageviews.push(pv);
+          } catch (error) {
+            // Skip errors to keep processing
           }
+          return null;
         });
         
-        console.log(`📦 Pattern batch processed: ${batchPageviews.length} pageviews`);
+        const batchResults = await Promise.all(batchPromises);
+        const validResults = batchResults.filter(result => result !== null);
+        chunkPageviews.push(...validResults);
+        
+        console.log(`📦 Batch processed: ${validResults.length} pageviews from ${batch.length} keys`);
       }
       
+      // Add to this run's pageviews
+      thisRunPageviews.push(...chunkPageviews);
+      
+      // Store chunk if we have data (compatible with new system)
+      if (chunkPageviews.length > 0) {
+        const chunkId = `simple_chunk_${existingProgress.chunks_completed + thisRunChunksStored + 1}`;
+        await storeAttributionChunk(redis, chunkPageviews, chunkId);
+        thisRunChunksStored++;
+        console.log(`💾 Stored chunk ${chunkId} with ${chunkPageviews.length} pageviews`);
+      }
+      
+      // Progress update
+      const totalSoFar = existingProgress.total_extracted + thisRunPageviews.length;
+      console.log(`📊 Progress: ${thisRunPageviews.length} this run, ${totalSoFar} total pageviews`);
+      
       // Safety check: don't run forever
-      if (chunksProcessed >= 50) {
-        console.log(`🛑 Pattern safety limit: processed 50 chunks, stopping`);
+      if (thisRunChunksProcessed >= 50) {
+        console.log(`🛑 Safety limit: processed 50 chunks this run, stopping to avoid infinite loop`);
         break;
       }
       
-    } while (cursor !== '0' && Date.now() - patternStartTime < maxTime - 2000);
+    } while (cursor !== '0' && Date.now() - extractionStartTime < maxTime - 2000);
     
-    const patternComplete = cursor === '0';
-    const patternTime = Date.now() - patternStartTime;
+    const isComplete = cursor === '0';
+    const processingTime = Date.now() - extractionStartTime;
     
-    console.log(`🎯 Pattern ${pattern} summary:`);
-    console.log(`   📊 Pageviews extracted: ${pageviews.length}`);
-    console.log(`   🔍 Keys scanned: ${keysScanned}`);
-    console.log(`   📦 Chunks processed: ${chunksProcessed}`);
-    console.log(`   🌐 Unique IPs: ${uniqueIPs.size}`);
-    console.log(`   🔗 Unique sessions: ${uniqueSessions.size}`);
-    console.log(`   ✅ Complete: ${patternComplete}`);
-    console.log(`   ⏱️ Pattern time: ${patternTime}ms`);
+    console.log(`🏁 SIMPLE extraction summary for this run:`);
+    console.log(`   📊 This run pageviews: ${thisRunPageviews.length}`);
+    console.log(`   📊 Total pageviews: ${existingProgress.total_extracted + thisRunPageviews.length}`);
+    console.log(`   🔍 This run keys scanned: ${thisRunKeysScanned}`);
+    console.log(`   📦 This run chunks: ${thisRunChunksProcessed}`);
+    console.log(`   💾 This run chunks stored: ${thisRunChunksStored}`);
+    console.log(`   🌐 Total unique IPs: ${allUniqueIPs.size}`);
+    console.log(`   ✅ Complete: ${isComplete}`);
+    console.log(`   🎯 Final cursor: ${cursor}`);
+    console.log(`   ⏱️ This run time: ${processingTime}ms`);
     
     // 🎯🎯🎯 DEBUG: Final target IP summary
-    console.log(`🎯🎯🎯 TARGET IP 42.61.210.120 SUMMARY FOR PATTERN ${pattern}:`);
+    console.log(`🎯🎯🎯 TARGET IP 42.61.210.120 FINAL SUMMARY:`);
     console.log(`   🎯 Keys found in scan: ${targetIPKeysFound}`);
     console.log(`   🎯 Keys after filter: ${targetIPKeysAfterFilter}`);
     console.log(`   🎯 Pageviews extracted: ${targetIPPageviewsExtracted}`);
-    console.log(`   🎯 Target IP in unique IPs: ${uniqueIPs.has('42.61.210.120')}`);
+    console.log(`   🎯 Target IP in unique IPs: ${allUniqueIPs.has('42.61.210.120')}`);
     
     return {
-      pageviews: pageviews,
-      keys_scanned: keysScanned,
-      chunks_processed: chunksProcessed,
-      unique_ips: Array.from(uniqueIPs),
-      unique_sessions: Array.from(uniqueSessions),
-      attribution_fields: Array.from(attributionFields),
+      pageviews_extracted_this_run: thisRunPageviews.length,
+      keys_scanned_this_run: thisRunKeysScanned,
+      chunks_processed_this_run: thisRunChunksProcessed,
+      chunks_stored_this_run: thisRunChunksStored,
+      total_unique_ips: allUniqueIPs.size,
       earliest_pageview: earliestPageview,
       latest_pageview: latestPageview,
-      pattern_complete: patternComplete,
+      is_complete: isComplete,
       final_cursor: cursor,
-      processing_time_ms: patternTime
+      processing_time_ms: processingTime,
+      attribution_fields_found: Array.from(attributionFieldsFound)
     };
     
   } catch (error) {
-    console.error(`❌ Pattern ${pattern} processing error:`, error);
+    console.error('❌ Simple extraction error:', error);
     return {
-      pageviews: pageviews,
-      keys_scanned: keysScanned,
-      chunks_processed: chunksProcessed,
-      unique_ips: Array.from(uniqueIPs),
-      unique_sessions: Array.from(uniqueSessions),
-      attribution_fields: Array.from(attributionFields),
-      pattern_complete: false,
+      pageviews_extracted_this_run: thisRunPageviews.length,
+      keys_scanned_this_run: thisRunKeysScanned,
+      chunks_processed_this_run: thisRunChunksProcessed,
+      chunks_stored_this_run: thisRunChunksStored,
+      total_unique_ips: allUniqueIPs.size,
+      is_complete: false,
       final_cursor: cursor,
       error: error.message
     };
   }
 }
 
-// Filter keys for attribution relevance
-function filterAttributionKeys(keys, pattern) {
-  if (pattern === 'attribution_*') {
-    // Filter main attribution keys - exclude auxiliary indexes
-    return keys.filter(key => {
-      return !key.includes('_ip_') && 
-             !key.includes('_session_') && 
-             !key.includes('_fp_') && 
-             !key.includes('_screen_') && 
-             !key.includes('_webgl_') && 
-             !key.includes('_geo_') &&
-             !key.includes('pageview_index_') &&
-             !key.includes('conversion_index_') &&
-             !key.includes('attribution_stats_') &&
-             !key.includes('geo_cache:') &&
-             !key.includes('_region_') &&
-             !key.includes('_hw_') &&
-             key.startsWith('attribution_') &&
-             key.match(/\d+$/); // Must end with timestamp
-    });
-  } else if (pattern === 'pageviews:*') {
-    // Newer format pageviews
-    return keys.filter(key => key.startsWith('pageviews:') && !key.includes('index_'));
-  } else if (pattern === 'attribution:*') {
-    // Legacy colon format
-    return keys.filter(key => key.startsWith('attribution:') && !key.includes('stats'));
-  }
+// Store attribution chunk (compatible with new system)
+async function storeAttributionChunk(redis, pageviews, chunkId) {
+  if (pageviews.length === 0) return;
   
-  return keys; // Default: return all keys
-}
-
-// Process batch of attribution keys
-async function processAttributionKeyBatch(redis, keys, pattern) {
-  const batchPromises = keys.map(async (key) => {
-    try {
-      const result = await redis(`get/${key}`, 1000);
-      if (result?.result) {
-        let parsed;
-        try {
-          parsed = JSON.parse(result.result);
-        } catch (parseError) {
-          try {
-            parsed = JSON.parse(decodeURIComponent(result.result));
-          } catch (decodeError) {
-            return null;
-          }
-        }
-        
-        if (parsed && parsed.timestamp && parsed.ip_address) {
-          // Standardize attribution data structure
-          return {
-            // Core attribution fields
-            session_id: parsed.session_id || null,
-            timestamp: parsed.timestamp,
-            landing_page: parsed.landing_page || 'unknown',
-            source: parsed.source || 'direct',
-            ip_address: parsed.ip_address,
-            
-            // Canvas/WebGL fingerprints for matching
-            canvas_fingerprint: parsed.canvas_fingerprint || null,
-            webgl_fingerprint: parsed.webgl_fingerprint || null,
-            
-            // Attribution context
-            referrer_url: parsed.referrer_url || null,
-            utm_campaign: parsed.utm_campaign || null,
-            utm_source: parsed.utm_source || null,
-            utm_medium: parsed.utm_medium || null,
-            utm_term: parsed.utm_term || null,
-            utm_content: parsed.utm_content || null,
-            
-            // Technical data for matching
-            screen_resolution: parsed.screen_resolution || null,
-            cpu_cores: parsed.cpu_cores || null,
-            memory_gb: parsed.memory_gb || null,
-            
-            // Original key reference
-            redis_key: key,
-            source_pattern: pattern
-          };
-        }
-      }
-    } catch (error) {
-      // Skip errors to keep processing
-    }
-    return null;
-  });
+  const chunkKey = `attribution_data_chunk:v1_${chunkId}:${Date.now()}`;
+  const chunkData = {
+    chunk_id: chunkId,
+    pageview_count: pageviews.length,
+    pageviews: pageviews,
+    created_at: new Date().toISOString(),
+    version: 'v1',
+    attribution_ready: true
+  };
   
-  const results = await Promise.all(batchPromises);
-  return results.filter(result => result !== null);
-}
-
-// Store attribution data in optimized chunks
-async function storeAttributionChunks(redis, pageviews, startingChunkNumber) {
-  if (pageviews.length === 0) return { chunks_stored: 0 };
-  
-  const chunkSize = 1000; // 1000 pageviews per chunk
-  let chunksStored = 0;
-  
-  for (let i = 0; i < pageviews.length; i += chunkSize) {
-    const chunk = pageviews.slice(i, i + chunkSize);
-    const chunkNumber = startingChunkNumber + chunksStored + 1;
-    const chunkKey = `attribution_data_chunk:v1_${chunkNumber}:${Date.now()}`;
-    
-    const chunkData = {
-      chunk_id: `v1_${chunkNumber}`,
-      pageview_count: chunk.length,
-      pageviews: chunk,
-      created_at: new Date().toISOString(),
-      version: 'v1',
-      attribution_ready: true
-    };
-    
-    try {
-      await redis(`setex/${chunkKey}/2592000/${encodeURIComponent(JSON.stringify(chunkData))}`); // 30 days TTL
-      chunksStored++;
-      console.log(`💾 Stored attribution chunk ${chunkNumber} with ${chunk.length} pageviews`);
-    } catch (error) {
-      console.error(`❌ Failed to store chunk ${chunkNumber}:`, error);
-    }
-  }
-  
-  return { chunks_stored: chunksStored };
+  await redis(`setex/${chunkKey}/2592000/${encodeURIComponent(JSON.stringify(chunkData))}`); // 30 days TTL
 }
 
 // Initialize Redis helper
