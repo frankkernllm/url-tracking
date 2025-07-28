@@ -22,6 +22,71 @@
 //   "skip_existing_check": true
 // }
 
+// NEW: Get conversion by global index (like V1 behavior)
+async function getV2GlobalConversionByIndex(redis, conversionIndex) {
+  try {
+    console.log(`🔍 V2 Getting global conversion by index: ${conversionIndex}`);
+    
+    // Scan for all V2 email conversion indexes to build global list
+    let allConversions = [];
+    let cursor = '0';
+    let scannedIndexes = 0;
+    
+    do {
+      const scanResult = await redis(`scan/${cursor}/match/conversion_index_v2_email:*/count/100`);
+      
+      if (scanResult?.result && Array.isArray(scanResult.result) && scanResult.result.length >= 2) {
+        cursor = scanResult.result[0];
+        const emailIndexKeys = scanResult.result[1] || [];
+        
+        // Get conversions from each email index
+        for (const emailIndexKey of emailIndexKeys) {
+          try {
+            const indexResult = await redis(`get/${emailIndexKey}`, 2000);
+            if (indexResult?.result) {
+              const emailConversions = JSON.parse(decodeURIComponent(indexResult.result));
+              if (emailConversions.conversions) {
+                allConversions.push(...emailConversions.conversions);
+              }
+            }
+          } catch (error) {
+            console.log(`⚠️ Error reading email index: ${error.message}`);
+          }
+        }
+        
+        scannedIndexes += emailIndexKeys.length;
+      } else {
+        cursor = '0';
+      }
+      
+      // Safety limit
+      if (scannedIndexes >= 1000) {
+        console.log(`🛑 Reached safety limit of 1000 email indexes`);
+        break;
+      }
+      
+    } while (cursor !== '0');
+    
+    // Sort by timestamp (newest first) and select by index
+    allConversions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    console.log(`📊 Found ${allConversions.length} total V2 conversions globally`);
+    
+    if (conversionIndex >= allConversions.length) {
+      console.log(`❌ Global conversion index ${conversionIndex} out of range (0-${allConversions.length - 1})`);
+      return null;
+    }
+    
+    const selectedConversion = allConversions[conversionIndex];
+    console.log(`✅ Selected global V2 conversion #${conversionIndex}: ${selectedConversion.email} at ${selectedConversion.timestamp}`);
+    
+    return selectedConversion;
+    
+  } catch (error) {
+    console.log('❌ Error in V2 global conversion lookup:', error.message);
+    return null;
+  }
+
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
   
@@ -51,18 +116,23 @@ exports.handler = async (event, context) => {
     const requestData = JSON.parse(event.body || '{}');
     const { email, timestamp, conversion_index, force_debug = false, skip_existing_check = false } = requestData;
     
-    if (!email) {
+    // V2 ENHANCEMENT: Support global conversion index like V1
+    if (!email && conversion_index === undefined) {
       return {
         statusCode: 400,
         headers,
         body: JSON.stringify({ 
-          error: 'Missing required field: email',
-          debug_tip: 'Add force_debug: true and skip_existing_check: true for debugging existing attributions'
+          error: 'Missing required field: email OR conversion_index',
+          examples: [
+            { email: 'user@example.com' },
+            { conversion_index: 0 },
+            { conversion_index: 5, force_debug: true }
+          ]
         })
       };
     }
     
-    console.log(`🚀 Starting V2 multi-touch attribution for: ${email}${timestamp ? ` at ${timestamp}` : ' (most recent conversion)'}`);
+    console.log(`🚀 Starting V2 multi-touch attribution for: ${email || `conversion_index: ${conversion_index}`}${timestamp ? ` at ${timestamp}` : ' (most recent conversion)'}`);
     if (force_debug) console.log('🔍 V2 DEBUG MODE ENABLED');
     if (skip_existing_check) console.log('🔍 V2 SKIP EXISTING CHECK ENABLED');
     
@@ -76,9 +146,9 @@ exports.handler = async (event, context) => {
         headers,
         body: JSON.stringify({ 
           error: 'Conversion not found in V2 conversion indexes',
-          email: email,
+          email: email || 'N/A (using conversion_index)',
+          conversion_index: conversion_index,
           timestamp: timestamp || 'auto-select most recent',
-          conversion_index: conversion_index || 0,
           note: 'Ensure extract-conversion-data-v2.js has completed successfully'
         })
       };
@@ -154,10 +224,10 @@ exports.handler = async (event, context) => {
           data_sources: attributionResult.attribution_summary.data_sources_used || []
         },
         conversion_selection: {
-          email: email,
+          email: email || 'N/A (global index)',
           timestamp: timestamp || 'auto-selected',
           conversion_index: timestamp ? 'exact_match' : (conversion_index || 0),
-          selection_method: timestamp ? 'timestamp_match' : 'index_selection',
+          selection_method: email ? (timestamp ? 'timestamp_match' : 'index_selection') : 'global_index_selection',
           debug_mode: !!force_debug,
           skipped_existing_check: !!skip_existing_check
         },
@@ -186,6 +256,12 @@ exports.handler = async (event, context) => {
 // Get conversion data from V2 conversion indexes
 async function getV2ConversionData(redis, email, timestamp, conversionIndex = 0) {
   try {
+    // NEW: If no email provided, use global conversion index (like V1)
+    if (!email) {
+      console.log(`🔍 V2 Global conversion lookup by index: ${conversionIndex}`);
+      return await getV2GlobalConversionByIndex(redis, conversionIndex);
+    }
+    
     // Primary: Look up conversion by V2 email index (enhanced email validation)
     const emailIndexKey = `conversion_index_v2_email:${encodeURIComponent(email)}`;
     console.log(`🔍 V2 Looking up conversion index: ${emailIndexKey}`);
