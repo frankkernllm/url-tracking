@@ -20,13 +20,13 @@ exports.handler = async (event, context) => {
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
-    console.log('🚀 Starting CONVERSION EXTRACTION and INDEXING v2...');
+    console.log('🚀 Starting CONVERSION EXTRACTION and INDEXING...');
     
     // Load existing progress or start fresh (v2)
     const progressKey = 'conversion_extraction_v2_progress';
     const existingProgress = await getConversionProgress(redis, progressKey);
     
-    console.log(`📊 Resuming conversion extraction v2:`, {
+    console.log(`📊 Resuming conversion extraction:`, {
       total_extracted: existingProgress.total_extracted,
       total_indexed: existingProgress.total_indexed,
       last_cursor: existingProgress.last_cursor,
@@ -61,7 +61,7 @@ exports.handler = async (event, context) => {
     await storeConversionProgress(redis, progressKey, updatedProgress);
     
     const totalTime = Date.now() - startTime;
-    console.log(`✅ CONVERSION extraction and indexing v2 finished in ${totalTime}ms`);
+    console.log(`✅ CONVERSION extraction and indexing finished in ${totalTime}ms`);
     
     return {
       statusCode: 200,
@@ -82,7 +82,7 @@ exports.handler = async (event, context) => {
           total_conversions_filtered_out: updatedProgress.total_filtered_out || 0,
           total_indexes_created: updatedProgress.total_indexed,
           total_keys_scanned: updatedProgress.total_keys_scanned,
-          extraction_method: 'conversion_extraction_indexing_v2',
+          extraction_method: 'conversion_extraction_indexing_v1',
           
           // Data quality stats
           extraction_rate: updatedProgress.total_keys_scanned > 0 
@@ -100,22 +100,22 @@ exports.handler = async (event, context) => {
           latest_conversion: updatedProgress.latest_conversion
         },
         index_types_created: [
-          'conversion_index_v2_email',
-          'conversion_index_v2_ip', 
-          'conversion_index_v2_session',
-          'conversion_index_v2_date'
+          'conversion_index_v1_email',
+          'conversion_index_v1_ip', 
+          'conversion_index_v1_session',
+          'conversion_index_v1_date'
         ],
         performance: {
           conversions_per_second_this_run: Math.round(extractionResult.conversions_extracted_this_run / (totalTime / 1000)),
           indexes_per_second_this_run: Math.round(extractionResult.indexes_created_this_run / (totalTime / 1000))
         },
         next_steps: extractionResult.is_complete ? [
-          '✅ Conversion extraction and indexing v2 complete!',
+          '✅ Conversion extraction and indexing complete!',
           'All conversion data from track.js has been processed',
-          'v2 Conversion indexes created for fast lookup',
-          'System ready for conversion queries and analysis with v2 indexes'
+          'Conversion indexes created for fast lookup',
+          'System ready for conversion queries and analysis'
         ] : [
-          'Conversion extraction v2 continuing...',
+          'Conversion extraction continuing...',
           'Run the same command again to continue processing',
           'Progress is automatically saved and will resume from where it left off',
           `Next run will start from cursor: ${extractionResult.final_cursor}`
@@ -124,12 +124,12 @@ exports.handler = async (event, context) => {
     };
     
   } catch (error) {
-    console.error('❌ Conversion extraction v2 failed:', error);
+    console.error('❌ Conversion extraction failed:', error);
     return {
       statusCode: 500,
       headers,
       body: JSON.stringify({ 
-        error: 'Conversion extraction v2 failed', 
+        error: 'Conversion extraction failed', 
         message: error.message 
       })
     };
@@ -143,11 +143,11 @@ async function getConversionProgress(redis, progressKey) {
     
     if (progressData?.result) {
       const progress = JSON.parse(decodeURIComponent(progressData.result));
-      console.log(`🔄 Found existing conversion progress v2: ${progress.total_extracted} conversions extracted`);
+      console.log(`🔄 Found existing conversion progress: ${progress.total_extracted} conversions extracted`);
       return progress;
     }
   } catch (error) {
-    console.log('⚠️ No existing conversion progress v2 found, starting fresh');
+    console.log('⚠️ No existing conversion progress found, starting fresh');
   }
   
   // Default fresh start
@@ -171,7 +171,7 @@ async function getConversionProgress(redis, progressKey) {
 // Store conversion progress (v2)
 async function storeConversionProgress(redis, progressKey, progress) {
   await redis(`setex/${progressKey}/3600/${encodeURIComponent(JSON.stringify(progress))}`); // 1 hour TTL
-  console.log(`💾 Conversion progress v2 saved: ${progress.total_extracted} total conversions, ${progress.total_indexed} indexes created`);
+  console.log(`💾 Conversion progress saved: ${progress.total_extracted} total conversions, ${progress.total_indexed} indexes created`);
 }
 
 // Extract and index conversions with smart resume
@@ -190,7 +190,7 @@ async function extractAndIndexConversions(redis, existingProgress, maxTime) {
   
   let currentCursor = existingProgress.last_cursor;
   
-  console.log(`🔄 CONVERSION EXTRACTION v2 RESUME: Starting from cursor: ${currentCursor}`);
+  console.log(`🔄 CONVERSION EXTRACTION RESUME: Starting from cursor: ${currentCursor}`);
   console.log(`📊 Previous progress: ${existingProgress.total_extracted} conversions extracted`);
   
   try {
@@ -277,16 +277,16 @@ async function extractAndIndexConversions(redis, existingProgress, maxTime) {
     
     // Build conversion indexes from extracted data (v2)
     if (thisRunConversions.length > 0) {
-      console.log(`🏗️ Building conversion indexes v2 for ${thisRunConversions.length} conversions...`);
+      console.log(`🏗️ Building conversion indexes for ${thisRunConversions.length} conversions...`);
       const indexingResult = await buildConversionIndexes(redis, thisRunConversions, maxTime - (Date.now() - extractionStartTime) - 2000);
       thisRunIndexesCreated = indexingResult.indexes_created;
-      console.log(`✅ Created ${thisRunIndexesCreated} conversion indexes v2`);
+      console.log(`✅ Created ${thisRunIndexesCreated} conversion indexes`);
     }
     
     const isComplete = currentCursor === '0';
     const processingTime = Date.now() - extractionStartTime;
     
-    console.log(`🏁 CONVERSION extraction v2 summary:`);
+    console.log(`🏁 CONVERSION extraction summary:`);
     console.log(`   📊 This run conversions: ${thisRunConversions.length}`);
     console.log(`   📊 Total conversions: ${existingProgress.total_extracted + thisRunConversions.length}`);
     console.log(`   🔍 This run keys scanned: ${thisRunKeysScanned}`);
@@ -316,7 +316,7 @@ async function extractAndIndexConversions(redis, existingProgress, maxTime) {
     };
     
   } catch (error) {
-    console.error('❌ Conversion extraction v2 error:', error);
+    console.error('❌ Conversion extraction error:', error);
     return {
       conversions_extracted_this_run: thisRunConversions.length,
       conversions_filtered_out_this_run: thisRunFilteredOut,
@@ -431,7 +431,7 @@ async function buildConversionIndexes(redis, conversions, maxTime) {
   const indexStartTime = Date.now();
   let indexesCreated = 0;
   
-  console.log(`🏗️ Building conversion indexes v2 for ${conversions.length} conversions...`);
+  console.log(`🏗️ Building conversion indexes for ${conversions.length} conversions...`);
   
   // Group conversions for efficient indexing
   const emailGroups = new Map();
@@ -500,10 +500,10 @@ async function buildConversionIndexes(redis, conversions, maxTime) {
     }
     
   } catch (error) {
-    console.error('❌ Index building v2 error:', error);
+    console.error('❌ Index building error:', error);
   }
   
-  console.log(`✅ Built ${indexesCreated} conversion indexes v2 in ${Date.now() - indexStartTime}ms`);
+  console.log(`✅ Built ${indexesCreated} conversion indexes in ${Date.now() - indexStartTime}ms`);
   
   return { indexes_created: indexesCreated };
 }
@@ -522,7 +522,7 @@ async function buildEmailIndexes(redis, emailGroups, maxTime) {
     
     const batchPromises = batch.map(async ([email, conversions]) => {
       try {
-        const emailKey = `conversion_index_v2_email:${encodeURIComponent(email)}`;
+        const emailKey = `conversion_index_v1_email:${encodeURIComponent(email)}`;
         
         const indexData = {
           email: email,
@@ -531,7 +531,7 @@ async function buildEmailIndexes(redis, emailGroups, maxTime) {
           latest_conversion: conversions[0].timestamp,
           total_revenue: conversions.reduce((sum, conv) => sum + conv.order_total, 0),
           created_at: new Date().toISOString(),
-          index_type: 'email_conversions_v2'
+          index_type: 'email_conversions'
         };
         
         await redis(`setex/${emailKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 1500); // 30 days
@@ -546,7 +546,7 @@ async function buildEmailIndexes(redis, emailGroups, maxTime) {
     created += results.reduce((sum, result) => sum + result, 0);
   }
   
-  console.log(`✅ Created ${created} email conversion indexes v2`);
+  console.log(`✅ Created ${created} email conversion indexes`);
   return created;
 }
 
@@ -564,7 +564,7 @@ async function buildIPIndexes(redis, ipGroups, maxTime) {
     
     const batchPromises = batch.map(async ([encodedIP, conversions]) => {
       try {
-        const ipKey = `conversion_index_v2_ip:${encodedIP}`;
+        const ipKey = `conversion_index_v1_ip:${encodedIP}`;
         
         const indexData = {
           ip_address: conversions[0].conversion_ip || conversions[0].primary_ip,
@@ -574,7 +574,7 @@ async function buildIPIndexes(redis, ipGroups, maxTime) {
           unique_emails: [...new Set(conversions.map(c => c.email))],
           total_revenue: conversions.reduce((sum, conv) => sum + conv.order_total, 0),
           created_at: new Date().toISOString(),
-          index_type: 'ip_conversions_v2'
+          index_type: 'ip_conversions'
         };
         
         await redis(`setex/${ipKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 1500); // 30 days
@@ -589,7 +589,7 @@ async function buildIPIndexes(redis, ipGroups, maxTime) {
     created += results.reduce((sum, result) => sum + result, 0);
   }
   
-  console.log(`✅ Created ${created} IP conversion indexes v2`);
+  console.log(`✅ Created ${created} IP conversion indexes`);
   return created;
 }
 
@@ -607,7 +607,7 @@ async function buildSessionIndexes(redis, sessionGroups, maxTime) {
     
     const batchPromises = batch.map(async ([sessionId, conversions]) => {
       try {
-        const sessionKey = `conversion_index_v2_session:${sessionId}`;
+        const sessionKey = `conversion_index_v1_session:${sessionId}`;
         
         const indexData = {
           session_id: sessionId,
@@ -617,7 +617,7 @@ async function buildSessionIndexes(redis, sessionGroups, maxTime) {
           unique_emails: [...new Set(conversions.map(c => c.email))],
           total_revenue: conversions.reduce((sum, conv) => sum + conv.order_total, 0),
           created_at: new Date().toISOString(),
-          index_type: 'session_conversions_v2'
+          index_type: 'session_conversions'
         };
         
         await redis(`setex/${sessionKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 1500); // 30 days
@@ -632,7 +632,7 @@ async function buildSessionIndexes(redis, sessionGroups, maxTime) {
     created += results.reduce((sum, result) => sum + result, 0);
   }
   
-  console.log(`✅ Created ${created} session conversion indexes v2`);
+  console.log(`✅ Created ${created} session conversion indexes`);
   return created;
 }
 
@@ -650,7 +650,7 @@ async function buildDateIndexes(redis, dateGroups, maxTime) {
     
     const batchPromises = batch.map(async ([date, conversions]) => {
       try {
-        const dateKey = `conversion_index_v2_date:${date}`;
+        const dateKey = `conversion_index_v1_date:${date}`;
         
         const indexData = {
           date: date,
@@ -660,7 +660,7 @@ async function buildDateIndexes(redis, dateGroups, maxTime) {
           unique_ips: [...new Set(conversions.flatMap(c => [c.conversion_ip, c.primary_ip, ...(c.unique_ips || [])]).filter(Boolean))],
           total_revenue: conversions.reduce((sum, conv) => sum + conv.order_total, 0),
           created_at: new Date().toISOString(),
-          index_type: 'date_conversions_v2'
+          index_type: 'date_conversions'
         };
         
         await redis(`setex/${dateKey}/2592000/${encodeURIComponent(JSON.stringify(indexData))}`, 1500); // 30 days
@@ -675,7 +675,7 @@ async function buildDateIndexes(redis, dateGroups, maxTime) {
     created += results.reduce((sum, result) => sum + result, 0);
   }
   
-  console.log(`✅ Created ${created} date conversion indexes v2`);
+  console.log(`✅ Created ${created} date conversion indexes`);
   return created;
 }
 
