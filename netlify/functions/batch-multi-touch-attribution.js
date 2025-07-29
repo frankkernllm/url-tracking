@@ -44,9 +44,18 @@ exports.handler = async (event, context) => {
     
     console.log(`🚀 Starting batch multi-touch attribution: ${query_type}${force_overwrite ? ' (FORCE OVERWRITE MODE)' : ''}`);
     
-    // Load existing progress or start fresh
+    // Load existing progress or start fresh (clear progress if force overwrite)
     const progressKey = `batch_attribution_progress:${query_type}:${date || 'all'}`;
-    const existingProgress = await getBatchProgress(redis, progressKey, resume_from);
+    let existingProgress;
+    
+    if (force_overwrite) {
+      console.log(`🔄 Force overwrite mode: Clearing existing batch progress`);
+      // Clear existing progress when force overwriting
+      await redis(`del/${progressKey}`);
+      existingProgress = await getBatchProgress(redis, progressKey, resume_from);
+    } else {
+      existingProgress = await getBatchProgress(redis, progressKey, resume_from);
+    }
     
     console.log(`📊 Batch attribution progress:`, {
       conversions_processed: existingProgress.conversions_processed,
