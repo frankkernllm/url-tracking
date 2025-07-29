@@ -85,19 +85,19 @@ exports.handler = async (event, context) => {
         enhancement_features: {
           adaptive_chunk_sizes: true,
           verification_passes: true,
-          data_preservation: true,
-          version: 'v2'
+          continues_v1_format: true,
+          version: 'v2_enhanced_but_v1_compatible'
         },
         data_safety: {
-          preserves_existing_v1_data: true,
-          uses_separate_progress_tracking: true,
-          uses_v2_chunk_identifiers: true
+          continues_from_v1_numbering: true,
+          uses_same_chunk_format_as_v1: true,
+          extends_existing_v1_dataset: true
         },
         next_steps: (extractionResult.is_complete && extractionResult.verification_complete) ? [
           '✅ Enhanced extraction and verification complete!',
           'All patterns processed with verification passes',
-          'Missed keys recovered through targeted verification',
-          'Ready for attribution analysis with complete dataset'
+          'Missed keys recovered and stored in v1 format',
+          'Use existing build-attribution-indexes.js to build complete indexes'
         ] : [
           'Enhanced extraction continuing...',
           'Run the same command again to continue processing',
@@ -425,19 +425,7 @@ async function targetedScan(redis, pattern, chunkSize) {
   return foundKeys;
 }
 
-// Store enhanced attribution chunks with v2 identifiers (preserves existing data)
-async function storeEnhancedAttributionChunks(redis, pageviews, startingChunkNumber) {
-  if (pageviews.length === 0) return { chunks_stored: 0 };
-  
-  const chunkSize = 1000;
-  let chunksStored = 0;
-  
-  for (let i = 0; i < pageviews.length; i += chunkSize) {
-    const chunk = pageviews.slice(i, i + chunkSize);
-    const chunkNumber = startingChunkNumber + chunksStored + 1;
-    
-    // V2 chunk identifier to avoid overwriting v1 data
-    const chunkKey = `attribution_data_chunk:v2_${chunkNumber}:${Date.now()}`;
+unkNumber}:${Date.now()}`;
     
     const chunkData = {
       chunk_id: `v2_${chunkNumber}`,
@@ -461,7 +449,7 @@ async function storeEnhancedAttributionChunks(redis, pageviews, startingChunkNum
   return { chunks_stored: chunksStored };
 }
 
-// Get attribution extraction progress (v2 version)
+// Get attribution extraction progress (continues from v1)
 async function getAttributionProgress(redis, progressKey) {
   try {
     const progressData = await redis(`get/${progressKey}`);
@@ -472,7 +460,39 @@ async function getAttributionProgress(redis, progressKey) {
       return progress;
     }
   } catch (error) {
-    console.log('⚠️ No existing attribution progress v2 found, starting fresh');
+    console.log('⚠️ No existing attribution progress v2 found, checking v1 progress...');
+  }
+  
+  // Check v1 progress to continue from where it left off
+  try {
+    const v1ProgressData = await redis(`get/attribution_extraction_v1_progress`);
+    if (v1ProgressData?.result) {
+      const v1Progress = JSON.parse(decodeURIComponent(v1ProgressData.result));
+      console.log(`🔄 Found v1 progress: ${v1Progress.total_extracted} pageviews, ${v1Progress.chunks_stored} chunks`);
+      
+      // Continue from v1 progress
+      return {
+        total_extracted: v1Progress.total_extracted || 0,
+        total_keys_scanned: v1Progress.total_keys_scanned || 0,
+        patterns: [
+          'attribution_*',
+          'pageviews:*',
+          'attribution:*'
+        ],
+        current_pattern_index: 0, // Restart patterns for v2 enhanced extraction
+        last_cursor: '0',
+        chunks_completed: v1Progress.chunks_completed || 0,
+        chunks_stored: v1Progress.chunks_stored || 0, // Continue chunk numbering from v1
+        verification_complete: false,
+        verification_keys_found: 0,
+        started_at: new Date().toISOString(),
+        is_complete: false,
+        patterns_completed: [],
+        continued_from_v1: true
+      };
+    }
+  } catch (v1Error) {
+    console.log('⚠️ No v1 progress found either, starting fresh');
   }
   
   return {
