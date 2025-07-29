@@ -1,7 +1,6 @@
-// Enhanced Multi-Source Attribution Data Extractor v2
+// Enhanced Multi-Source Attribution Data Extractor v2 - Fixed
 // Path: netlify/functions/extract-attribution-data-v2.js
-// Purpose: Extract ALL pageviews with verification passes and adaptive chunk sizes
-// NEW: Combines adaptive chunking + verification passes to catch missed keys
+// Purpose: Extract ALL pageviews with verification passes, continues v1 format
 
 exports.handler = async (event, context) => {
   context.callbackWaitsForEmptyEventLoop = false;
@@ -21,7 +20,7 @@ exports.handler = async (event, context) => {
     const startTime = Date.now();
     const maxProcessingTime = 25000; // 25 seconds max
     
-    console.log('🚀 Starting ENHANCED attribution data extraction v2...');
+    console.log('🚀 Starting ENHANCED attribution data extraction v2 (v1 compatible)...');
     
     // Load existing progress or start fresh (v2 to avoid conflicts)
     const progressKey = 'attribution_extraction_v2_progress';
@@ -31,7 +30,8 @@ exports.handler = async (event, context) => {
       total_extracted: existingProgress.total_extracted,
       current_pattern_index: existingProgress.current_pattern_index,
       verification_complete: existingProgress.verification_complete,
-      last_cursor: existingProgress.last_cursor
+      last_cursor: existingProgress.last_cursor,
+      continued_from_v1: existingProgress.continued_from_v1
     });
     
     // ENHANCED extraction with adaptive chunking + verification
@@ -196,11 +196,11 @@ async function extractEnhancedAttributionData(redis, existingProgress, maxTime) 
       }
     }
     
-    // Store accumulated pageviews in v2 chunks (preserves existing v1 data)
+    // Store accumulated pageviews in v1 format (continues v1 numbering)
     if (thisRunPageviews.length > 0) {
       const chunkResult = await storeEnhancedAttributionChunks(redis, thisRunPageviews, existingProgress.chunks_stored);
       thisRunChunksStored = chunkResult.chunks_stored;
-      console.log(`💾 Stored ${thisRunChunksStored} enhanced attribution chunks (v2) with ${thisRunPageviews.length} total pageviews`);
+      console.log(`💾 Stored ${thisRunChunksStored} chunks (v1 format) with ${thisRunPageviews.length} total pageviews`);
     }
     
     const isComplete = mainExtractionComplete;
@@ -425,24 +425,35 @@ async function targetedScan(redis, pattern, chunkSize) {
   return foundKeys;
 }
 
-unkNumber}:${Date.now()}`;
+// Store attribution chunks exactly like v1 (continues from v1 numbering)
+async function storeEnhancedAttributionChunks(redis, pageviews, startingChunkNumber) {
+  if (pageviews.length === 0) return { chunks_stored: 0 };
+  
+  const chunkSize = 1000;
+  let chunksStored = 0;
+  
+  for (let i = 0; i < pageviews.length; i += chunkSize) {
+    const chunk = pageviews.slice(i, i + chunkSize);
+    const chunkNumber = startingChunkNumber + chunksStored + 1;
+    
+    // EXACT v1 format - continues v1 numbering
+    const chunkKey = `attribution_data_chunk:v1_${chunkNumber}:${Date.now()}`;
     
     const chunkData = {
-      chunk_id: `v2_${chunkNumber}`,
+      chunk_id: `v1_${chunkNumber}`,
       pageview_count: chunk.length,
       pageviews: chunk,
       created_at: new Date().toISOString(),
-      version: 'v2_enhanced',
-      extraction_method: 'enhanced_with_verification',
+      version: 'v1', // Same as v1 for compatibility
       attribution_ready: true
     };
     
     try {
       await redis(`setex/${chunkKey}/2592000/${encodeURIComponent(JSON.stringify(chunkData))}`);
       chunksStored++;
-      console.log(`💾 Stored enhanced chunk v2_${chunkNumber} with ${chunk.length} pageviews`);
+      console.log(`💾 Stored chunk v1_${chunkNumber} with ${chunk.length} pageviews (v2 enhanced data)`);
     } catch (error) {
-      console.error(`❌ Failed to store enhanced chunk v2_${chunkNumber}:`, error);
+      console.error(`❌ Failed to store chunk v1_${chunkNumber}:`, error);
     }
   }
   
