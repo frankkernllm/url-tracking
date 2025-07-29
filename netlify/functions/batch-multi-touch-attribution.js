@@ -30,7 +30,7 @@ exports.handler = async (event, context) => {
     
     // Parse request body
     const requestData = JSON.parse(event.body || '{}');
-    const { query_type, date, emails, limit = 100, resume_from } = requestData;
+    const { query_type, date, emails, limit = 100, resume_from, force_overwrite = false } = requestData;
     
     if (!query_type) {
       return {
@@ -42,7 +42,7 @@ exports.handler = async (event, context) => {
       };
     }
     
-    console.log(`🚀 Starting batch multi-touch attribution: ${query_type}`);
+    console.log(`🚀 Starting batch multi-touch attribution: ${query_type}${force_overwrite ? ' (FORCE OVERWRITE MODE)' : ''}`);
     
     // Load existing progress or start fresh
     const progressKey = `batch_attribution_progress:${query_type}:${date || 'all'}`;
@@ -51,7 +51,8 @@ exports.handler = async (event, context) => {
     console.log(`📊 Batch attribution progress:`, {
       conversions_processed: existingProgress.conversions_processed,
       attributions_created: existingProgress.attributions_created,
-      resume_from: existingProgress.resume_from
+      resume_from: existingProgress.resume_from,
+      force_overwrite: force_overwrite
     });
     
     // Step 1: Get conversions to process
@@ -79,7 +80,8 @@ exports.handler = async (event, context) => {
       redis, 
       conversionsToProcess, 
       existingProgress,
-      maxProcessingTime - (Date.now() - startTime)
+      maxProcessingTime - (Date.now() - startTime),
+      force_overwrite
     );
     
     // Step 3: Update progress
@@ -107,6 +109,7 @@ exports.handler = async (event, context) => {
           // This run stats
           conversions_processed_this_run: batchResult.processed_this_run,
           attributions_created_this_run: batchResult.attributions_created_this_run,
+          attributions_overwritten_this_run: batchResult.overwritten_this_run || 0,
           attribution_failures_this_run: batchResult.failures_this_run,
           processing_time_ms: totalTime,
           
@@ -118,7 +121,7 @@ exports.handler = async (event, context) => {
           // Batch status
           batch_complete: batchResult.batch_complete,
           query_type: query_type,
-          query_parameters: { date, emails: emails?.length || 0, limit }
+          query_parameters: { date, emails: emails?.length || 0, limit, force_overwrite }
         },
         
         attribution_samples: batchResult.attribution_samples, // Sample results for verification
@@ -132,7 +135,7 @@ exports.handler = async (event, context) => {
         next_steps: batchResult.batch_complete ? [
           '✅ Batch attribution processing complete!',
           'All requested conversions have been processed',
-          'Attribution results stored permanently in Redis',
+          force_overwrite ? 'Existing attributions were overwritten as requested' : 'Attribution results stored permanently in Redis',
           'Use attribution analytics endpoints for reporting'
         ] : [
           'Batch processing in progress...',
@@ -322,15 +325,16 @@ async function getConversionsForBatchProcessing(redis, queryType, params) {
 }
 
 // Process multiple conversions in batch
-async function processBatchAttributions(redis, conversions, existingProgress, maxTime) {
+async function processBatchAttributions(redis, conversions, existingProgress, maxTime, forceOverwrite = false) {
   const batchStartTime = Date.now();
   let processedThisRun = 0;
   let attributionsCreatedThisRun = 0;
+  let overwrittenThisRun = 0;
   let failuresThisRun = 0;
   let finalResumePoint = null;
   const attributionSamples = [];
   
-  console.log(`⚡ Processing ${conversions.length} conversions in batch...`);
+  console.log(`⚡ Processing ${conversions.length} conversions in batch${forceOverwrite ? ' (FORCE OVERWRITE MODE)' : ''}...`);
   
   for (let i = 0; i < conversions.length; i++) {
     // Time check
@@ -345,14 +349,27 @@ async function processBatchAttributions(redis, conversions, existingProgress, ma
     try {
       console.log(`🔄 Processing conversion ${i + 1}/${conversions.length}: ${conversion.email}`);
       
-      // Check if attribution already exists
-      const existingKey = `multi_touch_attribution:${conversion.email}:${conversion.timestamp}`;
-      const existingResult = await redis(`get/${existingKey}`, 1000);
-      
-      if (existingResult?.result) {
-        console.log(`⚠️ Attribution already exists, skipping: ${conversion.email}`);
-        processedThisRun++;
-        continue;
+      // Check if attribution already exists (unless force overwrite is enabled)
+      let existingAttribution = false;
+      if (!forceOverwrite) {
+        const existingKey = `multi_touch_attribution:${conversion.email}:${conversion.timestamp}`;
+        const existingResult = await redis(`get/${existingKey}`, 1000);
+        
+        if (existingResult?.result) {
+          console.log(`⚠️ Attribution already exists, skipping: ${conversion.email}`);
+          processedThisRun++;
+          existingAttribution = true;
+          continue;
+        }
+      } else {
+        // In force overwrite mode, check if we're overwriting
+        const existingKey = `multi_touch_attribution:${conversion.email}:${conversion.timestamp}`;
+        const existingResult = await redis(`get/${existingKey}`, 1000);
+        
+        if (existingResult?.result) {
+          console.log(`🔄 Force overwriting existing attribution: ${conversion.email}`);
+          overwrittenThisRun++;
+        }
       }
       
       // Perform multi-touch attribution (reusing Phase 1 logic)
@@ -373,11 +390,13 @@ async function processBatchAttributions(redis, conversions, existingProgress, ma
             journey_duration_days: attributionResult.attribution_summary.journey_duration_days,
             attribution_confidence: attributionResult.attribution_summary.attribution_confidence.score,
             first_touch_source: attributionResult.attribution_summary.first_touch?.source,
-            last_touch_source: attributionResult.attribution_summary.last_touch?.source
+            last_touch_source: attributionResult.attribution_summary.last_touch?.source,
+            overwritten: forceOverwrite && overwrittenThisRun > 0
           });
         }
         
-        console.log(`✅ Attribution created: ${conversion.email} (${attributionResult.attribution_summary.total_touchpoints} touchpoints)`);
+        const actionText = forceOverwrite && overwrittenThisRun > 0 ? 'overwritten' : 'created';
+        console.log(`✅ Attribution ${actionText}: ${conversion.email} (${attributionResult.attribution_summary.total_touchpoints} touchpoints)`);
       } else {
         failuresThisRun++;
         console.log(`❌ Attribution storage failed: ${conversion.email}`);
@@ -387,7 +406,8 @@ async function processBatchAttributions(redis, conversions, existingProgress, ma
       
       // Progress logging every 10 conversions
       if (processedThisRun % 10 === 0) {
-        console.log(`📊 Batch progress: ${processedThisRun}/${conversions.length} processed, ${attributionsCreatedThisRun} attributions created`);
+        const statusText = forceOverwrite ? `${attributionsCreatedThisRun} created/overwritten` : `${attributionsCreatedThisRun} created`;
+        console.log(`📊 Batch progress: ${processedThisRun}/${conversions.length} processed, ${statusText}`);
       }
       
     } catch (conversionError) {
@@ -402,6 +422,9 @@ async function processBatchAttributions(redis, conversions, existingProgress, ma
   console.log(`🏁 Batch processing summary:`);
   console.log(`   📊 Processed: ${processedThisRun}/${conversions.length}`);
   console.log(`   ✅ Attributions created: ${attributionsCreatedThisRun}`);
+  if (forceOverwrite && overwrittenThisRun > 0) {
+    console.log(`   🔄 Attributions overwritten: ${overwrittenThisRun}`);
+  }
   console.log(`   ❌ Failures: ${failuresThisRun}`);
   console.log(`   ⏱️ Batch time: ${batchTime}ms`);
   console.log(`   🏁 Complete: ${batchComplete}`);
@@ -409,6 +432,7 @@ async function processBatchAttributions(redis, conversions, existingProgress, ma
   return {
     processed_this_run: processedThisRun,
     attributions_created_this_run: attributionsCreatedThisRun,
+    overwritten_this_run: overwrittenThisRun,
     failures_this_run: failuresThisRun,
     batch_complete: batchComplete,
     final_resume_point: finalResumePoint,
